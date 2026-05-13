@@ -44,6 +44,16 @@ describe('tenantJwtHeaderMismatchReason', () => {
     expect(tenantJwtHeaderMismatchReason(null, userWithTenant('aa'))).toBeNull();
   });
 
+  it('prefers app metadata tenant over legacy user metadata', () => {
+    const u = {
+      ...userWithTenant('legacy-tenant'),
+      app_metadata: { tenant_id: 'app-tenant' },
+    } as User;
+
+    expect(tenantJwtHeaderMismatchReason('app-tenant', u)).toBeNull();
+    expect(tenantJwtHeaderMismatchReason('legacy-tenant', u)).toBe('tenant_mismatch');
+  });
+
   it('returns null when both match (case-insensitive)', () => {
     const id = '2FFF887D-A78E-4256-9116-6E02FE38C614';
     expect(

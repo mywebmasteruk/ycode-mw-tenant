@@ -10,6 +10,16 @@ import { noCache } from '@/lib/api-response';
  */
 export async function POST(request: NextRequest) {
   try {
+    const tenantId = request.headers.get('x-tenant-id')?.trim();
+    const tenantSlug = request.headers.get('x-tenant-slug')?.trim();
+
+    if (!tenantId) {
+      return noCache(
+        { error: 'Tenant context is required' },
+        403
+      );
+    }
+
     const body = await request.json();
     const { email, redirectTo } = body;
 
@@ -40,11 +50,12 @@ export async function POST(request: NextRequest) {
 
     const redirect = resolveInviteRedirectUrl(request, redirectTo);
 
-    // Use Supabase's built-in invite functionality
     const { data, error } = await client.auth.admin.inviteUserByEmail(email, {
       redirectTo: redirect,
       data: {
         invited_at: new Date().toISOString(),
+        tenant_id: tenantId,
+        ...(tenantSlug ? { tenant_slug: tenantSlug } : {}),
       },
     });
 
@@ -54,6 +65,33 @@ export async function POST(request: NextRequest) {
         { error: error.message },
         400
       );
+    }
+
+    if (data.user?.id) {
+      const { error: metadataError } = await client.auth.admin.updateUserById(
+        data.user.id,
+        {
+          app_metadata: {
+            ...(data.user.app_metadata || {}),
+            tenant_id: tenantId,
+            ...(tenantSlug ? { tenant_slug: tenantSlug } : {}),
+          },
+          user_metadata: {
+            ...(data.user.user_metadata || {}),
+            invited_at: data.user.user_metadata?.invited_at || new Date().toISOString(),
+            tenant_id: tenantId,
+            ...(tenantSlug ? { tenant_slug: tenantSlug } : {}),
+          },
+        },
+      );
+
+      if (metadataError) {
+        console.error('[invite] Error assigning tenant metadata:', metadataError);
+        return noCache(
+          { error: metadataError.message },
+          500
+        );
+      }
     }
 
     return noCache({

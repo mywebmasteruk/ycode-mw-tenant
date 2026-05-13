@@ -8,7 +8,7 @@
  * reprovision** left the same slug pointing at a **new** `tenant_registry.id`,
  * so the builder loaded an **empty** tenant until the cache expired.
  *
- * - **Success entries** (tenant found): default **4s** (`TENANT_LOOKUP_CACHE_SUCCESS_MS`).
+ * - **Success entries** (tenant found): default **30s** (`TENANT_LOOKUP_CACHE_SUCCESS_MS`).
  * - **Miss entries** (no row): default **2s** (`TENANT_LOOKUP_CACHE_MISS_MS`) — avoids
  *   hammering Supabase on typos while a **new** tenant becomes visible quickly.
  * - **`bypassCache: true`**: used for provisioning publish — always hits Supabase so
@@ -42,7 +42,7 @@ function successTtlMs(): number {
   const raw = process.env.TENANT_LOOKUP_CACHE_SUCCESS_MS?.trim();
   if (raw === '0') return 0;
   const n = raw ? Number(raw) : NaN;
-  return Number.isFinite(n) && n >= 0 ? n : 4000;
+  return Number.isFinite(n) && n >= 0 ? n : 30000;
 }
 
 function missTtlMs(): number {

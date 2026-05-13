@@ -174,12 +174,12 @@ export async function proxy(request: NextRequest) {
         const {
           data: { user },
         } = await supabase.auth.getUser();
-        const tid = user?.user_metadata?.tenant_id;
+        const tid = user?.app_metadata?.tenant_id || user?.user_metadata?.tenant_id;
         if (tid) {
-          request.headers.set('x-tenant-id', tid);
+          request.headers.set('x-tenant-id', String(tid));
           request.headers.set(
             'x-tenant-slug',
-            String(user?.user_metadata?.tenant_slug ?? ''),
+            String(user?.app_metadata?.tenant_slug || user?.user_metadata?.tenant_slug || ''),
           );
         }
       } catch {

@@ -1,6 +1,10 @@
 import { NextRequest } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { noCache } from '@/lib/api-response';
+import {
+  authUserBelongsToTenant,
+  filterAuthUsersForTenant,
+} from '@/lib/masjidweb/auth-users-tenant-scope';
 
 /**
  * GET /ycode/api/auth/users
@@ -9,6 +13,15 @@ import { noCache } from '@/lib/api-response';
  */
 export async function GET(request: NextRequest) {
   try {
+    const tenantId = request.headers.get('x-tenant-id')?.trim();
+
+    if (!tenantId) {
+      return noCache(
+        { error: 'Tenant context is required' },
+        403
+      );
+    }
+
     const client = await getSupabaseAdmin();
 
     if (!client) {
@@ -18,7 +31,6 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Fetch all users from Supabase Auth
     const { data, error } = await client.auth.admin.listUsers({
       page: 1,
       perPage: 1000,
@@ -32,7 +44,6 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Separate users into active and pending
     const activeUsers: Array<{
       id: string;
       email: string;
@@ -48,23 +59,14 @@ export async function GET(request: NextRequest) {
       invited_at: string;
     }> = [];
 
-    for (const user of data.users) {
-      // Get metadata - check both user_metadata and raw_user_meta_data
-       
+    for (const user of filterAuthUsersForTenant(data.users, tenantId)) {
       const userAny = user as any;
-      const metadata = user.user_metadata || userAny.raw_user_meta_data || {};
-
-      // Check if this user was invited (we set invited_at when sending invite)
+      const appMetadata = user.app_metadata || userAny.raw_app_meta_data || {};
+      const userMetadata = user.user_metadata || userAny.raw_user_meta_data || {};
+      const metadata = { ...userMetadata, ...appMetadata };
       const wasInvited = !!metadata.invited_at;
-
-      // A user is "pending" if:
-      // 1. They were invited AND haven't signed in after the invite
-      // 2. They have no identities (no password set)
       const hasIdentities = user.identities && user.identities.length > 0;
       const hasSignedIn = user.last_sign_in_at !== null;
-
-      // User is pending if they were invited but haven't completed setup
-      // (no sign-in after invite, or no identities meaning no password set)
       const isPending = wasInvited && (!hasSignedIn || !hasIdentities);
 
       if (!isPending) {
@@ -77,11 +79,10 @@ export async function GET(request: NextRequest) {
           last_sign_in_at: user.last_sign_in_at || null,
         });
       } else {
-        // User was invited but hasn't completed setup
         pendingInvites.push({
           id: user.id,
           email: user.email || '',
-          invited_at: metadata.invited_at || user.created_at,
+          invited_at: String(metadata.invited_at || user.created_at),
         });
       }
     }
@@ -108,6 +109,15 @@ export async function GET(request: NextRequest) {
  */
 export async function DELETE(request: NextRequest) {
   try {
+    const tenantId = request.headers.get('x-tenant-id')?.trim();
+
+    if (!tenantId) {
+      return noCache(
+        { error: 'Tenant context is required' },
+        403
+      );
+    }
+
     const { searchParams } = new URL(request.url);
     const userId = searchParams.get('id');
 
@@ -124,6 +134,23 @@ export async function DELETE(request: NextRequest) {
       return noCache(
         { error: 'Supabase not configured' },
         500
+      );
+    }
+
+    const { data: targetUser, error: getUserError } = await client.auth.admin.getUserById(userId);
+
+    if (getUserError) {
+      console.error('[users] Error fetching user before delete:', getUserError);
+      return noCache(
+        { error: getUserError.message },
+        400
+      );
+    }
+
+    if (!targetUser.user || !authUserBelongsToTenant(targetUser.user, tenantId)) {
+      return noCache(
+        { error: 'User not found for this tenant' },
+        404
       );
     }
 

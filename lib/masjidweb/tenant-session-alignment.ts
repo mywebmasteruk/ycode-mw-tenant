@@ -20,7 +20,7 @@ export function tenantJwtHeaderMismatchReason(
   headerTenantId: string | null | undefined,
   user: User,
 ): 'tenant_mismatch' | null {
-  const fromJwt = user.user_metadata?.tenant_id;
+  const fromJwt = user.app_metadata?.tenant_id || user.user_metadata?.tenant_id;
   if (typeof fromJwt !== 'string' || !fromJwt.trim()) {
     return null;
   }

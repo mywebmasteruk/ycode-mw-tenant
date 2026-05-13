@@ -27,13 +27,17 @@ export function extractSubdomain(
 const PUBLIC_API_PREFIXES = [
   '/ycode/api/setup/',
   '/ycode/api/supabase/',
-  '/ycode/api/auth/',
   '/ycode/api/v1/',
 ];
 
 const PUBLIC_COLLECTION_ITEM_SUFFIXES = ['/items/filter', '/items/load-more'];
 
-const PUBLIC_API_EXACT = ['/ycode/api/revalidate', '/ycode/api/health'];
+const PUBLIC_API_EXACT = [
+  '/ycode/api/revalidate',
+  '/ycode/api/health',
+  '/ycode/api/auth/session',
+  '/ycode/api/auth/callback',
+];
 
 /**
  * Determine whether an API route is public (skips auth).

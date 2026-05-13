@@ -47,7 +47,7 @@ describe('lookupTenant cache', () => {
     vi.useFakeTimers();
     await lookupTenant('acme');
     expect(fetch).toHaveBeenCalledTimes(1);
-    vi.advanceTimersByTime(5000);
+    vi.advanceTimersByTime(31000);
     await lookupTenant('acme');
     expect(fetch).toHaveBeenCalledTimes(2);
     vi.useRealTimers();

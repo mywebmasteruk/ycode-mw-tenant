@@ -55,8 +55,15 @@ describe('isPublicApiRoute', () => {
     expect(isPublicApiRoute('/ycode/api/supabase/config', 'GET')).toBe(true);
   });
 
-  it('allows auth routes', () => {
+  it('allows auth bootstrap routes', () => {
+    expect(isPublicApiRoute('/ycode/api/auth/session', 'GET')).toBe(true);
     expect(isPublicApiRoute('/ycode/api/auth/callback', 'GET')).toBe(true);
+  });
+
+  it('keeps sensitive auth management routes protected', () => {
+    expect(isPublicApiRoute('/ycode/api/auth/users', 'GET')).toBe(false);
+    expect(isPublicApiRoute('/ycode/api/auth/users', 'DELETE')).toBe(false);
+    expect(isPublicApiRoute('/ycode/api/auth/invite', 'POST')).toBe(false);
   });
 
   it('allows v1 public API', () => {
