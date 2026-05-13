@@ -501,16 +501,18 @@ export async function POST(request: NextRequest) {
     try {
       // Detect color variable changes by comparing current hash to last-published hash
       let globalChanged = false;
+      let globalChangedReason = '';
       try {
         const currentColorHash = await getColorVariablesHash();
         const lastColorHash = await getSettingByKey('color_variables_published_hash');
         if (currentColorHash !== lastColorHash) {
           globalChanged = true;
+          globalChangedReason = `color hash mismatch: ${lastColorHash?.slice(0, 8) ?? 'null'} → ${currentColorHash.slice(0, 8)}`;
           await setSetting('color_variables_published_hash', currentColorHash);
         }
-      } catch {
-        // Safety: if we can't verify color variables, assume they changed
+      } catch (err) {
         globalChanged = true;
+        globalChangedReason = `color hash check failed: ${err instanceof Error ? err.message : 'unknown'}`;
       }
 
       // NOTE: Locales/translations are published on every full publish but
@@ -572,7 +574,7 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      console.log(`[Cache] directly changed pages: ${publishedPageIds.length}, indirectly affected: ${indirectlyAffectedPageIds.length}`);
+      console.log(`[Cache] directly changed pages: ${publishedPageIds.length}, indirectly affected: ${indirectlyAffectedPageIds.length}, globalChanged: ${globalChanged}${globalChangedReason ? ` (${globalChangedReason})` : ''}`);
 
       const invalidationResult = await selectiveInvalidation(
         publishedPageIds,
