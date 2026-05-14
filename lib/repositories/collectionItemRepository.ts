@@ -199,7 +199,7 @@ export async function getItemsByCollectionId(
     filterIds = matchingItemIds;
   }
 
-  // Build base query for counting
+  // Build count query
   let countQuery = client
     .from('collection_items')
     .select('*', { count: 'exact', head: true })
@@ -208,17 +208,12 @@ export async function getItemsByCollectionId(
 
   countQuery = applyTenantEq(countQuery, tenantId);
 
-  // For published queries, only include publishable items
   if (is_published) {
     countQuery = countQuery.eq('is_publishable', true);
   }
-
-  // Apply item ID filter to count query (from itemIds filter and/or search)
   if (filterIds !== null) {
     countQuery = countQuery.in('id', filterIds);
   }
-
-  // Apply deleted filter to count query
   if (filters && 'deleted' in filters) {
     if (filters.deleted === false) {
       countQuery = countQuery.is('deleted_at', null);
@@ -229,14 +224,7 @@ export async function getItemsByCollectionId(
     countQuery = countQuery.is('deleted_at', null);
   }
 
-  // Execute count query
-  const { count, error: countError } = await countQuery;
-
-  if (countError) {
-    throw new Error(`Failed to count collection items: ${countError.message}`);
-  }
-
-  // Build query for fetching items
+  // Build data query
   let query = client
     .from('collection_items')
     .select('*')
@@ -247,30 +235,21 @@ export async function getItemsByCollectionId(
 
   query = applyTenantEq(query, tenantId);
 
-  // For published queries, only include publishable items
   if (is_published) {
     query = query.eq('is_publishable', true);
   }
-
-  // Apply item ID filter (from itemIds filter and/or search)
   if (filterIds !== null) {
     query = query.in('id', filterIds);
   }
-
-  // Apply filters - only filter deleted_at when explicitly specified
   if (filters && 'deleted' in filters) {
     if (filters.deleted === false) {
       query = query.is('deleted_at', null);
     } else if (filters.deleted === true) {
       query = query.not('deleted_at', 'is', null);
     }
-    // If deleted is explicitly undefined, include all items (no filter)
   } else {
-    // No filters provided: default to excluding deleted items
     query = query.is('deleted_at', null);
   }
-
-  // Apply pagination
   if (filters?.limit !== undefined) {
     query = query.limit(filters.limit);
   }
@@ -278,13 +257,17 @@ export async function getItemsByCollectionId(
     query = query.range(filters.offset, filters.offset + (filters.limit || 25) - 1);
   }
 
-  const { data, error } = await query;
+  // Run count and data queries in parallel
+  const [countResult, dataResult] = await Promise.all([countQuery, query]);
 
-  if (error) {
-    throw new Error(`Failed to fetch collection items: ${error.message}`);
+  if (countResult.error) {
+    throw new Error(`Failed to count collection items: ${countResult.error.message}`);
+  }
+  if (dataResult.error) {
+    throw new Error(`Failed to fetch collection items: ${dataResult.error.message}`);
   }
 
-  return { items: data || [], total: count || 0 };
+  return { items: dataResult.data || [], total: countResult.count || 0 };
 }
 
 /**
@@ -639,6 +622,29 @@ export async function getItemIdsByFieldValue(
 }
 
 /**
+ * Batch fetch items with their values by arbitrary IDs (cross-collection).
+ * Returns a map keyed by item ID for O(1) lookups.
+ * Uses 2 queries total regardless of item count.
+ */
+export async function getItemsWithValuesByIds(
+  ids: string[],
+  is_published: boolean = false
+): Promise<Record<string, CollectionItemWithValues>> {
+  if (ids.length === 0) return {};
+
+  const items = await getItemsByIds(ids, is_published);
+  if (items.length === 0) return {};
+
+  const valuesByItem = await getValuesByItemIds(items.map(i => i.id), is_published);
+
+  const result: Record<string, CollectionItemWithValues> = {};
+  for (const item of items) {
+    result[item.id] = { ...item, values: valuesByItem[item.id] || {} };
+  }
+  return result;
+}
+
+/**
  * Get multiple items with their values
  * @param collection_id - Collection UUID
  * @param is_published - Filter for draft (false) or published (true) items and values. Defaults to false (draft).
@@ -647,7 +653,8 @@ export async function getItemIdsByFieldValue(
 export async function getItemsWithValues(
   collection_id: string,
   is_published: boolean = false,
-  filters?: QueryFilters
+  filters?: QueryFilters,
+  knownFieldTypes?: Record<string, string>,
 ): Promise<{ items: CollectionItemWithValues[], total: number }> {
   const { items, total } = await getItemsByCollectionId(collection_id, is_published, filters);
 
@@ -656,7 +663,7 @@ export async function getItemsWithValues(
   }
 
   const itemIds = items.map(item => item.id);
-  const valuesByItem = await getValuesByItemIds(itemIds, is_published);
+  const valuesByItem = await getValuesByItemIds(itemIds, is_published, knownFieldTypes);
 
   const itemsWithValues: CollectionItemWithValues[] = items.map(item => ({
     ...item,

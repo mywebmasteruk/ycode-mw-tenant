@@ -2,9 +2,9 @@
  * Utilities for pages and folders
  */
 
-import { IconProps } from '@/components/ui/icon';
+import type { IconProps } from '@/components/ui/icon';
 import type { Page, PageFolder, PageSettings, FieldVariable, Translation, Locale } from '../types';
-import { getTranslatableKey } from './localisation-utils';
+import { getTranslatableKey } from './locale-runtime';
 import { getTiptapTextContent } from '@/lib/text-format-utils';
 
 /**

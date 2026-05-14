@@ -1,18 +1,22 @@
+import { redirect, permanentRedirect } from 'next/navigation';
 import { unstable_cache } from 'next/cache';
 import Link from 'next/link';
 import { cache } from 'react';
-import { fetchHomepage, fetchErrorPage } from '@/lib/page-fetcher';
+import { fetchHomepage, fetchErrorPage, splitPageData, reassemblePageData, slimPageData } from '@/lib/page-fetcher';
+import type { PageData } from '@/lib/page-fetcher';
 import PageRenderer from '@/components/PageRenderer';
 import PasswordForm from '@/components/PasswordForm';
 import { generatePageMetadata, fetchGlobalPageSettings } from '@/lib/generate-page-metadata';
-import { parseAuthCookie, getPasswordProtection, fetchFoldersForAuth } from '@/lib/page-auth';
 import { getSettingByKey } from '@/lib/repositories/settingsRepository';
+import { matchRedirect } from '@/lib/redirect-utils';
+import { parseAuthCookie, getPasswordProtection, fetchFoldersForAuth } from '@/lib/page-auth';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import {
   tenantAllPagesTag,
   tenantRouteTag,
 } from '@/lib/masjidweb/tenant-cache-tags';
 import { getSiteBaseUrl } from '@/lib/url-utils';
+import type { Redirect as RedirectType } from '@/types';
 import type { Metadata } from 'next';
 
 // Avoid ISR full-route caching on Netlify (stale HTML after publish). Data uses
@@ -45,21 +49,37 @@ const getTenantCacheContext = cache(async () => {
  */
 async function fetchPublishedHomepage() {
   const { effectiveTid, keySuffix } = await getTenantCacheContext();
+  const tags = [
+    tenantAllPagesTag(effectiveTid),
+    tenantRouteTag(effectiveTid, '/'),
+  ];
+  const opts = { tags, revalidate: false as const };
+
   try {
-    return await unstable_cache(
-      async () => fetchHomepage(true),
-      ['data-for-route-/', keySuffix],
-      {
-        tags: [
-          tenantAllPagesTag(effectiveTid),
-          tenantRouteTag(effectiveTid, '/'),
-        ],
-        revalidate: false,
-      }
-    )();
+    const [core, layers] = await Promise.all([
+      unstable_cache(
+        async () => {
+          const data = await fetchHomepage(true);
+          if (!data) return null;
+          return splitPageData(data as PageData).core;
+        },
+        ['core-/', keySuffix],
+        opts
+      )(),
+      unstable_cache(
+        async () => {
+          const data = await fetchHomepage(true);
+          if (!data) return null;
+          return splitPageData(data as PageData).layers;
+        },
+        ['layers-/', keySuffix],
+        opts
+      )(),
+    ]);
+
+    if (!core) return null;
+    return reassemblePageData(core, layers || []);
   } catch {
-    // Fallback to uncached fetch when data exceeds cache size limit (2MB).
-    // If runtime credentials are unavailable (e.g. build-time), return null.
     try {
       return await fetchHomepage(true);
     } catch {
@@ -92,6 +112,18 @@ async function fetchCachedGlobalSettings() {
   }
 }
 
+async function fetchCachedRedirects(): Promise<RedirectType[] | null> {
+  try {
+    return await unstable_cache(
+      async () => getSettingByKey('redirects') as Promise<RedirectType[] | null>,
+      ['data-for-redirects'],
+      { tags: ['all-pages'], revalidate: false }
+    )();
+  } catch {
+    return null;
+  }
+}
+
 async function fetchCachedFoldersForAuth() {
   const { effectiveTid, keySuffix } = await getTenantCacheContext();
   try {
@@ -109,8 +141,11 @@ async function fetchCachedErrorPage(errorCode: 401) {
   const { effectiveTid, keySuffix } = await getTenantCacheContext();
   try {
     return await unstable_cache(
-      async () => fetchErrorPage(errorCode, true),
-      [`data-for-error-page-${errorCode}`, keySuffix],
+      async () => {
+        const data = await fetchErrorPage(errorCode, true);
+        return data ? slimPageData(data) : null;
+      },
+      [`error-${errorCode}`, keySuffix],
       { tags: [tenantAllPagesTag(effectiveTid)], revalidate: false }
     )();
   } catch {
@@ -119,6 +154,19 @@ async function fetchCachedErrorPage(errorCode: 401) {
 }
 
 export default async function Home() {
+  // Check for redirects targeting the homepage
+  const redirects = await fetchCachedRedirects();
+  if (redirects && Array.isArray(redirects)) {
+    const matched = matchRedirect('/', redirects);
+    if (matched) {
+      if (matched.type === '302') {
+        redirect(matched.newUrl);
+      } else {
+        permanentRedirect(matched.newUrl);
+      }
+    }
+  }
+
   // Cache-first homepage path; pagination is served through internal dynamic routes.
   const data = await fetchPublishedHomepage();
 
@@ -167,6 +215,7 @@ export default async function Home() {
             layers={errorPageLayers.layers || []}
             components={errorComponents}
             generatedCss={globalSettings.publishedCss || undefined}
+            colorVariablesCss={globalSettings.colorVariablesCss || undefined}
             globalCustomCodeHead={globalSettings.globalCustomCodeHead}
             globalCustomCodeBody={globalSettings.globalCustomCodeBody}
             passwordProtection={{

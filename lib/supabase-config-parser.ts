@@ -8,43 +8,40 @@ import type { SupabaseConfig, SupabaseCredentials } from '@/types';
  * @returns Connection URL with password inserted
  */
 function replacePasswordPlaceholder(connectionUrl: string, password: string): string {
-  // URL-encode the password to handle special characters
   const encodedPassword = encodeURIComponent(password);
-
-  // Replace [YOUR-PASSWORD] with the actual password
   return connectionUrl.replace('[YOUR-PASSWORD]', encodedPassword);
 }
 
 /**
- * Extract the project ID from the connection URL
+ * Try to extract the Supabase project ID from the connection URL.
  *
- * @param connectionUrl - PostgreSQL connection string with [YOUR-PASSWORD] placeholder
- * @returns Project ID
+ * Hosted Supabase uses usernames like `postgres.abc123`, so the project ref
+ * is the part after the dot. Self-hosted instances won't have this format,
+ * so extraction is best-effort.
+ *
+ * @returns Project ID or null if the format doesn't match
  */
-function extractProjectId(connectionUrl: string): string {
-  // Example: "postgresql://postgres.abc123:[YOUR-PASSWORD]..." → extract "abc123"
+function tryExtractProjectId(connectionUrl: string): string | null {
+  // Pooler format: postgresql://postgres.abc123:...
   const match = connectionUrl.match(/\/\/postgres\.([a-z0-9]+):/);
-
-  if (match) return match[1];
-
-  throw new Error(
-    'Invalid SUPABASE_CONNECTION_URL, the expected format is: postgresql://postgres.xxxxxxxxxx:[YOUR-PASSWORD]@aws-x-xx-xxxx-x.pooler.supabase.com:6543/postgres'
-  );
+  return match ? match[1] : null;
 }
 
 /**
  * Parse Supabase Connection URL
  *
- * Parses a PostgreSQL connection string and extracts all necessary Supabase configuration.
+ * Parses a PostgreSQL connection string and extracts database connection details.
+ * Works with both hosted Supabase pooler URLs and arbitrary Postgres connection strings
+ * (e.g. self-hosted Supabase instances).
  *
- * Expected formats:
- * 1. Direct: postgresql://postgres:[PASSWORD]@db.[PROJECT_ID].supabase.co:5432/postgres
- * 2. Pooler: postgresql://postgres.[PROJECT_ID]:[PASSWORD]@aws-x-xx-xxxx-x.pooler.supabase.com:6543/postgres
+ * The `supabaseUrl` parameter allows callers to provide an explicit Supabase API URL
+ * instead of deriving it from the project ref. Required for self-hosted instances.
  *
  * @param connectionUrl - PostgreSQL connection string (with password already replaced)
+ * @param supabaseUrl - Explicit Supabase API URL (for self-hosted instances)
  * @returns Parsed connection details
  */
-export function parseConnectionUrl(connectionUrl: string): {
+export function parseConnectionUrl(connectionUrl: string, supabaseUrl?: string): {
   projectId: string;
   projectUrl: string;
   dbPassword: string;
@@ -60,11 +57,28 @@ export function parseConnectionUrl(connectionUrl: string): {
     const dbName = url.pathname.slice(1);
     const dbUser = url.username;
     const dbPassword = decodeURIComponent(url.password);
-    const projectId = extractProjectId(connectionUrl);
+
+    const projectId = tryExtractProjectId(connectionUrl);
+
+    let projectUrl: string;
+
+    if (supabaseUrl) {
+      projectUrl = supabaseUrl.replace(/\/+$/, '');
+    } else if (projectId) {
+      projectUrl = `https://${projectId}.supabase.co`;
+    } else {
+      throw new Error(
+        'Could not derive the Supabase API URL from the connection string.\n\n' +
+        'For self-hosted Supabase instances, set the SUPABASE_URL environment variable ' +
+        '(or provide the "Supabase API URL" in the setup wizard).\n\n' +
+        'For hosted Supabase, the expected connection string format is:\n' +
+        'postgresql://postgres.[PROJECT-ID]:[YOUR-PASSWORD]@aws-x-xx-xxxx-x.pooler.supabase.com:6543/postgres'
+      );
+    }
 
     return {
-      projectId,
-      projectUrl: `https://${projectId}.supabase.co`,
+      projectId: projectId || 'self-hosted',
+      projectUrl,
       dbPassword,
       dbHost,
       dbPort,
@@ -72,16 +86,19 @@ export function parseConnectionUrl(connectionUrl: string): {
       dbUser,
     };
   } catch (error) {
-    // If it's already one of our custom errors, just re-throw it
-    if (error instanceof Error && error.message.includes('SUPABASE_CONNECTION_URL')) {
+    if (error instanceof Error && (
+      error.message.includes('SUPABASE_URL') ||
+      error.message.includes('Supabase API URL')
+    )) {
       throw error;
     }
 
-    // Otherwise, wrap it with a helpful message
     const message = error instanceof Error ? error.message : 'Invalid format';
     throw new Error(
       `Failed to parse SUPABASE_CONNECTION_URL: ${message}\n\n` +
-      'Expected format: postgresql://postgres.[PROJECT-ID]:[YOUR-PASSWORD]@aws-x-xx-xxxx-x.pooler.supabase.com:6543/postgres'
+      'Expected format:\n' +
+      '  Hosted:      postgresql://postgres.[PROJECT-ID]:[YOUR-PASSWORD]@aws-x-xx-xxxx-x.pooler.supabase.com:6543/postgres\n' +
+      '  Self-hosted: any valid PostgreSQL connection string + set SUPABASE_URL env var'
     );
   }
 }
@@ -89,20 +106,21 @@ export function parseConnectionUrl(connectionUrl: string): {
 /**
  * Parse Supabase config and return full credentials
  *
- * @param config - SupabaseConfig with 4 core values
+ * @param config - SupabaseConfig with 4 core values + optional supabaseUrl
  * @returns Full SupabaseCredentials with derived properties
  */
 export function parseSupabaseConfig(config: SupabaseConfig): SupabaseCredentials {
-  // Replace [YOUR-PASSWORD] placeholder with actual password
   const connectionUrlResolved = replacePasswordPlaceholder(config.connectionUrl, config.dbPassword);
 
-  // Parse the resolved connection URL
-  const { dbPassword: _, ...parsedUrl } = parseConnectionUrl(connectionUrlResolved);
+  const { dbPassword: _, ...parsedUrl } = parseConnectionUrl(
+    connectionUrlResolved,
+    config.supabaseUrl,
+  );
 
   return {
     anonKey: config.anonKey,
     serviceRoleKey: config.serviceRoleKey,
-    connectionUrl: config.connectionUrl, // Original with placeholder
+    connectionUrl: config.connectionUrl,
     dbPassword: config.dbPassword,
     ...parsedUrl,
   };
@@ -113,13 +131,18 @@ export function parseSupabaseConfig(config: SupabaseConfig): SupabaseCredentials
  *
  * @param connectionUrl - URL to validate (can have [YOUR-PASSWORD] placeholder)
  * @param password - Optional password to test with
+ * @param supabaseUrl - Optional explicit Supabase API URL (for self-hosted)
  * @returns True if valid, throws error otherwise
  */
-export function validateConnectionUrl(connectionUrl: string, password?: string): boolean {
+export function validateConnectionUrl(
+  connectionUrl: string,
+  password?: string,
+  supabaseUrl?: string,
+): boolean {
   const testUrl = password
     ? replacePasswordPlaceholder(connectionUrl, password)
     : connectionUrl.replace('[YOUR-PASSWORD]', 'dummy-password-for-validation');
 
-  parseConnectionUrl(testUrl);
+  parseConnectionUrl(testUrl, supabaseUrl);
   return true;
 }

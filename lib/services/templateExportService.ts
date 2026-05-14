@@ -15,6 +15,9 @@ const EXPORT_TABLES = [
   // Asset-related (no FKs to other exportable tables)
   'asset_folders',
   'assets',
+  // Design tokens
+  'color_variables',
+  'fonts',
   // Page-related
   'page_folders',
   'pages',
@@ -39,6 +42,7 @@ const EXPORT_TABLES = [
  */
 const EXCLUDED_COLUMNS: Record<string, string[]> = {
   assets: ['storage_path'], // Template assets use public_url instead
+  fonts: ['storage_path', 'file_hash'], // Custom font files use url instead
 };
 
 /**
@@ -280,10 +284,12 @@ export async function exportTemplateSQL(
         query = query.where('is_published', false);
       }
 
-      // For assets table, exclude any seeded/external icons
+      // For assets table, include all user-uploaded assets but exclude those
+      // sourced from other templates (which would have stale CDN URLs)
       if (table === 'assets') {
         query = query.where(function() {
-          this.whereNull('source').orWhere('source', 'file-manager');
+          this.whereNull('source')
+            .orWhereNot('source', 'like', 'template:%');
         });
       }
 
@@ -360,6 +366,12 @@ export async function exportTemplateSQL(
             value = `{{ASSET_URL:${row.filename}}}`;
           }
 
+          // Replace custom font url with placeholder (same pattern as assets)
+          if (table === 'fonts' && col === 'url' && row.storage_path) {
+            const fontFilename = `font-${row.name || row.id}.${row.kind || 'woff2'}`;
+            value = `{{ASSET_URL:${fontFilename}}}`;
+          }
+
           // Pass toPlaceholder to formatSqlValue for JSONB columns
           // This ensures UUIDs embedded in JSON are also replaced
           return formatSqlValue(value, toPlaceholder);
@@ -377,6 +389,17 @@ export async function exportTemplateSQL(
       sqlStatements.push('');
     }
 
+    // Post-process: replace any remaining occurrences of mapped UUIDs in the SQL.
+    // This catches UUIDs embedded inside string values that the column-level
+    // and JSONB-level replacement missed — e.g. color variable IDs in CSS
+    // "var(--uuid)", layer IDs in translation content_keys "layer:uuid:text", etc.
+    let finalSql = sqlStatements.join('\n');
+    for (const [uuid, placeholder] of uuidMapping) {
+      if (finalSql.includes(uuid)) {
+        finalSql = finalSql.replaceAll(uuid, placeholder);
+      }
+    }
+
     // Get the latest migration name for template versioning
     const lastMigration = await getLatestMigrationName(knex);
 
@@ -388,7 +411,7 @@ export async function exportTemplateSQL(
       version: '1.0.0',
       createdAt: new Date().toISOString().split('T')[0],
       tables: EXPORT_TABLES.filter((t) =>
-        sqlStatements.some((s) => s.includes(`INSERT INTO ${t}`))
+        finalSql.includes(`INSERT INTO ${t}`)
       ),
       stats,
       submitterEmail: submitterEmail || undefined,
@@ -398,7 +421,7 @@ export async function exportTemplateSQL(
     return {
       success: true,
       manifest,
-      sql: sqlStatements.join('\n'),
+      sql: finalSql,
     };
   } catch (error) {
     console.error('[exportTemplateSQL] Failed:', error);
@@ -413,7 +436,7 @@ export async function exportTemplateSQL(
 
 /**
  * Collect assets from Supabase Storage for template export.
- * Only collects user-uploaded assets (not from other templates).
+ * Includes user-uploaded images and custom font files.
  */
 export async function collectTemplateAssets(): Promise<
   Array<{
@@ -449,7 +472,6 @@ export async function collectTemplateAssets(): Promise<
 
   for (const asset of assets) {
     try {
-      // Download from Supabase Storage
       const { data, error: downloadError } = await client.storage
         .from(STORAGE_BUCKET)
         .download(asset.storage_path);
@@ -473,6 +495,41 @@ export async function collectTemplateAssets(): Promise<
         `[collectTemplateAssets] Error processing ${asset.filename}:`,
         err
       );
+    }
+  }
+
+  // Collect custom font files (fonts with storage_path)
+  const { data: fonts, error: fontsError } = await client
+    .from('fonts')
+    .select('*')
+    .not('storage_path', 'is', null)
+    .eq('is_published', false)
+    .is('deleted_at', null);
+
+  if (fontsError) {
+    console.warn('[collectTemplateAssets] Failed to fetch fonts:', fontsError);
+  } else if (fonts && fonts.length > 0) {
+    for (const font of fonts) {
+      try {
+        const { data, error: downloadError } = await client.storage
+          .from(STORAGE_BUCKET)
+          .download(font.storage_path);
+
+        if (downloadError || !data) {
+          console.warn(`[collectTemplateAssets] Failed to download font ${font.name}:`, downloadError);
+          continue;
+        }
+
+        const buffer = await data.arrayBuffer();
+        const fontFilename = `font-${font.name || font.id}.${font.kind || 'woff2'}`;
+        results.push({
+          filename: fontFilename,
+          base64: Buffer.from(buffer).toString('base64'),
+          mimeType: font.kind === 'woff2' ? 'font/woff2' : 'font/ttf',
+        });
+      } catch (err) {
+        console.warn(`[collectTemplateAssets] Error processing font ${font.name}:`, err);
+      }
     }
   }
 

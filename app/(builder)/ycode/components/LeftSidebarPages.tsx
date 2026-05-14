@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, startTransition, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useRef, useImperativeHandle, startTransition, Suspense, lazy } from 'react';
 import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import Icon from '@/components/ui/icon';
@@ -21,6 +21,10 @@ import { Separator } from '@/components/ui/separator';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { generateUniqueSlug, generateUniqueFolderSlug, getNextNumberFromNames, getParentContextFromSelection, calculateNextOrder, findNextSelection } from '@/lib/page-utils';
 
+export interface LeftSidebarPagesHandle {
+  checkAndCloseSettings: () => Promise<boolean>;
+}
+
 interface LeftSidebarPagesProps {
   pages: Page[];
   folders: PageFolder[];
@@ -29,13 +33,13 @@ interface LeftSidebarPagesProps {
   setCurrentPageId: (pageId: string | null) => void;
 }
 
-export default function LeftSidebarPages({
+const LeftSidebarPages = React.forwardRef<LeftSidebarPagesHandle, LeftSidebarPagesProps>(({
   pages,
   folders,
   currentPageId,
   onPageSelect,
   setCurrentPageId,
-}: LeftSidebarPagesProps) {
+}, ref) => {
   const { urlState } = useEditorUrl();
   const activeSidebarTab = useEditorStore((state) => state.activeSidebarTab);
   const { openPage, openPageEdit, openPageLayers, navigateToLayers, navigateToPage, navigateToPageEdit, navigateToCollections } = useEditorActions();
@@ -48,6 +52,25 @@ export default function LeftSidebarPages({
   const selectedItemIdRef = React.useRef<string | null>(currentPageId);
   const pageSettingsPanelRef = useRef<PageSettingsPanelHandle>(null);
   const folderSettingsPanelRef = useRef<FolderSettingsPanelHandle>(null);
+
+  useImperativeHandle(ref, () => ({
+    checkAndCloseSettings: async () => {
+      if (showPageSettings && pageSettingsPanelRef.current) {
+        const canProceed = await pageSettingsPanelRef.current.checkUnsavedChanges();
+        if (!canProceed) return false;
+        setShowPageSettings(false);
+        setEditingPage(null);
+      }
+      if (showFolderSettings && folderSettingsPanelRef.current) {
+        const canProceed = await folderSettingsPanelRef.current.checkUnsavedChanges();
+        if (!canProceed) return false;
+        setShowFolderSettings(false);
+        setEditingFolder(null);
+      }
+      return true;
+    },
+  }), [showPageSettings, showFolderSettings]);
+
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<{ id: string; type: 'folder' | 'page' } | null>(null);
 
@@ -895,4 +918,8 @@ export default function LeftSidebarPages({
       />
     </>
   );
-}
+});
+
+LeftSidebarPages.displayName = 'LeftSidebarPages';
+
+export default LeftSidebarPages;

@@ -12,6 +12,7 @@
 import type { StaticImageData } from 'next/image';
 
 import airtableLogo from './airtable/logo.svg';
+import webflowLogo from './webflow/logo.svg';
 import mailerliteLogo from './mailerlite/logo.svg';
 import mailchimpLogo from './mailchimp/logo.svg';
 import zapierLogo from './zapier/logo.svg';
@@ -61,6 +62,14 @@ export const apps: AppDefinition[] = [
     name: 'Airtable',
     description: 'One-way sync from Airtable tables to your Ycode collections with real-time webhook support.',
     logo: airtableLogo,
+    categories: ['popular', 'cms-data'],
+    implemented: true,
+  },
+  {
+    id: 'webflow',
+    name: 'Webflow CMS',
+    description: 'One-click migrate a Webflow CMS site into Ycode collections, including assets and references.',
+    logo: webflowLogo,
     categories: ['popular', 'cms-data'],
     implemented: true,
   },

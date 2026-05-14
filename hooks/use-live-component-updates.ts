@@ -167,7 +167,7 @@ export function useLiveComponentUpdates(): UseLiveComponentUpdatesReturn {
     
     // Also update all instances of this component across all pages
     const { updateComponentOnLayers } = usePagesStore.getState();
-    updateComponentOnLayers(payload.component_id, payload.layers);
+    updateComponentOnLayers(payload.component_id);
   }, []);
   
   // === BROADCAST FUNCTIONS ===

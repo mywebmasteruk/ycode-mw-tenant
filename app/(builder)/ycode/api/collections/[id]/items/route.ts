@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getItemsWithValues, createItem, getItemWithValues, getMaxIdValue, enrichItemsWithStatus, enrichSingleItemWithStatus, publishSingleItem, unpublishSingleItem } from '@/lib/repositories/collectionItemRepository';
+import { enrichItemsWithCountValues } from '@/lib/repositories/collectionCountRepository';
 import { getCollectionById } from '@/lib/repositories/collectionRepository';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { clearAllCache } from '@/lib/services/cacheService';
@@ -78,6 +79,9 @@ export async function GET(
 
     // Enrich items with computed status values before sorting
     await enrichItemsWithStatus(items, id, statusFieldId);
+
+    // Enrich items with computed count values (always against published children)
+    await enrichItemsWithCountValues(items, id);
 
     // Apply dynamic filters from filter layer conditions
     if (dynamicFilters.length > 0) {

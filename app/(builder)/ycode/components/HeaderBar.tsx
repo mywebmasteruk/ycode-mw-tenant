@@ -84,10 +84,10 @@ export default function HeaderBar({
   const router = useRouter();
   const pathname = usePathname();
   const pageDropdownRef = useRef<HTMLDivElement>(null);
-  const { currentPageCollectionItemId, currentPageId: storeCurrentPageId, isPreviewMode, setPreviewMode, openFileManager, setKeyboardShortcutsOpen, setActiveSidebarTab, lastDesignUrl, setLastDesignUrl } = useEditorStore();
+  const { currentPageCollectionItemId, currentPageId: storeCurrentPageId, isPreviewMode, setPreviewMode, openFileManager, setKeyboardShortcutsOpen, setActiveSidebarTab, lastDesignUrl, setLastDesignUrl, previewReturnUrl, previewReturnTab, setPreviewReturn } = useEditorStore();
   const { folders, pages: storePages } = usePagesStore();
   const { items, fields, collections, selectedCollectionId: storeSelectedCollectionId, setSelectedCollectionId } = useCollectionsStore();
-  const { locales, selectedLocaleId, setSelectedLocaleId, translations } = useLocalisationStore();
+  const { locales, selectedLocaleId, setSelectedLocaleId, translations, loadTranslations } = useLocalisationStore();
   const { navigateToLayers, navigateToCollection, navigateToCollections, updateQueryParams, routeType } = useEditorUrl();
 
   // Optimistic nav button state - set immediately on click, cleared when URL catches up
@@ -109,6 +109,16 @@ export default function HeaderBar({
       setOptimisticNav(null);
     }
   }, [routeType, optimisticNav]);
+
+  // Turn off preview mode only after navigation to the return route completes,
+  // keeping the preview overlay visible during the transition to avoid flashing
+  useEffect(() => {
+    if (!isPreviewMode || previewReturnUrl) return;
+    const isDesignRoute = routeType === 'layers' || routeType === 'page' || routeType === 'component' || routeType === null;
+    if (!isDesignRoute) {
+      setPreviewMode(false);
+    }
+  }, [routeType, isPreviewMode, previewReturnUrl, setPreviewMode]);
 
   // Derive active button: optimistic state takes priority, then URL
   const activeNavButton = useMemo((): NavButton | null => {
@@ -499,7 +509,13 @@ export default function HeaderBar({
           <DropdownMenuContent align="end">
             <DropdownMenuRadioGroup
               value={selectedLocaleId || ''}
-              onValueChange={(value) => setSelectedLocaleId(value)}
+              onValueChange={(value) => {
+                setSelectedLocaleId(value);
+                // Eager-load translations so the canvas reflects the new locale
+                // without waiting for component-level effects to run. The store
+                // short-circuits for the default locale and for cached locales.
+                loadTranslations(value);
+              }}
             >
               {locales.map((locale) => (
                 <DropdownMenuRadioItem key={locale.id} value={locale.id}>
@@ -597,14 +613,37 @@ export default function HeaderBar({
           variant="secondary"
           onClick={() => {
             if (isPreviewMode) {
-              // Exit preview mode
+              if (previewReturnUrl) {
+                // Navigate back while keeping preview visible — the useEffect
+                // above will turn off preview once the route change completes
+                if (previewReturnTab) {
+                  setActiveSidebarTab(previewReturnTab);
+                }
+                router.push(previewReturnUrl);
+                setPreviewReturn(null);
+                return;
+              }
+
               setPreviewMode(false);
               updateQueryParams({ preview: undefined });
-            } else {
-              // Enter preview mode
-              setPreviewMode(true);
-              updateQueryParams({ preview: 'true' });
+              return;
             }
+
+            setPreviewMode(true);
+
+            // Preview renders the current page, so when invoked from a non-design
+            // route (CMS, forms, etc.) we need to jump to the layers view first
+            const isDesignRoute = routeType === 'layers' || routeType === 'page' || routeType === 'component' || routeType === null;
+            if (!isDesignRoute && currentPageId) {
+              setPreviewReturn(window.location.pathname + window.location.search, activeTab);
+              setActiveSidebarTab('layers');
+              const params = new URLSearchParams(window.location.search);
+              params.set('preview', 'true');
+              router.push(`/ycode/layers/${currentPageId}?${params.toString()}`);
+              return;
+            }
+
+            updateQueryParams({ preview: 'true' });
           }}
           disabled={!currentPage || isSaving}
           className={isPreviewMode ? 'bg-black text-white hover:bg-black/90 dark:bg-white dark:text-black dark:hover:bg-white/90' : ''}

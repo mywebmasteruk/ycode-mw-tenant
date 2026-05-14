@@ -34,6 +34,7 @@ import {
 
 // 4. Hooks
 import { useEditorUrl } from '@/hooks/use-editor-url';
+import { useEditComponent } from '@/hooks/use-edit-component';
 import { useZoom } from '@/hooks/use-zoom';
 import { useUndoRedo } from '@/hooks/use-undo-redo';
 
@@ -57,10 +58,11 @@ import RichTextEditorSheet from './RichTextEditorSheet';
 
 // 6. Utils
 import { buildLocalizedSlugPath, buildLocalizedDynamicPageUrl } from '@/lib/page-utils';
-import { getTranslationValue } from '@/lib/localisation-utils';
+import { getTranslationValue, applyCmsTranslations, extractLayerTranslatableItemsShallow } from '@/lib/localisation-utils';
 import { cn } from '@/lib/utils';
-import { getCollectionVariable, canDeleteLayer, findLayerById, findParentCollectionLayer, canLayerHaveLink, updateLayerProps, removeRichTextSublayer } from '@/lib/layer-utils';
-import { CANVAS_BORDER, CANVAS_PADDING } from '@/lib/canvas-utils';
+import { getCollectionVariable, canDeleteLayer, findLayerById, findParentCollectionLayer, canLayerHaveLink, updateLayerProps, removeRichTextSublayer, isRichTextLayer, getLayerCmsFieldBinding } from '@/lib/layer-utils';
+import { CANVAS_BORDER, CANVAS_PADDING, updateViewportOverrides } from '@/lib/canvas-utils';
+import { BREAKPOINTS } from '@/lib/breakpoint-utils';
 import { buildFieldGroupsForLayer, flattenFieldGroups, filterFieldGroupsByType, SIMPLE_TEXT_FIELD_TYPES } from '@/lib/collection-field-utils';
 import { buildFieldVariableData } from '@/lib/variable-format-utils';
 import { getRichTextValue } from '@/lib/tiptap-utils';
@@ -105,9 +107,13 @@ interface CenterCanvasProps {
   liveComponentUpdates?: UseLiveComponentUpdatesReturn | null;
 }
 
+// Viewport widths are derived from BREAKPOINTS to avoid sitting on exact
+// breakpoint boundaries where CSS zoom sub-pixel rounding can toggle styles.
+const MOBILE_MAX_WIDTH = BREAKPOINTS.find(bp => bp.value === 'mobile')!.maxWidth!;
+
 const viewportSizes: Record<ViewportMode, { width: string; label: string; icon: string }> = {
   desktop: { width: '1366px', label: 'Desktop', icon: '🖥️' },
-  tablet: { width: '768px', label: 'Tablet', icon: '📱' },
+  tablet: { width: `${MOBILE_MAX_WIDTH + 10}px`, label: 'Tablet', icon: '📱' },
   mobile: { width: '375px', label: 'Mobile', icon: '📱' },
 };
 
@@ -596,9 +602,6 @@ const CenterCanvas = React.memo(function CenterCanvas({
   const [containerHeight, setContainerHeight] = useState(0);
   const [containerWidth, setContainerWidth] = useState(0);
 
-  // Store initial canvas height on load - used as baseline for iframe height
-  const initialCanvasHeightRef = useRef<number | null>(null);
-
   // Track whether zoom calculation is ready (prevents flash of wrong zoom on initial load)
   const [isCanvasReady, setIsCanvasReady] = useState(false);
 
@@ -620,8 +623,15 @@ const CenterCanvas = React.memo(function CenterCanvas({
   const selectLayerWithSublayer = useEditorStore((state) => state.selectLayerWithSublayer);
 
   const selectedLocaleId = useLocalisationStore((state) => state.selectedLocaleId);
-  const getSelectedLocale = useLocalisationStore((state) => state.getSelectedLocale);
   const translations = useLocalisationStore((state) => state.translations);
+  const locales = useLocalisationStore((state) => state.locales);
+  // Derive the selected locale here (instead of via getSelectedLocale()) so it
+  // is in scope for callbacks defined below — non-default locales gate every
+  // canvas mutation handler into a no-op (read-only translation mode).
+  const selectedLocale = useMemo(
+    () => (selectedLocaleId ? locales.find((l) => l.id === selectedLocaleId) ?? null : null),
+    [selectedLocaleId, locales]
+  );
   const activeUIState = useEditorStore((state) => state.activeUIState);
   const editingComponentId = useEditorStore((state) => state.editingComponentId);
   const setCurrentPageId = useEditorStore((state) => state.setCurrentPageId);
@@ -672,20 +682,22 @@ const CenterCanvas = React.memo(function CenterCanvas({
     }
   }, [isTextEditing, editingLayerId, selectedLayerId, requestFinishEditing]);
 
-  // Close rich text sheet if a different layer is selected
+  // Close rich text sheet if a different layer is selected. Flushing the
+  // pending translation save first ensures the last keystroke is persisted
+  // when the user changes selection mid-edit. The flush function is defined
+  // later in this component, so we go through a ref to keep effect ordering
+  // and avoid a "use-before-declaration" cycle.
+  const flushRichTextTranslationSaveRef = useRef<() => void>(() => { });
   useEffect(() => {
     if (richTextSheetLayerId && selectedLayerId !== richTextSheetLayerId) {
+      flushRichTextTranslationSaveRef.current();
       closeRichTextSheet();
     }
   }, [richTextSheetLayerId, selectedLayerId, closeRichTextSheet]);
 
-  // Load draft when page changes (ensure draft exists before rendering)
-  const loadDraft = usePagesStore((state) => state.loadDraft);
-  useEffect(() => {
-    if (currentPageId && !currentDraft) {
-      loadDraft(currentPageId);
-    }
-  }, [currentPageId, loadDraft, currentDraft]);
+  // Draft loading is owned by LeftSidebar (wrapped in startTransition).
+  // The store-level in-flight guard in loadDraft makes any concurrent call
+  // a no-op if LeftSidebar is not mounted.
 
   // Reset content height when page changes to force Canvas to recalculate
   useEffect(() => {
@@ -711,6 +723,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
   const components = useComponentsStore((state) => state.components);
   const componentDrafts = useComponentsStore((state) => state.componentDrafts);
   const [collectionItems, setCollectionItems] = useState<Array<{ id: string; label: string }>>([]);
+  const [collectionItemSearch, setCollectionItemSearch] = useState('');
 
   // Get editing component's variables for default value display
   // Depends on `components` array to react to variable changes
@@ -741,18 +754,12 @@ const CenterCanvas = React.memo(function CenterCanvas({
     return parseInt(viewportSizes[viewportMode].width);
   }, [viewportMode]);
 
-  // Calculate default iframe height to fill canvas (set once on load)
+  // Calculate default iframe height to fill canvas — track current container height
+  // so the white canvas always fills all the available vertical space, even when the
+  // surrounding panels (sidebar, inspector, etc.) resize the canvas container.
   const defaultCanvasHeight = useMemo(() => {
     if (!containerHeight) return 600;
-    const calculatedHeight = containerHeight - CANVAS_PADDING;
-
-    // Store the initial height when first calculated
-    if (initialCanvasHeightRef.current === null) {
-      initialCanvasHeightRef.current = calculatedHeight;
-    }
-
-    // Always use the initial height - don't change with zoom or container changes
-    return initialCanvasHeightRef.current;
+    return Math.max(0, containerHeight - CANVAS_PADDING);
   }, [containerHeight]);
 
   // Effective iframe height: max of reported content and canvas height
@@ -776,12 +783,6 @@ const CenterCanvas = React.memo(function CenterCanvas({
     }
     return viewportWidth;
   }, [editingComponentId, reportedContentWidth, viewportWidth]);
-
-  // Calculate "zoom to fit" level - where scaled height equals container height
-  const zoomToFitLevel = useMemo(() => {
-    if (!containerHeight || !iframeContentHeight) return 100;
-    return ((containerHeight - CANVAS_PADDING) / iframeContentHeight) * 100;
-  }, [containerHeight, iframeContentHeight]);
 
   // Calculate content height for zoom calculations
   // Use actual iframe content height for both modes
@@ -813,6 +814,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
   const previewContentWidth = parseInt(viewportSizes[viewportMode].width);
   const {
     zoom: previewZoom,
+    zoomMode: previewZoomMode,
     zoomIn: previewZoomIn,
     zoomOut: previewZoomOut,
     resetZoom: previewResetZoom,
@@ -821,7 +823,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
   } = useZoom({
     containerRef: previewContainerRef,
     contentWidth: previewContentWidth,
-    contentHeight: previewContentHeight || previewContentWidth,
+    contentHeight: previewContentHeight || defaultCanvasHeight,
     minZoom: 10,
     maxZoom: 1000,
     zoomStep: 10,
@@ -829,44 +831,133 @@ const CenterCanvas = React.memo(function CenterCanvas({
     iframeRef,
   });
 
-  // Determine if we should center (zoomed out beyond "zoom to fit" level)
-  const shouldCenter = zoom < zoomToFitLevel;
-
-  // Calculate final iframe height - ensure it fills the visible canvas at any zoom level
-  // When zoomed out (e.g. 52%), the iframe must be taller so that scaled it still fills the canvas
-  // When switching viewports (Desktop → Phone), zoom changes and this recalculates automatically
+  // Calculate final iframe height — always stretch so the scaled canvas fills the
+  // visible viewport at any zoom level. When the actual content is taller than the
+  // viewport, use the content height instead so scrolling works naturally.
   const finalIframeHeight = useMemo(() => {
-    // For component editing, use content-based height directly (don't force-fill container)
     if (editingComponentId) return iframeContentHeight;
-
     if (!containerHeight || zoom <= 0) return iframeContentHeight;
 
-    // Minimum iframe height so that scaled iframe fills the visible canvas area
     const minHeightForZoom = (containerHeight - CANVAS_PADDING) / (zoom / 100);
-
-    // Use the larger of: content height or minimum height for current zoom
     return Math.max(iframeContentHeight, minHeightForZoom);
   }, [iframeContentHeight, containerHeight, zoom, editingComponentId]);
 
-  // Recalculate autofit when viewport/breakpoint changes
+  const previewObserverRef = useRef<ResizeObserver | null>(null);
+
+  /** Measure the preview iframe content and set up a ResizeObserver for re-measurement */
+  const setupPreviewMeasurement = useCallback(() => {
+    previewObserverRef.current?.disconnect();
+    previewObserverRef.current = null;
+
+    try {
+      const iframe = iframeRef.current;
+      const doc = iframe?.contentDocument;
+      if (!iframe || !doc?.body) return;
+
+      const wrapper = iframe.parentElement as HTMLElement | null;
+      const containerEl = previewContainerRef.current;
+      const refHeight = containerEl
+        ? containerEl.clientHeight - CANVAS_PADDING
+        : 0;
+
+      if (refHeight > 0) {
+        updateViewportOverrides(doc, refHeight);
+      }
+
+      let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+
+      const observeBodyChildren = () => {
+        Array.from(doc.body.children).forEach(el => {
+          if (el instanceof HTMLElement) observer.observe(el);
+        });
+      };
+
+      const observer = new ResizeObserver(() => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => remeasure(), 100);
+      });
+
+      const remeasure = () => {
+        try {
+          if (!wrapper) return;
+
+          const freshContainerEl = previewContainerRef.current;
+          const freshRefHeight = freshContainerEl
+            ? freshContainerEl.clientHeight - CANVAS_PADDING
+            : refHeight;
+
+          if (freshRefHeight <= 0) return;
+
+          updateViewportOverrides(doc, freshRefHeight);
+
+          // Disconnect observer before temporary style changes — setting
+          // body/html height to auto causes h-full children to resize,
+          // which fires the observer and creates a feedback loop.
+          observer.disconnect();
+
+          const prevBodyH = doc.body.style.height;
+          const prevHtmlH = doc.documentElement.style.height;
+          doc.body.style.height = 'auto';
+          doc.documentElement.style.height = 'auto';
+          void doc.body.offsetHeight;
+
+          const bodyScrollH = doc.body.scrollHeight;
+
+          doc.body.style.height = prevBodyH;
+          doc.documentElement.style.height = prevHtmlH;
+          void doc.body.offsetHeight;
+
+          observeBodyChildren();
+
+          if (bodyScrollH > 0) {
+            setPreviewContentHeight(bodyScrollH);
+          }
+        } catch { /* cross-origin */ }
+      };
+
+      remeasure();
+
+      const images = Array.from(doc.querySelectorAll('img'));
+      const pendingImages = images.filter(img => !img.complete);
+
+      if (pendingImages.length > 0) {
+        let remaining = pendingImages.length;
+        const onImageReady = () => {
+          remaining--;
+          if (remaining <= 0) remeasure();
+        };
+        pendingImages.forEach(img => {
+          img.addEventListener('load', onImageReady, { once: true });
+          img.addEventListener('error', onImageReady, { once: true });
+        });
+      }
+
+      observeBodyChildren();
+
+      previewObserverRef.current = observer;
+    } catch {
+      // Cross-origin — fall back to 0
+    }
+  }, []);
+
+  // Re-measure and recalculate zoom when viewport changes
   const prevViewportMode = useRef(viewportMode);
   useEffect(() => {
     if (prevViewportMode.current !== viewportMode) {
-      // Notify SelectionOverlay to hide outlines during viewport transition
       window.dispatchEvent(new CustomEvent('viewportChange'));
 
-      // Small delay to ensure container dimensions are updated
+      // Small delay to ensure container dimensions are updated after width change.
+      // useZoom auto-recalculates for the current mode (fit/autofit/custom) when
+      // content dimensions change, so we only need to re-measure here.
       setTimeout(() => {
         if (isPreviewMode) {
-          previewAutofit();
-        } else {
-          autofit();
+          setupPreviewMeasurement();
         }
       }, 50);
 
       prevViewportMode.current = viewportMode;
     }
-  }, [viewportMode, autofit, isPreviewMode, previewAutofit]);
+  }, [viewportMode, isPreviewMode, setupPreviewMeasurement]);
 
   // Scroll canvas to selected element if it's off-screen
   const prevCanvasLayerIdRef = useRef<string | null>(null);
@@ -1240,12 +1331,15 @@ const CenterCanvas = React.memo(function CenterCanvas({
 
       if (event) {
         let target = event.target as HTMLElement;
+        let blockLevelStyleKey: string | null = null;
 
-        // Walk up the DOM tree to find data-style, data-block-index, data-list-item-index
+        // Walk up the DOM tree to find data-style, data-block-index, data-list-item-index.
+        // The textStyleKey from the element with data-block-index is the actual content
+        // block type (e.g. blockquote), not an inner element's style (e.g. paragraph).
         while (target && target !== event.currentTarget) {
-          if (!textStyleKey) {
-            const styleAttr = target.getAttribute?.('data-style');
-            if (styleAttr) textStyleKey = styleAttr;
+          const styleAttr = target.getAttribute?.('data-style');
+          if (styleAttr && !textStyleKey) {
+            textStyleKey = styleAttr;
           }
           if (listItemIndex === null) {
             const listItemAttr = target.getAttribute?.('data-list-item-index');
@@ -1253,22 +1347,52 @@ const CenterCanvas = React.memo(function CenterCanvas({
           }
           if (blockIndex === null) {
             const blockAttr = target.getAttribute?.('data-block-index');
-            if (blockAttr !== null) blockIndex = parseInt(blockAttr, 10);
+            if (blockAttr !== null) {
+              blockIndex = parseInt(blockAttr, 10);
+              if (styleAttr) blockLevelStyleKey = styleAttr;
+            }
           }
           target = target.parentElement as HTMLElement;
         }
+
+        // Prefer the block-level style over structural inner elements (e.g.
+        // paragraph inside blockquote), but keep inline marks and sub-block
+        // styles like listItem that shouldn't be overridden by their container
+        const INNER_STYLE_KEYS = new Set(['bold', 'italic', 'underline', 'strike', 'link', 'subscript', 'superscript']);
+        if (blockLevelStyleKey && (!textStyleKey || !INNER_STYLE_KEYS.has(textStyleKey))) {
+          textStyleKey = blockLevelStyleKey;
+        }
       }
 
-      // Use atomic state update to prevent transient null activeTextStyleKey
+      // For non-CMS-bound rich text, sublayers are style-based (unique types),
+      // so skip block-level sublayerIndex/listItemIndex — only set textStyleKey
+      let resolvedSublayerIndex = Number.isFinite(blockIndex) ? blockIndex : null;
+      let resolvedListItemIndex = Number.isFinite(listItemIndex) ? listItemIndex : null;
+      if (resolvedSublayerIndex !== null && textStyleKey) {
+        const layers = editingComponentId
+          ? (componentDrafts[editingComponentId] || [])
+          : (currentDraft?.layers || []);
+        const layer = findLayerById(layers, layerId);
+        if (layer && isRichTextLayer(layer) && !getLayerCmsFieldBinding(layer)) {
+          resolvedSublayerIndex = null;
+          resolvedListItemIndex = null;
+        }
+      }
+
       selectLayerWithSublayer(layerId, {
         textStyleKey,
-        sublayerIndex: Number.isFinite(blockIndex) ? blockIndex : null,
-        listItemIndex: Number.isFinite(listItemIndex) ? listItemIndex : null,
+        sublayerIndex: resolvedSublayerIndex,
+        listItemIndex: resolvedListItemIndex,
       });
     }
-  }, [isPreviewMode, setActiveSidebarTab, selectLayerWithSublayer]);
+  }, [isPreviewMode, setActiveSidebarTab, selectLayerWithSublayer, editingComponentId, componentDrafts, currentDraft]);
 
   const handleCanvasLayerUpdate = useCallback((layerId: string, updates: Partial<Layer>) => {
+    // Block all source-layer mutations from the canvas while in a non-default
+    // locale. The Translate panel writes through the translations table instead
+    // of mutating the layer tree.
+    if (selectedLocale && !selectedLocale.is_default) return;
+
     if (editingComponentId) {
       const { updateComponentDraft } = useComponentsStore.getState();
       const currentDraft = componentDrafts[editingComponentId] || [];
@@ -1276,10 +1400,12 @@ const CenterCanvas = React.memo(function CenterCanvas({
     } else if (currentPageId) {
       updateLayer(currentPageId, layerId, updates);
     }
-  }, [editingComponentId, componentDrafts, currentPageId, updateLayer]);
+  }, [editingComponentId, componentDrafts, currentPageId, updateLayer, selectedLocale]);
 
   const handleCanvasDeleteLayer = useCallback(() => {
     if (!selectedLayerId || !currentPageId) return;
+    // Block layer deletion in non-default locales (read-only canvas).
+    if (selectedLocale && !selectedLocale.is_default) return;
 
     // Handle sublayer deletion (remove TipTap block, not the whole layer)
     if (activeSublayerIndex !== null) {
@@ -1316,10 +1442,11 @@ const CenterCanvas = React.memo(function CenterCanvas({
         setSelectedLayerId(null);
       }
     }
-  }, [selectedLayerId, currentPageId, selectedLayerIds, currentDraft, deleteLayers, clearSelection, deleteLayer, setSelectedLayerId, activeSublayerIndex, setActiveSublayerIndex, updateLayer]);
+  }, [selectedLayerId, currentPageId, selectedLayerIds, currentDraft, deleteLayers, clearSelection, deleteLayer, setSelectedLayerId, activeSublayerIndex, setActiveSublayerIndex, updateLayer, selectedLocale]);
 
   const handleCanvasGapUpdate = useCallback((layerId: string, gapValue: string) => {
     if (!currentPageId) return;
+    if (selectedLocale && !selectedLocale.is_default) return;
 
     // Find the layer and update its gap class
     if (!currentDraft) return;
@@ -1338,7 +1465,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
 
     // Update the layer
     updateLayer(currentPageId, layerId, { classes: newClasses });
-  }, [currentPageId, currentDraft, updateLayer]);
+  }, [currentPageId, currentDraft, updateLayer, selectedLocale]);
 
   // Rich text sheet for canvas double-click (layers with components/variables)
   // Build field groups using the sheet target layer (not the canvas text editor layer)
@@ -1361,24 +1488,130 @@ const CenterCanvas = React.memo(function CenterCanvas({
   // when other deps (fields, allFields) change.
   const [richTextSheetValue, setRichTextSheetValue] = useState<any>(null);
 
+  // Translation context for the rich-text sheet. When the user is browsing the
+  // canvas in a non-default locale and a rich-text layer is the sheet target,
+  // we redirect read/write through the translations table instead of mutating
+  // the source layer. This is what makes the rich-text editor act as the
+  // translation surface for rich text (no plain-textarea fallback in the sidebar).
+  const richTextTranslationContext = useMemo(() => {
+    if (!richTextSheetLayerId || !selectedLocale || selectedLocale.is_default) return null;
+    const sourceLayers: Layer[] = editingComponentId
+      ? (componentDrafts[editingComponentId] || [])
+      : (currentDraft?.layers || []);
+    const layer = findLayerById(sourceLayers, richTextSheetLayerId);
+    if (!layer || !isRichTextLayer(layer)) return null;
+    const sourceType: 'page' | 'component' = editingComponentId ? 'component' : 'page';
+    const sourceId = editingComponentId || currentPageId;
+    if (!sourceId) return null;
+    const items = extractLayerTranslatableItemsShallow(layer, sourceType, sourceId);
+    const item = items.find((i) => i.content_type === 'richtext');
+    if (!item) return null;
+    return { item };
+  }, [richTextSheetLayerId, selectedLocale, editingComponentId, componentDrafts, currentDraft, currentPageId]);
+
   useEffect(() => {
     if (!richTextSheetLayerId) {
       setRichTextSheetValue(null);
       return;
     }
+
+    // Localization mode: only show the saved translation. Per spec we don't
+    // surface the default-locale source inside the editor — the user types the
+    // translation from scratch (the source is visible on the canvas).
+    if (richTextTranslationContext && selectedLocaleId) {
+      const stored = useLocalisationStore
+        .getState()
+        .getTranslationByKey(selectedLocaleId, richTextTranslationContext.item.key)?.content_value;
+      if (stored && stored.trim()) {
+        try {
+          setRichTextSheetValue(JSON.parse(stored));
+          return;
+        } catch {
+          // fall through to empty doc
+        }
+      }
+      setRichTextSheetValue({ type: 'doc', content: [{ type: 'paragraph' }] });
+      return;
+    }
+
     const source = editingComponentId
       ? componentDrafts[editingComponentId]
       : currentDraft?.layers ?? null;
     const layer = source ? findLayerById(source as Layer[], richTextSheetLayerId) : null;
     setRichTextSheetValue(getRichTextValue(layer?.variables));
-  // Only re-derive when the sheet target layer changes, not on every draft update
+  // Only re-derive when the sheet target layer (or translation context) changes,
+  // not on every draft update.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [richTextSheetLayerId]);
+  }, [richTextSheetLayerId, richTextTranslationContext, selectedLocaleId]);
+
+  // Debounced save for translation writes — the rich-text editor fires onChange
+  // on every keystroke, so we coalesce writes to avoid spamming the API and
+  // racing the optimistic create with concurrent updates.
+  const richTextTranslationSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const richTextTranslationPendingValueRef = useRef<{ key: string; value: string; localeId: string } | null>(null);
+
+  const flushRichTextTranslationSave = useCallback(() => {
+    if (richTextTranslationSaveTimerRef.current) {
+      clearTimeout(richTextTranslationSaveTimerRef.current);
+      richTextTranslationSaveTimerRef.current = null;
+    }
+    const pending = richTextTranslationPendingValueRef.current;
+    if (!pending) return;
+    // Drop the pending save if the user switched locale or selection while
+    // typing — we only want to persist edits authored against the locale they
+    // were typed for.
+    if (!richTextTranslationContext || !selectedLocaleId) return;
+    if (pending.key !== richTextTranslationContext.item.key) return;
+    if (pending.localeId !== selectedLocaleId) return;
+    const item = richTextTranslationContext.item;
+    const store = useLocalisationStore.getState();
+    const latest = store.getTranslationByKey(selectedLocaleId, item.key);
+    const previousValue = latest?.content_value || '';
+    if (pending.value === previousValue) {
+      richTextTranslationPendingValueRef.current = null;
+      return;
+    }
+    richTextTranslationPendingValueRef.current = null;
+    const savePromise = latest
+      ? store.updateTranslation(latest, { content_value: pending.value, is_completed: true })
+      : store.createTranslation({
+        locale_id: selectedLocaleId,
+        source_type: item.source_type as 'page' | 'component',
+        source_id: item.source_id,
+        content_key: item.content_key,
+        content_type: 'richtext',
+        content_value: pending.value,
+        is_completed: true,
+      });
+    savePromise.catch((error) => console.error('Failed to save rich text translation:', error));
+  }, [richTextTranslationContext, selectedLocaleId]);
+
+  // Keep the flush ref pointing at the latest closure so the early
+  // close-on-different-selection effect can flush without a forward reference.
+  useEffect(() => {
+    flushRichTextTranslationSaveRef.current = flushRichTextTranslationSave;
+  }, [flushRichTextTranslationSave]);
 
   const handleRichTextSheetChange = useCallback((value: any) => {
     if (!richTextSheetLayerId) return;
-    // Keep local state in sync so the value prop matches the editor's content
     setRichTextSheetValue(value);
+
+    if (richTextTranslationContext && selectedLocaleId) {
+      const finalValue = value ? JSON.stringify(value) : '';
+      richTextTranslationPendingValueRef.current = {
+        key: richTextTranslationContext.item.key,
+        value: finalValue,
+        localeId: selectedLocaleId,
+      };
+      if (richTextTranslationSaveTimerRef.current) {
+        clearTimeout(richTextTranslationSaveTimerRef.current);
+      }
+      richTextTranslationSaveTimerRef.current = setTimeout(() => {
+        flushRichTextTranslationSave();
+      }, 400);
+      return;
+    }
+
     const textVariable = value && (typeof value === 'object' || (typeof value === 'string' && value.trim())) ? {
       type: 'dynamic_rich_text' as const,
       data: {
@@ -1407,7 +1640,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
         variables: { ...layer?.variables, text: textVariable },
       });
     }
-  }, [richTextSheetLayerId, updateLayer]);
+  }, [richTextSheetLayerId, updateLayer, richTextTranslationContext, selectedLocaleId, flushRichTextTranslationSave]);
 
   // Handle iframe ready callback (for SelectionOverlay)
   const handleIframeReady = useCallback((iframeElement: HTMLIFrameElement) => {
@@ -1418,6 +1651,13 @@ const CenterCanvas = React.memo(function CenterCanvas({
   const handleCanvasLayerHover = useCallback((layerId: string | null) => {
     setHoveredLayerId(layerId);
   }, [setHoveredLayerId]);
+
+  // Open the master component when a component instance is double-clicked.
+  // Mirrors the "Edit component" sidebar button.
+  const editComponent = useEditComponent();
+  const handleCanvasComponentEdit = useCallback((componentId: string, instanceLayerId: string) => {
+    editComponent(componentId, { returnToLayerId: instanceLayerId });
+  }, [editComponent]);
 
   // Undo/Redo handlers
   // Note: We don't auto-save after undo/redo to preserve the redo stack
@@ -1439,6 +1679,8 @@ const CenterCanvas = React.memo(function CenterCanvas({
     dropTarget: { layerId: string; position: 'above' | 'below' | 'inside'; parentId: string | null }
   ) => {
     if (!currentPageId) return;
+    // Block element insertion in non-default locales (read-only canvas).
+    if (selectedLocale && !selectedLocale.is_default) return;
 
     if (source === 'elements') {
       // Determine insert position based on drop target
@@ -1484,7 +1726,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
     } else if (source === 'components') {
       // TODO: Add component using similar logic
     }
-  }, [currentPageId, addLayerFromTemplate, setSelectedLayerId, liveLayerUpdates]);
+  }, [currentPageId, addLayerFromTemplate, setSelectedLayerId, liveLayerUpdates, selectedLocale]);
 
   // Use the canvas drop detection hook for throttled hit-testing
   useCanvasDropDetection({
@@ -1569,11 +1811,36 @@ const CenterCanvas = React.memo(function CenterCanvas({
     return layer?.name || null;
   }, [selectedLayerId, layers]);
 
-  // Get selected locale and translations
-  const selectedLocale = getSelectedLocale();
+  // Translations map for the active locale (used to inject into the canvas)
   const localeTranslations = useMemo(() => {
     return selectedLocaleId ? translations[selectedLocaleId] : undefined;
   }, [selectedLocaleId, translations]);
+
+  // True when the user is browsing the canvas in a non-default locale.
+  // The canvas becomes a read-only translation view in this state.
+  const isLocalizing = !!(selectedLocale && !selectedLocale.is_default);
+
+  // Subscribe to translation loading state so we can show a spinner overlay
+  // while translations for the active locale are being fetched.
+  const isLoadingTranslations = useLocalisationStore((state) => state.isLoading.loadTranslations);
+
+  // Translate the dynamic page's CMS item values when localizing so layers
+  // bound to CMS fields render the translated values.
+  const translatedPageCollectionItem = useMemo(() => {
+    if (!pageCollectionItem || !isLocalizing || !localeTranslations) {
+      return pageCollectionItem;
+    }
+    return {
+      ...pageCollectionItem,
+      values: applyCmsTranslations(
+        pageCollectionItem.id,
+        pageCollectionItem.values || {},
+        pageCollectionFields,
+        localeTranslations,
+        { includeIncomplete: true }
+      ),
+    };
+  }, [pageCollectionItem, pageCollectionFields, isLocalizing, localeTranslations]);
 
   // Build preview URL for preview mode
   const previewUrl = useMemo(() => {
@@ -1640,6 +1907,11 @@ const CenterCanvas = React.memo(function CenterCanvas({
     if (!iframe) return;
     setIsPreviewLoading(true);
     iframe.src = previewUrl;
+
+    return () => {
+      previewObserverRef.current?.disconnect();
+      previewObserverRef.current = null;
+    };
   }, [isPreviewMode, previewUrl]);
 
   // Autofit when entering preview mode (not on every breakpoint change)
@@ -1653,15 +1925,8 @@ const CenterCanvas = React.memo(function CenterCanvas({
 
   const handlePreviewLoad = useCallback(() => {
     setIsPreviewLoading(false);
-    try {
-      const doc = iframeRef.current?.contentDocument;
-      if (doc) {
-        setPreviewContentHeight(doc.documentElement.scrollHeight);
-      }
-    } catch {
-      // Cross-origin — fall back to 0
-    }
-  }, []);
+    setupPreviewMeasurement();
+  }, [setupPreviewMeasurement]);
 
   // Load collection items when dynamic page is selected
   useEffect(() => {
@@ -1849,7 +2114,13 @@ const CenterCanvas = React.memo(function CenterCanvas({
             {currentPage?.is_dynamic && collectionId && (
               <Select
                 value={currentPageCollectionItemId || ''}
-                onValueChange={setCurrentPageCollectionItemId}
+                onValueChange={(value) => {
+                  setCurrentPageCollectionItemId(value);
+                  setCollectionItemSearch('');
+                }}
+                onOpenChange={(open) => {
+                  if (!open) setCollectionItemSearch('');
+                }}
                 disabled={isLoadingItems || collectionItems.length === 0}
               >
                 <SelectTrigger className="w-24 justify-between" size="sm">
@@ -1872,18 +2143,31 @@ const CenterCanvas = React.memo(function CenterCanvas({
                   )}
                 </SelectTrigger>
 
-                <SelectContent>
-                  {collectionItems.length > 0 ? (
-                    collectionItems.map((item) => (
+                <SelectContent
+                  searchable
+                  searchValue={collectionItemSearch}
+                  onSearchChange={setCollectionItemSearch}
+                  searchPlaceholder="Search items..."
+                  align="start"
+                  className="w-72"
+                >
+                  {(() => {
+                    const filtered = collectionItems.filter(item =>
+                      item.label.toLowerCase().includes(collectionItemSearch.toLowerCase())
+                    );
+                    if (filtered.length === 0) {
+                      return (
+                        <div className="px-2 py-4 text-center text-xs text-muted-foreground">
+                          {collectionItemSearch ? 'No items found' : 'No items available'}
+                        </div>
+                      );
+                    }
+                    return filtered.map((item) => (
                       <SelectItem key={item.id} value={item.id}>
                         {item.label}
                       </SelectItem>
-                    ))
-                  ) : (
-                    <div className="px-2 py-1.5 text-sm text-muted-foreground">
-                      No items available
-                    </div>
-                  )}
+                    ));
+                  })()}
                 </SelectContent>
               </Select>
             )}
@@ -2176,7 +2460,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
       {/* Canvas Area */}
       <div
         ref={canvasContainerRef}
-        className="flex-1 relative overflow-hidden bg-neutral-50 dark:bg-neutral-950/80"
+        className="flex-1 relative overflow-hidden bg-neutral-50 dark:bg-neutral-950/80 select-none"
       >
         {/* Loading skeleton overlay when draft is being fetched */}
         {isDraftLoading && (
@@ -2207,6 +2491,15 @@ const CenterCanvas = React.memo(function CenterCanvas({
 
         {/* Element picker SVG connector overlay */}
         <ElementPickerOverlay iframeElement={canvasIframeElement} zoom={zoom} />
+
+        {/* Translation loading overlay — shown while translations for the
+            active locale are being fetched. Mirrors the preview-mode overlay
+            below for visual consistency. */}
+        {isLocalizing && isLoadingTranslations && (
+          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4 bg-background/80">
+            <Spinner />
+          </div>
+        )}
 
         {/* Scrollable container with hidden scrollbars (editor canvas) */}
         <div
@@ -2243,18 +2536,14 @@ const CenterCanvas = React.memo(function CenterCanvas({
                   // Width: exact scaled size, min 100% to fill viewport horizontally
                   width: `${effectiveCanvasWidth * (zoom / 100) + CANVAS_PADDING}px`,
                   minWidth: '100%',
-                  // Height: exact viewport height when centered, scaled size when top-aligned
-                  height: shouldCenter
-                    ? `${containerHeight}px`  // Use actual viewport height
-                    : `${finalIframeHeight * (zoom / 100) + CANVAS_PADDING}px`,
+                  // Height: scaled iframe size + canvas padding. finalIframeHeight is
+                  // already stretched to fill the viewport at any zoom level, so the
+                  // white canvas always fills the available height.
+                  height: `${finalIframeHeight * (zoom / 100) + CANVAS_PADDING}px`,
                   display: 'flex',
-                  // Always use flex-start - we'll handle centering via padding
                   alignItems: 'flex-start',
-                  justifyContent: 'center', // Center horizontally
-                  // Calculate padding: center based on VISUAL (scaled) height, or fixed border when top-aligned
-                  paddingTop: shouldCenter
-                    ? `${Math.max(0, (containerHeight - finalIframeHeight * (zoom / 100)) / 2)}px`
-                    : `${CANVAS_BORDER}px`,
+                  justifyContent: 'center',
+                  paddingTop: `${CANVAS_BORDER}px`,
                   position: 'relative',
                 }}
               >
@@ -2294,8 +2583,11 @@ const CenterCanvas = React.memo(function CenterCanvas({
                         editingComponentId={editingComponentId || null}
                         collectionItems={{ ...collectionItemsFromStore, ...referencedItems }}
                         collectionFields={collectionFieldsFromStore}
-                        pageCollectionItem={pageCollectionItem}
+                        pageCollectionItem={translatedPageCollectionItem}
                         pageCollectionFields={pageCollectionFields}
+                        currentLocale={selectedLocale}
+                        availableLocales={locales}
+                        translations={localeTranslations}
                         assets={assetsMap}
                         collectionLayerData={collectionLayerData}
                         pageId={currentPageId || ''}
@@ -2318,9 +2610,11 @@ const CenterCanvas = React.memo(function CenterCanvas({
                         onIframeReady={handleIframeReady}
                         onLayerHover={handleCanvasLayerHover}
                         onCanvasClick={handleCanvasClick}
+                        onComponentEdit={handleCanvasComponentEdit}
                         editingComponentVariables={editingComponentVariables}
                         disableEditorHiddenLayers={!!activeInteractionTriggerLayerId}
                         zoom={zoom}
+                        referenceViewportHeight={defaultCanvasHeight}
                       />
 
                       {/* Drop indicator overlay - subscribes to store directly */}
@@ -2384,6 +2678,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
                             onClick={() => setShowAddBlockPanel(!showAddBlockPanel)}
                             size="lg"
                             className="gap-2"
+                            disabled={!!(selectedLocale && !selectedLocale.is_default)}
                           >
                             <Icon name="plus" className="w-5 h-5" />
                             Add Block
@@ -2579,11 +2874,15 @@ const CenterCanvas = React.memo(function CenterCanvas({
             </div>
           )}
           <div
-            className="bg-white shadow-3xl relative mx-auto"
+            className="bg-white shadow-3xl relative mx-auto my-auto"
             style={{
               zoom: previewZoom / 100,
-              width: viewportMode === 'desktop' ? '100%' : viewportSizes[viewportMode].width,
-              minWidth: viewportMode === 'desktop' ? viewportSizes[viewportMode].width : undefined,
+              width: viewportMode === 'desktop' && previewZoomMode === 'autofit'
+                ? '100%'
+                : viewportSizes[viewportMode].width,
+              minWidth: viewportMode === 'desktop' && previewZoomMode === 'autofit'
+                ? viewportSizes[viewportMode].width
+                : undefined,
               height: previewContentHeight > 0 ? `${previewContentHeight}px` : '100%',
               flexShrink: 0,
               transition: 'none',
@@ -2621,9 +2920,16 @@ const CenterCanvas = React.memo(function CenterCanvas({
       {richTextSheetValue && (
         <RichTextEditorSheet
           open={!!richTextSheetLayerId}
-          onOpenChange={(open) => { if (!open) closeRichTextSheet(); }}
+          onOpenChange={(open) => {
+            if (!open) {
+              flushRichTextTranslationSave();
+              closeRichTextSheet();
+            }
+          }}
           title="Content editor"
-          description="Element content"
+          description={richTextTranslationContext && selectedLocale
+            ? `Translate to ${selectedLocale.label}`
+            : 'Element content'}
           value={richTextSheetValue}
           onChange={handleRichTextSheetChange}
           fieldGroups={richTextSheetFieldGroups}

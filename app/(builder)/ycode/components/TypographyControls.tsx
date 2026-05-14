@@ -63,6 +63,7 @@ const TypographyControls = memo(function TypographyControls({ layer, onLayerUpda
   const textDecorationThickness = getDesignProperty('typography', 'textDecorationThickness') || '';
   const underlineOffset = getDesignProperty('typography', 'underlineOffset') || '';
   const placeholderColor = getDesignProperty('typography', 'placeholderColor') || '';
+  const lineClamp = getDesignProperty('typography', 'lineClamp') || '';
 
   // Get available weights for the selected font
   const selectedFont = getFontByFamily(fontFamily);
@@ -73,6 +74,9 @@ const TypographyControls = memo(function TypographyControls({ layer, onLayerUpda
 
   // Detect if text transform is active
   const hasTransform = textTransform !== 'none' && textTransform !== '';
+
+  // Detect if line clamp is active
+  const hasLineClamp = lineClamp !== '' && lineClamp !== 'none';
 
   // Custom extractor for letter spacing (strips 'em' as default unit, like fontSize strips 'px')
   const extractLetterSpacingValue = (value: string): string => {
@@ -97,6 +101,7 @@ const TypographyControls = memo(function TypographyControls({ layer, onLayerUpda
   const [lineHeightInput, setLineHeightInput] = useControlledInput(lineHeight);
   const [decorationThicknessInput, setDecorationThicknessInput] = useControlledInput(textDecorationThickness, extractMeasurementValue);
   const [underlineOffsetInput, setUnderlineOffsetInput] = useControlledInput(underlineOffset, extractMeasurementValue);
+  const [lineClampInput, setLineClampInput] = useControlledInput(lineClamp);
 
   // Map numeric font weights to named values
   const fontWeightMap: Record<string, string> = {
@@ -222,6 +227,20 @@ const TypographyControls = memo(function TypographyControls({ layer, onLayerUpda
     updateDesignProperty('typography', 'textTransform', value);
   };
 
+  const handleAddLineClamp = () => {
+    updateDesignProperty('typography', 'lineClamp', '2');
+  };
+
+  const handleRemoveLineClamp = () => {
+    updateDesignProperty('typography', 'lineClamp', null);
+  };
+
+  const handleLineClampChange = (value: string) => {
+    setLineClampInput(value);
+    const sanitized = removeSpaces(value);
+    debouncedUpdateDesignProperty('typography', 'lineClamp', sanitized || null);
+  };
+
   // Debounced handler for keyboard-typed hex values
   const handleDecorationColorChange = (value: string) => {
     const sanitized = removeSpaces(value);
@@ -321,6 +340,12 @@ const TypographyControls = memo(function TypographyControls({ layer, onLayerUpda
                 disabled={hasTransform}
               >
                 Transform
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={handleAddLineClamp}
+                disabled={hasLineClamp}
+              >
+                Line clamp
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -633,6 +658,31 @@ const TypographyControls = memo(function TypographyControls({ layer, onLayerUpda
                 tabIndex={0}
                 className="p-0.5 rounded-sm opacity-70 hover:opacity-100 transition-opacity cursor-pointer"
                 onClick={handleRemoveTransform}
+              >
+                <Icon name="x" className="size-2.5" />
+              </span>
+            </div>
+          </div>
+        )}
+
+        {!isIcon && hasLineClamp && (
+          <div className="grid grid-cols-3 items-start">
+            <Label variant="muted" className="h-8">Line clamp</Label>
+            <div className="col-span-2 flex items-center gap-2">
+              <Input
+                stepper
+                min="1"
+                step="1"
+                value={lineClampInput}
+                onChange={(e) => handleLineClampChange(e.target.value)}
+                placeholder="2"
+                className="flex-1"
+              />
+              <span
+                role="button"
+                tabIndex={0}
+                className="p-0.5 rounded-sm opacity-70 hover:opacity-100 transition-opacity cursor-pointer"
+                onClick={handleRemoveLineClamp}
               >
                 <Icon name="x" className="size-2.5" />
               </span>

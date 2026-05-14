@@ -6,19 +6,23 @@ import knexfileConfig from '../knexfile';
  *
  * Creates a knex instance connected to the user's Supabase PostgreSQL database
  * Uses configuration from knexfile.ts based on NODE_ENV
+ *
+ * The instance is stored on globalThis so it survives Next.js HMR in dev mode.
+ * Without this, each hot reload re-evaluates the module, resets the module-level
+ * variable to null, and creates a new pool — leaking the old pool's PostgreSQL
+ * connections until the database is exhausted.
  */
 
-let knexInstance: Knex | null = null;
+const globalForKnex = globalThis as unknown as { __knexInstance?: Knex };
 
 /**
  * Get or create knex instance
  */
 export async function getKnexClient(): Promise<Knex> {
-  if (knexInstance) {
-    return knexInstance;
+  if (globalForKnex.__knexInstance) {
+    return globalForKnex.__knexInstance;
   }
 
-  // Use NODE_ENV to determine which config to use (defaults to development)
   const environment = process.env.NODE_ENV || 'development';
   const config = knexfileConfig[environment];
 
@@ -26,18 +30,18 @@ export async function getKnexClient(): Promise<Knex> {
     throw new Error(`No knex configuration found for environment: ${environment}`);
   }
 
-  knexInstance = knex(config);
+  globalForKnex.__knexInstance = knex(config);
 
-  return knexInstance;
+  return globalForKnex.__knexInstance;
 }
 
 /**
  * Close knex connection
  */
 export async function closeKnexClient(): Promise<void> {
-  if (knexInstance) {
-    await knexInstance.destroy();
-    knexInstance = null;
+  if (globalForKnex.__knexInstance) {
+    await globalForKnex.__knexInstance.destroy();
+    globalForKnex.__knexInstance = undefined;
   }
 }
 
@@ -77,6 +81,7 @@ export async function testSupabaseDirectConnection(credentials: {
   dbName: string;
   dbUser: string;
   dbPassword: string;
+  ssl?: boolean;
 }): Promise<{
   success: boolean;
   error?: string;
@@ -94,7 +99,7 @@ export async function testSupabaseDirectConnection(credentials: {
         database: credentials.dbName,
         user: credentials.dbUser,
         password: credentials.dbPassword,
-        ssl: { rejectUnauthorized: false },
+        ssl: credentials.ssl === false ? false : { rejectUnauthorized: false },
       },
       pool: {
         min: 0,

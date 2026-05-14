@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { fetchErrorPage } from '@/lib/page-fetcher';
-import { getSettingByKey } from '@/lib/repositories/settingsRepository';
+import { getSettingsByKeys } from '@/lib/repositories/settingsRepository';
+import { generateColorVariablesCss } from '@/lib/repositories/colorVariableRepository';
 
 // Force dynamic rendering - no caching
 export const dynamic = 'force-dynamic';
@@ -43,13 +44,17 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Load CSS based on published state
     const cssKey = published ? 'published_css' : 'draft_css';
-    const css = await getSettingByKey(cssKey);
+    const [settings, colorVariablesCss] = await Promise.all([
+      getSettingsByKeys([cssKey, 'ycode_badge']),
+      generateColorVariablesCss(),
+    ]);
 
     return NextResponse.json({
       pageData,
-      css,
+      css: settings[cssKey] || null,
+      colorVariablesCss,
+      ycodeBadge: settings.ycode_badge ?? true,
     });
   } catch (error) {
     console.error('Failed to fetch error page:', error);

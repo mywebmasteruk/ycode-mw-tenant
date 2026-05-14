@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getFieldsByCollectionId, createField } from '@/lib/repositories/collectionFieldRepository';
+import { getFieldsByCollectionId, createField, getFieldById } from '@/lib/repositories/collectionFieldRepository';
 import { isValidFieldType, VALID_FIELD_TYPES } from '@/lib/collection-field-utils';
 import { noCache } from '@/lib/api-response';
 
@@ -68,18 +68,47 @@ export async function POST(
       );
     }
 
+    let isComputed = body.is_computed ?? false;
+    let fillable = body.fillable ?? true;
+    let fieldData = body.data || {};
+
+    if (body.type === 'count') {
+      const cfg = body.data?.count;
+      if (!cfg?.collectionId || !cfg?.fieldId) {
+        return noCache(
+          { error: 'Count fields require data.count.collectionId and data.count.fieldId' },
+          400,
+        );
+      }
+
+      const sourceField = await getFieldById(cfg.fieldId, false);
+      if (!sourceField || sourceField.collection_id !== cfg.collectionId) {
+        return noCache({ error: 'Count source field not found in the chosen collection' }, 400);
+      }
+      if (sourceField.type !== 'reference' && sourceField.type !== 'multi_reference') {
+        return noCache({ error: 'Count source field must be a reference or multi_reference field' }, 400);
+      }
+      if (sourceField.reference_collection_id !== id) {
+        return noCache({ error: 'Count source field must reference this collection' }, 400);
+      }
+
+      isComputed = true;
+      fillable = false;
+      fieldData = { ...fieldData, count: { collectionId: cfg.collectionId, fieldId: cfg.fieldId } };
+    }
+
     const field = await createField({
       collection_id: id,
       name: body.name,
       key: body.key || null,
       type: body.type,
       default: body.default || null,
-      fillable: body.fillable ?? true,
+      fillable,
       order: body.order ?? 0,
       reference_collection_id: body.reference_collection_id || null,
       hidden: body.hidden ?? false,
-      is_computed: body.is_computed ?? false,
-      data: body.data || {},
+      is_computed: isComputed,
+      data: fieldData,
       is_published: false,
     });
 

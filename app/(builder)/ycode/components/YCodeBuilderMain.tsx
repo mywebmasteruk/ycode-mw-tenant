@@ -79,7 +79,7 @@ import { useVersionsStore } from '@/stores/useVersionsStore';
 
 // 6. Utils/lib
 import { findHomepage } from '@/lib/page-utils';
-import { findLayerById, getClassesString, removeLayerById, canCopyLayer, canDeleteLayer, regenerateIdsWithInteractionRemapping, findParentAndIndex, insertLayerAfter, updateLayerProps, getLayerIndexes, removeRichTextSublayer } from '@/lib/layer-utils';
+import { findLayerById, getClassesString, removeLayerById, canCopyLayer, canDeleteLayer, regenerateIdsWithInteractionRemapping, findParentAndIndex, insertLayerAfter, updateLayerProps, getLayerIndexes, removeRichTextSublayer, canPasteIntoParent, LINK_NESTING_ERROR } from '@/lib/layer-utils';
 import { cloneDeep } from 'lodash';
 
 // 5. Types
@@ -173,7 +173,10 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
     urlState.view || 'desktop'
   );
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const lastLayersByPageRef = useRef<Map<string, string>>(new Map());
+  // Tracks the last-seen layers reference per page. Reference equality is
+  // sufficient because store mutators always produce a new layers array on
+  // actual changes (React relies on this for re-rendering).
+  const lastLayersByPageRef = useRef<Map<string, Layer[]>>(new Map());
   const previousPageIdRef = useRef<string | null>(null);
   const previousResourceIdRef = useRef<string | null>(null); // Track URL resourceId changes
   const hasInitializedLayerFromUrlRef = useRef(false);
@@ -474,7 +477,8 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
             console.error('[Editor] Error loading initial data:', response.error);
 
             if (response.error === 'Not authenticated') {
-              toast.error('You have been disconnected, please reload the page');
+              toast.error('You have been disconnected, please log in again');
+              useAuthStore.getState().signOut();
             }
 
             setBuilderDataPreloaded(true);
@@ -499,6 +503,17 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
             setStyles(response.data.styles);
             setSettings(response.data.settings);
             setLocales(response.data.locales || []);
+
+            // Eager-load translations if the persisted selected locale is non-default
+            // so the canvas reflects the locale on first paint instead of source content.
+            const localisationState = useLocalisationStore.getState();
+            const persistedLocaleId = localisationState.selectedLocaleId;
+            if (persistedLocaleId) {
+              const persistedLocale = localisationState.locales.find(l => l.id === persistedLocaleId);
+              if (persistedLocale && !persistedLocale.is_default) {
+                localisationState.loadTranslations(persistedLocaleId);
+              }
+            }
             setAssets(response.data.assets || []);
             setAssetFolders(response.data.assetFolders || []);
             setFonts(response.data.fonts || []);
@@ -589,7 +604,22 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
       }
     } else if (routeType === 'collections-base') {
       // On base collections route, don't set a selected collection
-    } else if (routeType === 'component' && resourceId && !isExitingComponentModeRef.current) {
+    }
+
+    // Ensure a currentPageId is set on non-design routes (CMS, Forms) so
+    // preview can navigate to a page — default to homepage if unset
+    if (!currentPageId && pages.length > 0) {
+      const isNonDesignRoute = routeType === 'collection' || routeType === 'collections-base' || routeType === 'forms';
+      if (isNonDesignRoute) {
+        const homePage = findHomepage(pages);
+        const defaultPage = homePage || pages[0];
+        if (defaultPage) {
+          setCurrentPageId(defaultPage.id);
+        }
+      }
+    }
+
+    if (routeType === 'component' && resourceId && !isExitingComponentModeRef.current) {
       const { getComponentById, loadComponentDraft } = useComponentsStore.getState();
       const component = getComponentById(resourceId);
       if (component && editingComponentId !== resourceId) {
@@ -890,11 +920,11 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
       return;
     }
 
-    const currentLayersJSON = JSON.stringify(currentDraft.layers);
-    const lastLayersJSON = lastLayersByPageRef.current.get(currentPageId);
+    const currentLayers = currentDraft.layers;
+    const lastLayers = lastLayersByPageRef.current.get(currentPageId);
 
-    // Only trigger save if layers actually changed for THIS page
-    if (lastLayersJSON && lastLayersJSON !== currentLayersJSON) {
+    // Only trigger save if the layers array reference actually changed for THIS page
+    if (lastLayers && lastLayers !== currentLayers) {
       if (consumePageMcpSync(currentPageId)) {
         // MCP already saved to DB — cancel any pending autosave and accept
         if (saveTimeoutRef.current) {
@@ -908,8 +938,7 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
       }
     }
 
-    // Update the ref for next comparison (store per page)
-    lastLayersByPageRef.current.set(currentPageId, currentLayersJSON);
+    lastLayersByPageRef.current.set(currentPageId, currentLayers);
   }, [currentPageId, currentDraft, debouncedSave]);
 
   // Cleanup save timeout on unmount only
@@ -1003,17 +1032,21 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
         clearTimeout(saveTimeouts[editingComponentId]);
       }
 
-      // Immediately save component draft (ensures all changes are persisted)
+      // Capture whether this draft has any unpersisted edits before saving,
+      // since saveComponentDraft will reset the dirty flag on success.
+      const wasDirty = !!useComponentsStore.getState().componentDraftDirty[editingComponentId];
+
+      // Immediately save component draft (ensures all changes are persisted).
+      // This is a no-op if the draft is not dirty.
       await saveComponentDraft(editingComponentId);
 
-      // Get the updated component to get its layers
-      const updatedComponent = getComponentById(editingComponentId);
-      if (updatedComponent) {
-        // Update all instances across pages with the new layers
-        await updateComponentOnLayers(editingComponentId, updatedComponent.layers);
+      // Only sync across pages and broadcast when the user actually edited
+      // the component during this editing session.
+      if (wasDirty) {
+        updateComponentOnLayers(editingComponentId);
 
-        // Broadcast component layers update to collaborators
-        if (liveComponentUpdates) {
+        const updatedComponent = getComponentById(editingComponentId);
+        if (updatedComponent && liveComponentUpdates) {
           liveComponentUpdates.broadcastComponentLayersUpdate(editingComponentId, updatedComponent.layers);
         }
       }
@@ -1058,16 +1091,9 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
           }
         }
       } else {
-        // Returning to a page
-        // Exit edit mode to clear the state and pop the stack
-        setEditingComponentId(null, null);
-
-        // Small delay to ensure state clears
-        await new Promise(resolve => setTimeout(resolve, 10));
         // Returning to a page (or no stack entry)
         let targetPageId = returnToPageId;
         if (!targetPageId) {
-          // No return page - use homepage or first available page
           const homePage = findHomepage(pages);
           const defaultPage = homePage || pages[0];
           targetPageId = defaultPage?.id || null;
@@ -1078,21 +1104,24 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
           return;
         }
 
-        // Navigate to the target page, including the layer ID in the URL
-        // This ensures the URL sync effect will restore the correct layer
+        // Clear edit mode state synchronously, then navigate.
+        // The URL sync effect will restore the correct layer from the URL.
+        setEditingComponentId(null, null);
         navigateToLayers(
           targetPageId,
-          undefined, // view - use current
-          undefined, // rightTab - use current
-          returnToLayerId || returnDestination?.layerId || undefined // layerId - restore the original layer
+          undefined,
+          undefined,
+          returnToLayerId || returnDestination?.layerId || undefined
         );
       }
-
-      // Wait for navigation to complete
-      await new Promise(resolve => setTimeout(resolve, 100));
     } finally {
-      // Clear flag after exit completes
-      isExitingComponentModeRef.current = false;
+      // Defer clearing the guard until after the URL update has propagated.
+      // Otherwise the URL sync effect may re-run with the old `routeType ===
+      // 'component'` (because router.push is async) while the guard is already
+      // cleared, and re-enter component edit mode.
+      setTimeout(() => {
+        isExitingComponentModeRef.current = false;
+      }, 0);
     }
 
     // Selection will be restored by the URL sync effect
@@ -1452,17 +1481,25 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
                 }
 
                 const layers = getCurrentLayers();
-                const newLayer = regenerateIdsWithInteractionRemapping(cloneDeep(clipboardLayer));
                 const result = findParentAndIndex(layers, selectedLayerId);
                 if (result) {
+                  if (result.parent && !canPasteIntoParent(layers, result.parent.id, clipboardLayer)) {
+                    toast.error(LINK_NESTING_ERROR.title, { description: LINK_NESTING_ERROR.description });
+                    return;
+                  }
+                  const newLayer = regenerateIdsWithInteractionRemapping(cloneDeep(clipboardLayer));
                   updateCurrentLayers(insertLayerAfter(layers, result.parent, result.index, newLayer));
                 }
               } else if (currentPageId) {
                 // If body is selected, paste inside body (not after it)
+                let pastedLayer: Layer | null;
                 if (selectedLayerId === 'body') {
-                  pasteInside(currentPageId, selectedLayerId, clipboardLayer);
+                  pastedLayer = pasteInside(currentPageId, selectedLayerId, clipboardLayer);
                 } else {
-                  pasteAfter(currentPageId, selectedLayerId, clipboardLayer);
+                  pastedLayer = pasteAfter(currentPageId, selectedLayerId, clipboardLayer);
+                }
+                if (!pastedLayer && clipboardLayer) {
+                  toast.error(LINK_NESTING_ERROR.title, { description: LINK_NESTING_ERROR.description });
                 }
               }
             }
@@ -1860,8 +1897,8 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
         signOut={signOut}
         showPageDropdown={showPageDropdown}
         setShowPageDropdown={setShowPageDropdown}
-        currentPage={routeType === 'settings' || routeType === 'profile' || routeType === 'forms' || routeType === 'integrations' ? undefined : currentPage}
-        currentPageId={routeType === 'settings' || routeType === 'profile' || routeType === 'forms' || routeType === 'integrations' ? null : currentPageId}
+        currentPage={routeType === 'settings' || routeType === 'profile' || routeType === 'integrations' ? undefined : currentPage}
+        currentPageId={routeType === 'settings' || routeType === 'profile' || routeType === 'integrations' ? null : currentPageId}
         pages={routeType === 'settings' || routeType === 'profile' || routeType === 'forms' || routeType === 'integrations' ? [] : pages}
         setCurrentPageId={routeType === 'settings' || routeType === 'profile' || routeType === 'forms' || routeType === 'integrations' ? () => {} : setCurrentPageId}
         isSaving={routeType === 'settings' || routeType === 'localization' || routeType === 'profile' || routeType === 'forms' || routeType === 'integrations' ? false : isCurrentlySaving}

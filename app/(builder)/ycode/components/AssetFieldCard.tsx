@@ -6,11 +6,18 @@
  */
 
 import React from 'react';
+
+import { useSortable } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import Icon from '@/components/ui/icon';
+
 import { getFieldIcon } from '@/lib/collection-field-utils';
 import { ASSET_CATEGORIES, getOptimizedImageUrl, isAssetOfType, formatFileSize, getFileExtension } from '@/lib/asset-utils';
+import { cn } from '@/lib/utils';
+
 import type { Asset, CollectionFieldType } from '@/types';
 
 export interface AssetFieldCardProps {
@@ -18,10 +25,12 @@ export interface AssetFieldCardProps {
   fieldType: CollectionFieldType;
   onChangeFile: () => void;
   onRemove: () => void;
+  /** Drag handle props — when set, the preview thumbnail becomes the drag handle */
+  dragHandleProps?: React.HTMLAttributes<HTMLDivElement>;
 }
 
 /** Card for a single asset with preview, filename, metadata, and Change/Remove actions */
-function AssetFieldCard({ asset, fieldType, onChangeFile, onRemove }: AssetFieldCardProps) {
+function AssetFieldCard({ asset, fieldType, onChangeFile, onRemove, dragHandleProps }: AssetFieldCardProps) {
   const isImageField = fieldType === 'image' && asset;
   const isSvgIcon = isImageField && (!!asset!.content || (asset!.mime_type && isAssetOfType(asset!.mime_type, ASSET_CATEGORIES.ICONS)));
   const imageUrl = isImageField && asset!.public_url ? asset!.public_url : null;
@@ -29,7 +38,13 @@ function AssetFieldCard({ asset, fieldType, onChangeFile, onRemove }: AssetField
 
   return (
     <div className="bg-input p-2 rounded-lg flex items-center gap-4">
-      <div className="relative group bg-secondary/30 rounded-md w-full aspect-square overflow-hidden max-w-24 shrink-0">
+      <div
+        className={cn(
+          'relative group bg-secondary/30 rounded-md w-full aspect-square overflow-hidden max-w-24 shrink-0',
+          dragHandleProps && 'cursor-grab active:cursor-grabbing'
+        )}
+        {...dragHandleProps}
+      >
         {showCheckerboard && (
           <div className="absolute inset-0 opacity-10 bg-checkerboard" />
         )}
@@ -96,6 +111,40 @@ function AssetFieldCard({ asset, fieldType, onChangeFile, onRemove }: AssetField
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+export interface SortableAssetFieldCardProps extends AssetFieldCardProps {
+  id: string;
+}
+
+/** Sortable wrapper around AssetFieldCard for drag-and-drop reordering */
+export function SortableAssetFieldCard({ id, ...cardProps }: SortableAssetFieldCardProps) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={cn(isDragging && 'opacity-50 z-10')}
+    >
+      <AssetFieldCard
+        {...cardProps}
+        dragHandleProps={{ ...attributes, ...listeners }}
+      />
     </div>
   );
 }

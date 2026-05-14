@@ -55,6 +55,13 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { CollectionFieldSelector, type FieldSourceType } from './CollectionFieldSelector';
 import { flattenFieldGroups, filterFieldGroupsByType, RICH_TEXT_ONLY_FIELD_TYPES, type FieldGroup } from '@/lib/collection-field-utils';
 import { buildFieldVariableData } from '@/lib/variable-format-utils';
@@ -62,11 +69,15 @@ import { createDynamicVariableNodeView } from '@/lib/dynamic-variable-view';
 import { RichTextComponent } from '@/lib/tiptap-extensions/rich-text-component';
 import { RichTextLink, getLinkSettingsFromMark } from '@/lib/tiptap-extensions/rich-text-link';
 import { RichTextImage } from '@/lib/tiptap-extensions/rich-text-image';
+import { RichTextTable, RichTextTableRow, RichTextTableCell, RichTextTableHeader } from '@/lib/tiptap-extensions/rich-text-table';
+import { RichTextHtmlEmbed } from '@/lib/tiptap-extensions/rich-text-html-embed';
 import RichTextLinkPopover from './RichTextLinkPopover';
 import RichTextImagePopover from './RichTextImagePopover';
 import RichTextComponentPicker from './RichTextComponentPicker';
 import RichTextComponentBlock from './RichTextComponentBlock';
 import RichTextImageBlock from './RichTextImageBlock';
+import RichTextHtmlEmbedBlock from './RichTextHtmlEmbedBlock';
+import RichTextHtmlEmbedDialog from './RichTextHtmlEmbedDialog';
 import type { CollectionFieldType, Layer, LinkSettings, LinkType, Asset } from '@/types';
 import { DEFAULT_TEXT_STYLES } from '@/lib/text-format-utils';
 import { useEditorStore } from '@/stores/useEditorStore';
@@ -265,6 +276,75 @@ const RichTextImageWithNodeView = RichTextImage.extend({
 });
 
 /**
+ * RichTextHtmlEmbed with React node view for inline HTML embed editing.
+ * Renders a placeholder block with edit/delete controls.
+ */
+const RichTextHtmlEmbedWithNodeView = RichTextHtmlEmbed.extend({
+  addNodeView() {
+    return ({ node: initialNode, getPos, editor }) => {
+      const container = document.createElement('div');
+      container.className = 'my-2';
+      container.contentEditable = 'false';
+
+      let currentNode = initialNode;
+      let isSelected = false;
+
+      const root = createRoot(container);
+
+      const renderBlock = () => {
+        const code = currentNode.attrs.code || '';
+
+        const handleEditClick = () => {
+          const ctx = (editor.storage as Record<string, any>).richTextHtmlEmbed ?? {};
+          ctx.openDialog?.(code, getPos());
+        };
+
+        const handleDelete = () => {
+          const pos = getPos();
+          if (typeof pos === 'number') {
+            editor.chain().focus().deleteRange({ from: pos, to: pos + currentNode.nodeSize }).run();
+          }
+        };
+
+        root.render(
+          <RichTextHtmlEmbedBlock
+            code={code}
+            isEditable={editor.isEditable}
+            isSelected={isSelected}
+            onEditClick={handleEditClick}
+            onDelete={handleDelete}
+          />,
+        );
+      };
+
+      queueMicrotask(renderBlock);
+
+      return {
+        dom: container,
+        stopEvent: () => true,
+        selectNode: () => {
+          isSelected = true;
+          renderBlock();
+        },
+        deselectNode: () => {
+          isSelected = false;
+          renderBlock();
+        },
+        update: (updatedNode) => {
+          if (updatedNode.type.name !== 'richTextHtmlEmbed') return false;
+          currentNode = updatedNode;
+          renderBlock();
+          return true;
+        },
+        destroy: () => {
+          setTimeout(() => root.unmount(), 0);
+        },
+      };
+    };
+  },
+});
+
+/**
  * Custom Tiptap mark for dynamic text styles
  * Preserves the style keys from canvas text editor without applying visual styling
  */
@@ -340,9 +420,13 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
 }, ref) => {
   const isFullVariant = variant === 'full';
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const [tableContextMenuOpen, setTableContextMenuOpen] = useState(false);
   const [linkPopoverOpen, setLinkPopoverOpen] = useState(false);
   const [imagePopoverOpen, setImagePopoverOpen] = useState(false);
   const [componentPickerOpen, setComponentPickerOpen] = useState(false);
+  const [htmlEmbedDialogOpen, setHtmlEmbedDialogOpen] = useState(false);
+  const [htmlEmbedDialogCode, setHtmlEmbedDialogCode] = useState('');
+  const htmlEmbedDialogPosRef = useRef<number | null>(null);
   const openFileManager = useEditorStore((s) => s.openFileManager);
   // Track if update is coming from editor to prevent infinite loop
   const isInternalUpdateRef = useRef(false);
@@ -391,7 +475,12 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
         Blockquote,
         Code,
         RichTextImageWithNodeView,
+        RichTextHtmlEmbedWithNodeView,
         HorizontalRule,
+        RichTextTable.configure({ resizable: false }),
+        RichTextTableRow,
+        RichTextTableCell,
+        RichTextTableHeader,
       ];
 
       // Always include heading extension so content with headings is preserved
@@ -535,6 +624,21 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
       editorContext: { fieldGroups, allFields, collections, isInsideCollectionLayer },
     };
   }, [editor, fieldGroups, allFields, collections, isInsideCollectionLayer]);
+
+  // Sync HTML embed dialog opener into editor storage so the node view can trigger it
+  useEffect(() => {
+    if (!editor) return;
+    const storage = editor.storage as Record<string, any>;
+    storage.richTextHtmlEmbed = {
+      ...storage.richTextHtmlEmbed,
+      openDialog: (code: string, pos: number | (() => number | undefined)) => {
+        const resolvedPos = typeof pos === 'function' ? pos() : pos;
+        setHtmlEmbedDialogCode(code);
+        htmlEmbedDialogPosRef.current = typeof resolvedPos === 'number' ? resolvedPos : null;
+        setHtmlEmbedDialogOpen(true);
+      },
+    };
+  }, [editor]);
 
   // Update editor content when value or fields change externally
   useEffect(() => {
@@ -1060,6 +1164,34 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
                 <Icon name="component" className="size-3" />
               </button>
             </ToggleGroupItem>
+            <ToggleGroupItem
+              value="table"
+              asChild
+            >
+              <button
+                type="button"
+                title="Insert Table"
+                disabled={disabled}
+                className="w-auto min-w-0 shrink-0"
+                onClick={() => editor.chain().focus().insertRichTextTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}
+              >
+                <Icon name="table" className="size-3" />
+              </button>
+            </ToggleGroupItem>
+            <ToggleGroupItem
+              value="htmlEmbed"
+              asChild
+            >
+              <button
+                type="button"
+                title="Insert HTML Embed"
+                disabled={disabled}
+                className="w-auto min-w-0 shrink-0"
+                onClick={() => editor.chain().focus().insertHtmlEmbed().run()}
+              >
+                <Icon name="code-block" className="size-3" />
+              </button>
+            </ToggleGroupItem>
           </ToggleGroup>
 
           <div className="flex-1" />
@@ -1359,6 +1491,28 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
           >
             <Icon name="component" className="size-3" />
           </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="size-6!"
+            title="Insert Table"
+            disabled={disabled}
+            onClick={() => editor.chain().focus().insertRichTextTable({ rows: 3, cols: 3, withHeaderRow: true }).run()}
+          >
+            <Icon name="table" className="size-3" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="size-6!"
+            title="Insert HTML Embed"
+            disabled={disabled}
+            onClick={() => editor.chain().focus().insertHtmlEmbed().run()}
+          >
+            <Icon name="code" className="size-3" />
+          </Button>
 
           <div className="flex-1" />
 
@@ -1394,9 +1548,91 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
         </div>
       )}
 
-      <div className={cn('relative', fullHeight && 'flex-1 min-h-0 flex flex-col [&>div]:flex-1 [&>div]:min-h-0 [&>div]:flex [&>div]:flex-col [&_.tiptap]:flex-1 [&_.tiptap]:min-h-0 [&_.tiptap]:overflow-y-auto')}>
-        <EditorContent editor={editor} />
-      </div>
+      <ContextMenu
+        onOpenChange={(open) => {
+          if (!open) setTableContextMenuOpen(false);
+        }}
+      >
+        <ContextMenuTrigger
+          asChild
+          disabled={disabled || !withFormatting}
+          onContextMenu={(e) => {
+            if (!editor || !withFormatting || disabled) return;
+            const target = e.target as HTMLElement;
+            const isInTable = !!target.closest('table');
+            if (!isInTable) {
+              e.preventDefault();
+              setTableContextMenuOpen(false);
+              return;
+            }
+            const pos = editor.view.posAtCoords({ left: e.clientX, top: e.clientY });
+            if (pos) {
+              editor.chain().focus().setTextSelection(pos.pos).run();
+            }
+            setTableContextMenuOpen(true);
+          }}
+        >
+          <div className={cn('relative', fullHeight && 'flex-1 min-h-0 flex flex-col [&>div]:flex-1 [&>div]:min-h-0 [&>div]:flex [&>div]:flex-col [&_.tiptap]:flex-1 [&_.tiptap]:min-h-0 [&_.tiptap]:overflow-y-auto')}>
+            <EditorContent editor={editor} />
+          </div>
+        </ContextMenuTrigger>
+        {tableContextMenuOpen && editor && (
+          <ContextMenuContent>
+            <ContextMenuItem
+              onClick={() => editor.chain().focus().addColumnBefore().run()}
+              disabled={!editor.can().addColumnBefore()}
+            >
+              Insert column before
+            </ContextMenuItem>
+            <ContextMenuItem
+              onClick={() => editor.chain().focus().addColumnAfter().run()}
+              disabled={!editor.can().addColumnAfter()}
+            >
+              Insert column after
+            </ContextMenuItem>
+            <ContextMenuItem
+              onClick={() => editor.chain().focus().addRowBefore().run()}
+              disabled={!editor.can().addRowBefore()}
+            >
+              Insert row above
+            </ContextMenuItem>
+            <ContextMenuItem
+              onClick={() => editor.chain().focus().addRowAfter().run()}
+              disabled={!editor.can().addRowAfter()}
+            >
+              Insert row below
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              onClick={() => editor.chain().focus().deleteColumn().run()}
+              disabled={!editor.can().deleteColumn()}
+            >
+              Delete column
+            </ContextMenuItem>
+            <ContextMenuItem
+              onClick={() => editor.chain().focus().deleteRow().run()}
+              disabled={!editor.can().deleteRow()}
+            >
+              Delete row
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              onClick={() => editor.chain().focus().toggleCurrentRowHeader().run()}
+              disabled={!editor.can().toggleCurrentRowHeader()}
+            >
+              Toggle header row
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              variant="destructive"
+              onClick={() => editor.chain().focus().deleteTable().run()}
+              disabled={!editor.can().deleteTable()}
+            >
+              Delete table
+            </ContextMenuItem>
+          </ContextMenuContent>
+        )}
+      </ContextMenu>
 
       {/* Inline Variable Button - absolute positioned (when no formatting toolbar is shown) */}
       {!disabled && (!withFormatting || !showFormattingToolbar) && canShowVariables && (
@@ -1431,6 +1667,64 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
         </div>
       )}
 
+      {/* Table context toolbar */}
+      {withFormatting && showFormattingToolbar && editor && !disabled && editor.isActive('table') && (
+        <div className="flex items-center gap-0.5 border-t border-border px-2 py-1 bg-muted/50">
+          <span className="text-[10px] text-muted-foreground mr-1.5">Table</span>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="size-6! p-0!"
+            title="Add column after"
+            onClick={() => editor.chain().focus().addColumnAfter().run()}
+          >
+            <Icon name="add-column" className="size-3" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="size-6! p-0!"
+            title="Add row after"
+            onClick={() => editor.chain().focus().addRowAfter().run()}
+          >
+            <Icon name="add-row" className="size-3" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="size-6! p-0!"
+            title="Delete column"
+            onClick={() => editor.chain().focus().deleteColumn().run()}
+          >
+            <Icon name="delete-column" className="size-3" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="size-6! p-0!"
+            title="Delete row"
+            onClick={() => editor.chain().focus().deleteRow().run()}
+          >
+            <Icon name="delete-row" className="size-3" />
+          </Button>
+          <div className="w-px h-4 bg-border mx-1" />
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            className="size-6! p-0! text-destructive hover:text-destructive"
+            title="Delete table"
+            onClick={() => editor.chain().focus().deleteTable().run()}
+          >
+            <Icon name="delete-table" className="size-3" />
+          </Button>
+        </div>
+      )}
+
       <RichTextComponentPicker
         open={componentPickerOpen}
         onOpenChange={setComponentPickerOpen}
@@ -1438,6 +1732,27 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
           editor?.chain().focus().insertComponent({ componentId }).run();
         }}
         disabled={disabled}
+      />
+
+      <RichTextHtmlEmbedDialog
+        open={htmlEmbedDialogOpen}
+        onOpenChange={setHtmlEmbedDialogOpen}
+        code={htmlEmbedDialogCode}
+        onSave={(newCode) => {
+          if (!editor) return;
+          const pos = htmlEmbedDialogPosRef.current;
+          if (typeof pos === 'number') {
+            const node = editor.state.doc.nodeAt(pos);
+            if (node?.type.name === 'richTextHtmlEmbed') {
+              const tr = editor.state.tr.setNodeMarkup(pos, undefined, {
+                ...node.attrs,
+                code: newCode,
+              });
+              editor.view.dispatch(tr);
+            }
+          }
+          htmlEmbedDialogPosRef.current = null;
+        }}
       />
     </div>
   );

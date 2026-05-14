@@ -46,6 +46,7 @@ export const FIELD_TYPES = [
   { value: 'date', label: 'Date & Time', icon: 'calendar', category: 'basic', hasDefault: true },
   { value: 'date_only', label: 'Date', icon: 'calendar', category: 'basic', hasDefault: true },
   { value: 'color', label: 'Color', icon: 'droplet', category: 'basic', hasDefault: true },
+  { value: 'option', label: 'Option', icon: 'select', category: 'basic', hasDefault: true },
   { value: 'email', label: 'Email', icon: 'email', category: 'contact', hasDefault: true },
   { value: 'phone', label: 'Phone', icon: 'phone', category: 'contact', hasDefault: true },
   { value: 'link', label: 'Link', icon: 'link', category: 'contact', hasDefault: true },
@@ -55,6 +56,7 @@ export const FIELD_TYPES = [
   { value: 'document', label: 'Document', icon: 'file-text', category: 'asset', hasDefault: true },
   { value: 'reference', label: 'Reference', icon: 'database', category: 'relation', hasDefault: false },
   { value: 'multi_reference', label: 'Multi-reference', icon: 'database', category: 'relation', hasDefault: false },
+  { value: 'count', label: 'Count', icon: 'hash', category: 'relation', hasDefault: false },
 ] as const satisfies readonly { value: string; label: string; icon: string; category: FieldTypeCategory; hasDefault: boolean }[];
 
 export type FieldType = (typeof FIELD_TYPES)[number]['value'];
@@ -178,6 +180,7 @@ export function getOperatorsForFieldType(
 ): OperatorOption[] {
   switch (fieldType) {
     case 'number':
+    case 'count':
       return NUMBER_OPERATORS;
     case 'date':
     case 'date_only':
@@ -475,12 +478,15 @@ export function buildFieldGroups(config: BuildFieldGroupsConfig): FieldGroup[] |
   const groups: FieldGroup[] = [];
   const addedCollectionIds = new Set<string>();
 
-  // Add multi-asset virtual fields if inside a multi-asset collection context
+  // Add multi-asset virtual fields if inside a multi-asset collection context.
+  // Virtual asset field values live in the per-iteration item data only
+  // (never in pageCollectionItemData), so always use 'collection' source —
+  // even when the parent multi-image field itself is page-bound.
   if (multiAssetContext) {
     groups.push({
       fields: buildMultiAssetVirtualFields(),
       label: 'File fields',
-      source: multiAssetContext.source,
+      source: 'collection',
     });
   }
 
@@ -551,7 +557,7 @@ export const VIDEO_FIELD_TYPES: CollectionFieldType[] = ['video'];
 export const VIDEO_ID_FIELD_TYPES: CollectionFieldType[] = ['text'];
 
 /** Field types that can be bound to simple text content (excludes rich_text and media/asset types) */
-export const SIMPLE_TEXT_FIELD_TYPES: CollectionFieldType[] = ['text', 'number', 'date', 'date_only', 'email', 'phone'];
+export const SIMPLE_TEXT_FIELD_TYPES: CollectionFieldType[] = ['text', 'number', 'date', 'date_only', 'email', 'phone', 'option', 'count'];
 
 /** Field types that can be bound to rich text content (excludes media/asset types) */
 export const RICH_TEXT_FIELD_TYPES: CollectionFieldType[] = [...SIMPLE_TEXT_FIELD_TYPES, 'rich_text'];

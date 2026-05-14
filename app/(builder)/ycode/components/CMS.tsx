@@ -36,6 +36,7 @@ import { useSettingsStore } from '@/stores/useSettingsStore';
 import { slugify, isTruthyBooleanValue, parseMultiReferenceValue, getSortParams } from '@/lib/collection-utils';
 import { getSampleCollectionOptions } from '@/lib/sample-collections';
 import { ASSET_CATEGORIES, getOptimizedImageUrl, isAssetOfType } from '@/lib/asset-utils';
+import { parseMultiAssetFieldValue } from '@/lib/multi-asset-utils';
 import { type FieldType, findDisplayField, getItemDisplayName, getFieldIcon, isMultipleAssetField, findStatusFieldId, isDateFieldType } from '@/lib/collection-field-utils';
 import { CollectionStatusPill, parseStatusValue } from './CollectionStatusPill';
 import { extractPlainTextFromTiptap } from '@/lib/tiptap-utils';
@@ -362,6 +363,7 @@ const CMS = React.memo(function CMS() {
     reorderCollections,
     setItemPublishable,
     setItemStatus,
+    reloadCurrentItems,
   } = useCollectionsStore();
 
   // Collection collaboration sync
@@ -459,6 +461,23 @@ const CMS = React.memo(function CMS() {
     [selectedCollectionId, items]
   );
   const totalItems = selectedCollectionId ? (itemsTotalCount[selectedCollectionId] || 0) : 0;
+
+  // Build slug map across ALL loaded collections for cross-collection link resolution
+  const allCollectionItemSlugs = useMemo(() => {
+    const slugs: Record<string, string> = {};
+    for (const collectionId of Object.keys(items)) {
+      const colFields = fields[collectionId] || [];
+      const slugField = colFields.find(f => f.key === 'slug');
+      if (!slugField) continue;
+      for (const item of items[collectionId]) {
+        const slugValue = item.values[slugField.id];
+        if (slugValue) {
+          slugs[item.id] = slugValue;
+        }
+      }
+    }
+    return slugs;
+  }, [items, fields]);
 
   // Drag and drop sensors
   const sensors = useSensors(
@@ -571,13 +590,18 @@ const CMS = React.memo(function CMS() {
         // Only load items if:
         // 1. No items in store, OR
         // 2. We're on page > 1 (need different page), OR
-        // 3. We have fewer items than total AND fewer than what we're requesting
+        // 3. We have fewer items than total AND fewer than what we're requesting, OR
+        // 4. The collection has computed `count` fields — they read from another
+        //    collection's references and aren't invalidated when the source items
+        //    change, so we always re-fetch on switch to keep counts fresh.
         const initialPage = urlState.page || 1;
         const initialPageSize = urlState.pageSize || 25;
+        const hasCountField = (existingFields || []).some(f => f.type === 'count');
         const needsLoad = !existingItems ||
           existingItems.length === 0 ||
           initialPage > 1 ||
-          (existingItems.length < totalCount && existingItems.length < initialPageSize);
+          (existingItems.length < totalCount && existingItems.length < initialPageSize) ||
+          hasCountField;
 
         if (needsLoad) {
           loadItems(selectedCollectionId, initialPage, initialPageSize, currentSortBy, currentSortOrder);
@@ -1225,12 +1249,44 @@ const CMS = React.memo(function CMS() {
           ? { ...editingField.data, ...data.data }
           : editingField.data;
 
+        // Detect option renames or removals so we refresh the item list
+        // after the server propagates renames / clears removed values.
+        const previousOptions = Array.isArray(editingField.data?.options)
+          ? editingField.data.options
+          : [];
+        const nextOptions = Array.isArray(data.data?.options)
+          ? data.data.options
+          : [];
+        const previousById = new Map(previousOptions.map(o => [o.id, o.name]));
+        const nextIds = new Set(nextOptions.map(o => o.id));
+        const isOptionField = editingField.type === 'option';
+        const hasOptionRename =
+          isOptionField &&
+          nextOptions.some((next) => {
+            const previousName = previousById.get(next.id);
+            return typeof previousName === 'string' && previousName.trim() !== next.name.trim();
+          });
+        const hasOptionRemoval =
+          isOptionField && previousOptions.some(prev => !nextIds.has(prev.id));
+
+        const previousCountCfg = editingField.data?.count;
+        const nextCountCfg = data.data?.count;
+        const countConfigChanged =
+          editingField.type === 'count' &&
+          (!!previousCountCfg !== !!nextCountCfg ||
+            previousCountCfg?.collectionId !== nextCountCfg?.collectionId ||
+            previousCountCfg?.fieldId !== nextCountCfg?.fieldId);
+
         await updateField(selectedCollectionId, editingField.id, {
           name: data.name,
           default: data.default || null,
           reference_collection_id: data.reference_collection_id,
           data: mergedData,
         });
+
+        if (hasOptionRename || hasOptionRemoval || countConfigChanged) {
+          await reloadCurrentItems();
+        }
       } else {
         // Create new field
         await createField(selectedCollectionId, {
@@ -1244,6 +1300,12 @@ const CMS = React.memo(function CMS() {
           reference_collection_id: data.reference_collection_id || null,
           data: data.data,
         });
+
+        // Count fields are computed at fetch time. Reload so the column shows
+        // real values immediately instead of the default 0 placeholder.
+        if (data.type === 'count') {
+          await reloadCurrentItems();
+        }
       }
 
       // Close dialog and reset
@@ -1627,9 +1689,8 @@ const CMS = React.memo(function CMS() {
 
                       // Image fields - show thumbnail (match file manager: SVG inline, raster via img + checkerboard)
                       if (field.type === 'image' && value) {
-                        // Handle multi-asset fields (value is an array)
                         const assetIds: string[] = isMultipleAssetField(field)
-                          ? (Array.isArray(value) ? value : [])
+                          ? parseMultiAssetFieldValue(value)
                           : [value as string];
 
                         if (assetIds.length === 0) {
@@ -1706,9 +1767,8 @@ const CMS = React.memo(function CMS() {
 
                       // Audio/Video/Document fields - show icon with filename in tooltip
                       if ((field.type === 'audio' || field.type === 'video' || field.type === 'document') && value) {
-                        // Handle multi-asset fields (value is an array)
                         const assetIds: string[] = isMultipleAssetField(field)
-                          ? (Array.isArray(value) ? value : [])
+                          ? parseMultiAssetFieldValue(value)
                           : [value as string];
 
                         if (assetIds.length === 0) {
@@ -1795,32 +1855,28 @@ const CMS = React.memo(function CMS() {
                       // Link fields - format for display
                       if (field.type === 'link') {
                         let displayValue = '-';
+                        let isAssetLink = false;
                         if (value) {
                           try {
                             const linkValue = typeof value === 'string' ? parseCollectionLinkValue(value) : value;
                             if (linkValue) {
-                              // Build collectionItemSlugs map for dynamic page resolution
-                              const collectionItemSlugs: Record<string, string> = {};
-                              collectionItems.forEach(item => {
-                                const slugField = collectionFields.find(f => f.key === 'slug');
-                                if (slugField && item.values[slugField.id]) {
-                                  collectionItemSlugs[item.id] = item.values[slugField.id];
-                                }
-                              });
+                              if (linkValue.type === 'asset' && linkValue.asset?.id) {
+                                const asset = getAsset(linkValue.asset.id);
+                                displayValue = asset?.filename || linkValue.asset.id;
+                                isAssetLink = true;
+                              } else {
+                                const resolvedUrl = resolveCollectionLinkValue(linkValue, {
+                                  pages,
+                                  folders,
+                                  collectionItemSlugs: allCollectionItemSlugs,
+                                  isPreview: false,
+                                  locale: undefined,
+                                });
 
-                              // Resolve the link to get the actual URL
-                              const resolvedUrl = resolveCollectionLinkValue(linkValue, {
-                                pages,
-                                folders,
-                                collectionItemSlugs,
-                                isPreview: false,
-                                locale: undefined,
-                              });
-
-                              displayValue = resolvedUrl || '-';
+                                displayValue = resolvedUrl || '-';
+                              }
                             }
                           } catch {
-                            // Invalid JSON, show as-is
                             displayValue = String(value);
                           }
                         }
@@ -1830,8 +1886,14 @@ const CMS = React.memo(function CMS() {
                             className="px-4 py-5 text-muted-foreground max-w-50"
                             onClick={() => handleEditItem(item)}
                           >
-                            <span className="block truncate">
-                              {displayValue}
+                            <span className="flex items-center gap-1.5 truncate">
+                              {isAssetLink && (
+                                <Icon
+                                  name="paperclip"
+                                  className="size-3 shrink-0"
+                                />
+                              )}
+                              <span className="truncate">{displayValue}</span>
                             </span>
                           </td>
                         );
@@ -1872,6 +1934,39 @@ const CMS = React.memo(function CMS() {
                                 aria-hidden="true"
                               />
                             </div>
+                          </td>
+                        );
+                      }
+
+                      // Option fields - display as Badge with the option name
+                      if (field.type === 'option') {
+                        return (
+                          <td
+                            key={field.id}
+                            className="px-4 py-5"
+                            onClick={() => handleEditItem(item)}
+                          >
+                            {value ? (
+                              <Badge variant="secondary" className="font-normal">
+                                <span className="line-clamp-1 truncate max-w-50">{value}</span>
+                              </Badge>
+                            ) : (
+                              <span className="text-muted-foreground">-</span>
+                            )}
+                          </td>
+                        );
+                      }
+
+                      // Count fields - computed numeric value, defaults to 0
+                      if (field.type === 'count') {
+                        const numeric = value != null && value !== '' ? value : '0';
+                        return (
+                          <td
+                            key={field.id}
+                            className="px-4 py-5 text-muted-foreground tabular-nums"
+                            onClick={() => handleEditItem(item)}
+                          >
+                            <span className="line-clamp-1 truncate">{numeric}</span>
                           </td>
                         );
                       }

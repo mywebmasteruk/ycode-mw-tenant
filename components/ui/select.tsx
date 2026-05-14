@@ -7,6 +7,7 @@ import { cva, type VariantProps } from 'class-variance-authority'
 
 import { cn } from '@/lib/utils'
 import Icon from '@/components/ui/icon';
+import { Input } from '@/components/ui/input';
 
 function Select({
   ...props
@@ -103,14 +104,27 @@ function SelectContent({
   children,
   position = 'popper',
   align = 'center',
+  searchable,
+  searchValue,
+  onSearchChange,
+  searchPlaceholder,
   ...props
-}: React.ComponentProps<typeof SelectPrimitive.Content>) {
+}: React.ComponentProps<typeof SelectPrimitive.Content> & {
+  searchable?: boolean;
+  searchValue?: string;
+  onSearchChange?: (value: string) => void;
+  searchPlaceholder?: string;
+}) {
+  const searchInputRef = React.useRef<HTMLInputElement>(null);
+  const isSearchFocusedRef = React.useRef(false);
+
   return (
     <SelectPrimitive.Portal>
       <SelectPrimitive.Content
         data-slot="select-content"
         className={cn(
           'bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 relative z-50 max-h-(--radix-select-content-available-height) min-w-[8rem] origin-(--radix-select-content-transform-origin) overflow-x-hidden overflow-y-auto rounded-lg border border-transparent shadow-md',
+          searchable && '[&_[data-slot=select-item]:hover]:bg-accent [&_[data-slot=select-item]:hover]:text-accent-foreground',
           position === 'popper' &&
             'data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1',
           className
@@ -119,6 +133,30 @@ function SelectContent({
         align={align}
         {...props}
       >
+        {searchable && (
+          <div
+            className="sticky top-0 z-10 bg-popover p-1"
+            onPointerDown={(e) => e.stopPropagation()}
+            onPointerUp={(e) => e.stopPropagation()}
+          >
+            <Input
+              ref={searchInputRef}
+              size="xs"
+              placeholder={searchPlaceholder || 'Search...'}
+              value={searchValue}
+              onChange={(e) => onSearchChange?.(e.target.value)}
+              onKeyDown={(e) => e.stopPropagation()}
+              onFocus={() => { isSearchFocusedRef.current = true; }}
+              onBlur={() => {
+                requestAnimationFrame(() => {
+                  if (isSearchFocusedRef.current) {
+                    searchInputRef.current?.focus();
+                  }
+                });
+              }}
+            />
+          </div>
+        )}
         <SelectScrollUpButton />
         <SelectPrimitive.Viewport
           className={cn(
@@ -126,6 +164,7 @@ function SelectContent({
             position === 'popper' &&
               'h-[var(--radix-select-trigger-height)] w-full min-w-[var(--radix-select-trigger-width)] scroll-my-1'
           )}
+          onPointerDown={searchable ? () => { isSearchFocusedRef.current = false; } : undefined}
         >
           {children}
         </SelectPrimitive.Viewport>
@@ -157,7 +196,7 @@ function SelectItem({
     <SelectPrimitive.Item
       data-slot="select-item"
       className={cn(
-        "focus:bg-accent focus:text-accent-foreground text-muted-foreground [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full cursor-pointer items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-xs outline-hidden select-none data-[disabled]:opacity-50 data-[disabled]:cursor-not-allowed [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
+        "focus:bg-accent focus:text-accent-foreground text-muted-foreground [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full cursor-pointer items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-xs outline-hidden select-none overflow-hidden data-[disabled]:opacity-50 data-[disabled]:cursor-not-allowed [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
         className
       )}
       {...props}
@@ -167,7 +206,16 @@ function SelectItem({
           <Icon name="check" className="size-3 opacity-50" />
         </SelectPrimitive.ItemIndicator>
       </span>
-      <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+      {/*
+        Render ItemText as a flex span so icon + label sit on the same line.
+        Without this, Tailwind preflight forces the icon to display:block and it
+        wraps onto its own line inside Radix's default inline ItemText wrapper.
+      */}
+      <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap [&>span]:overflow-hidden [&>span]:text-ellipsis [&>span]:whitespace-nowrap">
+        <SelectPrimitive.ItemText asChild>
+          <span className="flex items-center gap-2">{children}</span>
+        </SelectPrimitive.ItemText>
+      </span>
     </SelectPrimitive.Item>
   )
 }

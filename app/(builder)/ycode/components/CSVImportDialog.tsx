@@ -200,19 +200,60 @@ export function CSVImportDialog({
 
   const hasMappedColumns = getMappedFieldIds().size > 0;
 
-  // Start import
+  // Upload the CSV file to Supabase Storage via presigned URL
+  const uploadCSVToStorage = async (): Promise<string> => {
+    if (!file) throw new Error('No file selected');
+
+    // 1. Get a presigned upload URL from the server
+    const presignResponse = await fetch('/ycode/api/files/presign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: file.name,
+        mimeType: 'text/csv',
+        fileSize: file.size,
+        category: 'documents',
+      }),
+    });
+
+    if (!presignResponse.ok) {
+      const errorData = await presignResponse.json();
+      throw new Error(errorData.error || 'Failed to get upload URL');
+    }
+
+    const { data: presignData } = await presignResponse.json();
+
+    // 2. Upload directly to Supabase Storage (bypasses serverless body limit)
+    const uploadResponse = await fetch(presignData.signedUrl, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'text/csv' },
+      body: file,
+    });
+
+    if (!uploadResponse.ok) {
+      throw new Error('Failed to upload CSV file to storage');
+    }
+
+    return presignData.storagePath;
+  };
+
+  // Start import: upload file → create job → poll for progress
   const startImport = async () => {
     setImporting(true);
     setError(null);
 
     try {
-      // Create import job
+      // Upload CSV to storage first
+      const csvStoragePath = await uploadCSVToStorage();
+
+      // Create import job with the storage reference
       const response = await fetch(`/ycode/api/collections/${collectionId}/import`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           columnMapping,
-          csvData: rows,
+          totalRows: rows.length,
+          csvStoragePath,
         }),
       });
 
@@ -225,7 +266,6 @@ export function CSVImportDialog({
       setImportId(data.data.importId);
       setStep('progress');
 
-      // Start processing and polling
       processImport(data.data.importId);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start import');
@@ -233,38 +273,144 @@ export function CSVImportDialog({
     }
   };
 
-  // Process import by sequentially triggering batches until complete
+  const MAX_BODY_BYTES = 3_500_000;
+  const MAX_BATCH_SIZE = 15;
+
+  /** Strip columns mapped to __skip__ so we only send data the server needs. */
+  const stripSkippedColumns = (row: Record<string, string>): Record<string, string> => {
+    const stripped: Record<string, string> = {};
+    for (const [col, fieldId] of Object.entries(columnMapping)) {
+      if (fieldId && fieldId !== SKIP_COLUMN && col in row) {
+        stripped[col] = row[col];
+      }
+    }
+    return stripped;
+  };
+
+  /** Build the next batch of stripped rows that fits within the body size limit. */
+  const buildBatch = (startIndex: number): Record<string, string>[] => {
+    const batch: Record<string, string>[] = [];
+    let estimatedSize = 0;
+
+    for (let i = startIndex; i < rows.length && batch.length < MAX_BATCH_SIZE; i++) {
+      const stripped = stripSkippedColumns(rows[i]);
+      const rowSize = Object.values(stripped).reduce((sum, v) => sum + v.length, 0) * 2;
+      if (estimatedSize + rowSize > MAX_BODY_BYTES) break;
+      batch.push(stripped);
+      estimatedSize += rowSize;
+    }
+
+    return batch;
+  };
+
+  /**
+   * Upload a batch of rows as a JSON file to storage via presigned URL.
+   * Used when rows are too large for Vercel's request body limit.
+   */
+  const uploadBatchToStorage = async (batch: Record<string, string>[]): Promise<string> => {
+    const json = JSON.stringify(batch);
+    const blob = new Blob([json], { type: 'application/json' });
+
+    const presignRes = await fetch('/ycode/api/files/presign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: `batch-${Date.now()}.json`,
+        mimeType: 'application/json',
+        fileSize: blob.size,
+      }),
+    });
+
+    if (!presignRes.ok) {
+      const err = await presignRes.json();
+      throw new Error(err.error || 'Failed to get batch upload URL');
+    }
+
+    const { data: presignData } = await presignRes.json();
+
+    const uploadRes = await fetch(presignData.signedUrl, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: blob,
+    });
+
+    if (!uploadRes.ok) {
+      throw new Error('Failed to upload batch to storage');
+    }
+
+    return presignData.storagePath;
+  };
+
+  /**
+   * Send row batches from local state to the server for processing.
+   * Small batches go directly in the body; oversized rows are uploaded
+   * to storage so the server downloads only that batch file (not the full CSV).
+   */
   const processImport = async (id: string) => {
     abortRef.current = false;
+    let currentIndex = 0;
 
-    while (!abortRef.current) {
+    while (!abortRef.current && currentIndex < rows.length) {
+      const batch = buildBatch(currentIndex);
+
+      try {
+        let requestBody: Record<string, unknown>;
+
+        if (batch.length > 0) {
+          requestBody = { importId: id, rows: batch };
+        } else {
+          // Row is too large for the body — upload just this single row to storage
+          const oversizedRow = stripSkippedColumns(rows[currentIndex]);
+          const batchStoragePath = await uploadBatchToStorage([oversizedRow]);
+          requestBody = { importId: id, batchStoragePath };
+        }
+
+        const response = await fetch('/ycode/api/collections/import/process', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          setImportStatus(data.data);
+
+          const serverProcessed = (data.data.processedRows ?? 0) + (data.data.failedRows ?? 0);
+          currentIndex = serverProcessed;
+
+          if (data.data.status === 'completed' || data.data.status === 'failed' || data.data.isComplete) {
+            setImporting(false);
+            setStep('complete');
+            onImportComplete?.();
+            return;
+          }
+        } else {
+          // Server returned an error (e.g. 500/OOM) — skip this batch and continue
+          console.error(`Process request failed with status ${response.status}`);
+          currentIndex += batch.length || 1;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 0));
+      } catch (err) {
+        // Network error or server crash — skip batch and continue
+        console.error('Process error:', err);
+        currentIndex += batch.length || 1;
+      }
+    }
+
+    if (!abortRef.current) {
       try {
         const response = await fetch('/ycode/api/collections/import/process', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ importId: id }),
         });
-
         const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(data.error || 'Failed to process import');
-        }
-
-        setImportStatus(data.data);
-
-        if (data.data.status === 'completed' || data.data.status === 'failed' || data.data.isComplete) {
-          setImporting(false);
-          setStep('complete');
-          onImportComplete?.();
-          return;
-        }
-      } catch (err) {
-        console.error('Process error:', err);
-        setImporting(false);
-        setStep('complete');
-        return;
-      }
+        if (response.ok) setImportStatus(data.data);
+      } catch { /* best-effort finalization */ }
+      setImporting(false);
+      setStep('complete');
+      onImportComplete?.();
     }
   };
 

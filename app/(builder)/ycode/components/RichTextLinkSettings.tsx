@@ -35,7 +35,8 @@ import { useAssetsStore } from '@/stores/useAssetsStore';
 import { useEditorStore } from '@/stores/useEditorStore';
 import { getAssetIcon } from '@/lib/asset-utils';
 import { collectionsApi } from '@/lib/api';
-import { getLayerIcon, getLayerName, getCollectionVariable } from '@/lib/layer-utils';
+import { getCollectionVariable, findLayersWithAnchorId } from '@/lib/layer-utils';
+import { getLayerIcon, getLayerName } from '@/lib/layer-display-utils';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import PageSelector from './PageSelector';
 import { filterFieldGroupsByType, flattenFieldGroups, LINK_FIELD_TYPES, buildReferenceItemOptions, type FieldGroup } from '@/lib/collection-field-utils';
@@ -78,6 +79,7 @@ export default function RichTextLinkSettings({
 }: RichTextLinkSettingsProps) {
   const [collectionItems, setCollectionItems] = useState<CollectionItemWithValues[]>([]);
   const [loadingItems, setLoadingItems] = useState(false);
+  const [collectionItemSearch, setCollectionItemSearch] = useState('');
 
   // Stores
   const pages = usePagesStore((state) => state.pages);
@@ -130,26 +132,6 @@ export default function RichTextLinkSettings({
     return pages.find((p) => p.id === pageId) || null;
   }, [pageId, pages]);
 
-  // Flatten layers and find all layers with attributes.id
-  const findLayersWithId = useCallback((layers: Layer[]): Array<{ layer: Layer; id: string }> => {
-    const result: Array<{ layer: Layer; id: string }> = [];
-    const stack: Layer[] = [...layers];
-
-    while (stack.length > 0) {
-      const currLayer = stack.pop()!;
-
-      if (currLayer.attributes?.id) {
-        result.push({ layer: currLayer, id: currLayer.attributes.id });
-      }
-
-      if (currLayer.children) {
-        stack.push(...currLayer.children);
-      }
-    }
-
-    return result;
-  }, []);
-
   // Get layers for anchor selection based on link type
   const anchorLayers = useMemo(() => {
     let targetPageId: string | null = null;
@@ -160,17 +142,13 @@ export default function RichTextLinkSettings({
       targetPageId = currentPageId;
     }
 
-    if (!targetPageId) {
-      return [];
-    }
+    if (!targetPageId) return [];
 
     const draft = draftsByPageId[targetPageId];
-    if (!draft || !draft.layers) {
-      return [];
-    }
+    if (!draft || !draft.layers) return [];
 
-    return findLayersWithId(draft.layers);
-  }, [linkType, pageId, currentPageId, draftsByPageId, findLayersWithId]);
+    return findLayersWithAnchorId(draft.layers);
+  }, [linkType, pageId, currentPageId, draftsByPageId]);
 
   // Check if selected page is dynamic
   const isDynamicPage = selectedPage?.is_dynamic || false;
@@ -185,6 +163,11 @@ export default function RichTextLinkSettings({
   const targetPageCollectionId = selectedPage?.settings?.cms?.collection_id || null;
   const canUseCurrentPageItem = !hidePageContextOptions && isDynamicPage && isCurrentPageDynamic
     && !!currentPageCollectionId && currentPageCollectionId === targetPageCollectionId;
+
+  // Next/previous navigation only makes sense when the link points back at the
+  // same dynamic page the user is editing.
+  const canUseNextPreviousItem = !hidePageContextOptions && isDynamicPage && isCurrentPageDynamic
+    && !!pageId && pageId === currentPageId;
 
   // Check if the layer itself is a collection layer
   const isCollectionLayer = !!(layer && getCollectionVariable(layer));
@@ -381,25 +364,18 @@ export default function RichTextLinkSettings({
     [linkSettings, onChange]
   );
 
-  // Handle collection item selection
+  // Handle collection item selection. The selection value (concrete id or
+  // dynamic-resolution keyword like `current-page` / `next-item`) is stored
+  // verbatim and resolved at render time by `generateLinkHref`.
   const handleCollectionItemChange = useCallback(
     (itemId: string) => {
       if (!linkSettings) return;
-
-      let storedValue: string;
-      if (itemId === 'current-page') {
-        storedValue = 'current-page';
-      } else if (itemId === 'current-collection') {
-        storedValue = 'current-collection';
-      } else {
-        storedValue = itemId;
-      }
 
       onChange({
         ...linkSettings,
         page: {
           ...linkSettings.page!,
-          collection_item_id: storedValue,
+          collection_item_id: itemId,
         },
       });
     },
@@ -650,19 +626,33 @@ export default function RichTextLinkSettings({
               <div className="col-span-2">
                 <Select
                   value={collectionItemId || ''}
-                  onValueChange={handleCollectionItemChange}
+                  onValueChange={(value) => {
+                    handleCollectionItemChange(value);
+                    setCollectionItemSearch('');
+                  }}
+                  onOpenChange={(open) => {
+                    if (!open) setCollectionItemSearch('');
+                  }}
                   disabled={loadingItems}
                 >
                   <SelectTrigger className="w-full">
                     <SelectValue placeholder={loadingItems ? 'Loading...' : 'Select...'} />
                   </SelectTrigger>
-                  <SelectContent>
+                  <SelectContent
+                    searchable
+                    searchValue={collectionItemSearch}
+                    onSearchChange={setCollectionItemSearch}
+                    searchPlaceholder="Search items..."
+                    className="w-72"
+                  >
                     <LinkItemOptions
                       canUseCurrentPageItem={canUseCurrentPageItem}
                       canUseCurrentCollectionItem={canUseCurrentCollectionItem}
+                      canUseNextPreviousItem={canUseNextPreviousItem}
                       referenceItemOptions={referenceItemOptions}
                       collectionItems={collectionItems}
                       collectionFields={linkedPageCollectionFields}
+                      searchValue={collectionItemSearch}
                     />
                   </SelectContent>
                 </Select>

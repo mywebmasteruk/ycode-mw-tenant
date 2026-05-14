@@ -13,6 +13,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Spinner } from '@/components/ui/spinner';
 import { usePagesStore } from '@/stores/usePagesStore';
+import { useEditorStore } from '@/stores/useEditorStore';
 import {
   Field,
   FieldContent,
@@ -65,6 +66,7 @@ const FolderSettingsPanel = React.forwardRef<FolderSettingsPanelHandle, FolderSe
   folder,
   onSave,
 }, ref) => {
+  const leftSidebarWidth = useEditorStore((state) => state.leftSidebarWidth);
   const [name, setName] = useState('');
   const [slug, setSlug] = useState('');
   const [pageFolderId, setPageFolderId] = useState<string | null>(null);
@@ -473,12 +475,16 @@ const FolderSettingsPanel = React.forwardRef<FolderSettingsPanelHandle, FolderSe
     <>
       {/* Backdrop */}
       <div
-        className="fixed inset-0 left-64 z-40"
+        className="fixed inset-0 z-40"
+        style={{ left: `${leftSidebarWidth}px` }}
         onClick={handleClose}
       />
 
       {/* Panel */}
-      <div className="fixed top-14 left-64 bottom-0 w-125 bg-background border-r z-50 flex flex-col">
+      <div
+        className="fixed top-14 bottom-0 w-125 bg-background border-r z-50 flex flex-col"
+        style={{ left: `${leftSidebarWidth}px` }}
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4">
           <div className="flex items-center justify-center gap-1.5">

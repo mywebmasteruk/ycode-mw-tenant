@@ -23,6 +23,7 @@ async function getSupabaseConnectionParams() {
   }
 
   const connectionParams = parseSupabaseConfig(config);
+  const isSelfHosted = !!config.supabaseUrl;
 
   return {
     host: connectionParams.dbHost,
@@ -30,7 +31,7 @@ async function getSupabaseConnectionParams() {
     database: connectionParams.dbName,
     user: connectionParams.dbUser,
     password: connectionParams.dbPassword,
-    ssl: { rejectUnauthorized: false },
+    ssl: isSelfHosted ? false : { rejectUnauthorized: false },
   };
 }
 
@@ -50,18 +51,17 @@ const createConfig = (): Knex.Config => {
       tableName: 'migrations',
     },
     pool: isVercel ? {
-      // Serverless-optimized pool settings
       min: 0,
       max: 1,
-      // Aggressive connection cleanup for serverless
       acquireTimeoutMillis: 10000,
       createTimeoutMillis: 10000,
       idleTimeoutMillis: 1000,
       reapIntervalMillis: 1000,
       createRetryIntervalMillis: 200,
     } : {
-      min: 2,
-      max: 10,
+      min: 0,
+      max: 3,
+      idleTimeoutMillis: 30000,
     },
   };
 };

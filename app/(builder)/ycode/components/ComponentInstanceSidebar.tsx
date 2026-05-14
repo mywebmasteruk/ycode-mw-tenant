@@ -22,9 +22,8 @@ import SettingsPanel from './SettingsPanel';
 import { useEditorStore } from '@/stores/useEditorStore';
 import { useComponentsStore } from '@/stores/useComponentsStore';
 import { usePagesStore } from '@/stores/usePagesStore';
-import { useEditorActions } from '@/hooks/use-editor-url';
+import { useEditComponent } from '@/hooks/use-edit-component';
 import { detachSpecificLayerFromComponent } from '@/lib/component-utils';
-import { findLayerById } from '@/lib/layer-utils';
 import { EMPTY_OVERRIDES } from '@/lib/variable-utils';
 
 import type { Layer, ComponentVariable, Component, Collection, CollectionField } from '@/types';
@@ -53,7 +52,7 @@ export default function ComponentInstanceSidebar({
   collections,
   isInsideCollectionLayer,
 }: ComponentInstanceSidebarProps) {
-  const { openComponent } = useEditorActions();
+  const editComponent = useEditComponent();
 
   const currentPageId = useEditorStore((state) => state.currentPageId);
   const editingComponentId = useEditorStore((state) => state.editingComponentId);
@@ -87,46 +86,8 @@ export default function ComponentInstanceSidebar({
     .some(cat => Object.keys(overrides?.[cat as keyof typeof overrides] || {}).length > 0);
 
   const handleEditMasterComponent = useCallback(async () => {
-    const { loadComponentDraft, getComponentById: getComp } = useComponentsStore.getState();
-    const { setSelectedLayerId: setLayerId, pushComponentNavigation } = useEditorStore.getState();
-    const { pages: allPages } = usePagesStore.getState();
-
-    setLayerId(null);
-
-    if (editingComponentId) {
-      const currentComponent = getComp(editingComponentId);
-      if (currentComponent) {
-        pushComponentNavigation({
-          type: 'component',
-          id: editingComponentId,
-          name: currentComponent.name,
-          layerId: selectedLayerId,
-        });
-      }
-    } else if (currentPageId) {
-      const currentPage = allPages.find((p) => p.id === currentPageId);
-      if (currentPage) {
-        pushComponentNavigation({
-          type: 'page',
-          id: currentPageId,
-          name: currentPage.name,
-          layerId: selectedLayerId,
-        });
-      }
-    }
-
-    await loadComponentDraft(component.id);
-    openComponent(component.id, currentPageId, undefined, selectedLayerId);
-
-    // Select root layer only if user hasn't already selected a valid component layer during the await
-    if (component.layers && component.layers.length > 0) {
-      const currentSelection = useEditorStore.getState().selectedLayerId;
-      const hasValidSelection = currentSelection && findLayerById(component.layers, currentSelection);
-      if (!hasValidSelection) {
-        setLayerId(component.layers[0].id);
-      }
-    }
-  }, [editingComponentId, currentPageId, selectedLayerId, component, openComponent]);
+    await editComponent(component.id, { returnToLayerId: selectedLayerId });
+  }, [editComponent, component.id, selectedLayerId]);
 
   const handleOverridesChange = useCallback((newOverrides: Layer['componentOverrides']) => {
     onLayerUpdate(selectedLayerId, { componentOverrides: newOverrides });

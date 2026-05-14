@@ -50,7 +50,7 @@ export async function GET() {
 
     // Validate the connection URL format
     try {
-      validateConnectionUrl(config.connectionUrl, config.dbPassword);
+      validateConnectionUrl(config.connectionUrl, config.dbPassword, config.supabaseUrl);
     } catch (validationError) {
       console.error('Invalid connection URL format:', validationError);
 
@@ -60,7 +60,7 @@ export async function GET() {
         is_vercel: isVercel,
         error: validationError instanceof Error
           ? validationError.message
-          : 'Invalid SUPABASE_CONNECTION_URL format. Expected: postgresql://postgres.[PROJECT-ID]:[YOUR-PASSWORD]@aws-x-xx-xxxx-x.pooler.supabase.com:6543/postgres',
+          : 'Invalid SUPABASE_CONNECTION_URL format. For self-hosted Supabase, also set the SUPABASE_URL environment variable.',
       });
     }
 

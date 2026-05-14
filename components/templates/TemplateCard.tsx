@@ -8,7 +8,6 @@
 
 import React from 'react';
 import { cn } from '@/lib/utils';
-import Icon from '@/components/ui/icon';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 
@@ -39,7 +38,7 @@ export function TemplateCard({
 
       <div className="relative w-full overflow-hidden bg-muted rounded-lg">
 
-        <div className="absolute inset-0 z-10 opacity-0 group-hover:opacity-100 bg-black/80 flex flex-col items-stretch p-20 gap-2 justify-center transition ease-in-out flex-col">
+        <div className="absolute inset-0 z-10 opacity-0 group-hover:opacity-100 bg-black/80 flex flex-col items-stretch p-4 gap-2 justify-center transition ease-in-out">
 
           <Button onClick={onClick} variant="white">Use template</Button>
 

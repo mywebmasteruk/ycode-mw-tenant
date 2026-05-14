@@ -300,6 +300,46 @@ export function getGoogleFontLinks(fonts: Font[]): string[] {
     .map(f => buildGoogleFontUrl(f));
 }
 
+/**
+ * Modern Chrome User-Agent. Google Fonts varies its CSS response by UA —
+ * sending a recent Chrome UA reliably returns woff2 with `unicode-range`
+ * subset rules, which is what we want to inline.
+ */
+const MODERN_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+/**
+ * Fetch the resolved @font-face rules for the given Google Fonts CSS URLs and
+ * return them as a single CSS string suitable for inlining in <style>.
+ *
+ * Inlining the CSS skips the round-trip to fonts.googleapis.com — the browser
+ * can start fetching the woff2 binaries directly while parsing the document.
+ *
+ * Returns an empty string if any URL fails to fetch so the caller can fall
+ * back to <link rel="stylesheet"> without partially breaking font loading.
+ */
+export async function fetchGoogleFontsCss(urls: string[]): Promise<string> {
+  if (urls.length === 0) return '';
+
+  try {
+    const responses = await Promise.all(
+      urls.map((url) =>
+        fetch(url, {
+          headers: { 'User-Agent': MODERN_UA },
+          signal: AbortSignal.timeout(5000),
+        }),
+      ),
+    );
+
+    if (responses.some((r) => !r.ok)) return '';
+
+    const cssBlocks = await Promise.all(responses.map((r) => r.text()));
+    return cssBlocks.join('\n');
+  } catch {
+    return '';
+  }
+}
+
 /** Build CSS for custom fonts only (@font-face rules, no @import) */
 export function buildCustomFontsCss(fonts: Font[]): string {
   let css = '';

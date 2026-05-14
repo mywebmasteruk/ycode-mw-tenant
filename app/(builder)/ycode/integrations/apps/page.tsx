@@ -44,6 +44,7 @@ import { useSettingsStore } from '@/stores/useSettingsStore';
 import { MAILERLITE_SUBSCRIBER_FIELDS } from '@/lib/apps/mailerlite/types';
 import type { MailerLiteConnection, MailerLiteFieldMapping } from '@/lib/apps/mailerlite/types';
 import AirtableSettings from './airtable-settings';
+import WebflowSettings from './webflow-settings';
 
 // =============================================================================
 // Types
@@ -340,6 +341,8 @@ export default function AppsPage() {
       loadGroupsAndForms();
     } else if (appId === 'airtable') {
       // AirtableSettings handles its own loading
+    } else if (appId === 'webflow') {
+      // WebflowSettings handles its own loading
     } else if (TOKEN_APP_CONFIGS[appId]) {
       loadTokenApp(appId);
     }
@@ -1080,6 +1083,18 @@ export default function AppsPage() {
               <AirtableSettings
                 onDisconnect={() => updateAppStatus('airtable', false)}
                 onConnectionChange={(connected) => updateAppStatus('airtable', connected)}
+                onCloseAndNavigate={(path) => {
+                  setIsSheetMounted(false);
+                  closeAppSettings();
+                  router.push(path);
+                }}
+              />
+            )}
+
+            {selectedAppId === 'webflow' && (
+              <WebflowSettings
+                onDisconnect={() => updateAppStatus('webflow', false)}
+                onConnectionChange={(connected) => updateAppStatus('webflow', connected)}
                 onCloseAndNavigate={(path) => {
                   setIsSheetMounted(false);
                   closeAppSettings();

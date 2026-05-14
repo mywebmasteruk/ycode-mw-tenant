@@ -6,6 +6,7 @@ import PasswordForm from '@/components/PasswordForm';
 import { fetchGlobalPageSettings } from '@/lib/generate-page-metadata';
 import { parseAuthCookie, getPasswordProtection, fetchFoldersForAuth } from '@/lib/page-auth';
 import { getSettingByKey } from '@/lib/repositories/settingsRepository';
+import { generateColorVariablesCss } from '@/lib/repositories/colorVariableRepository';
 
 // Internal pagination path: always dynamic/no-store.
 export const dynamic = 'force-dynamic';
@@ -66,7 +67,10 @@ export default async function DynamicHome({ searchParams }: DynamicHomeProps) {
 
     if (!protection.isUnlocked) {
       const errorPageData = await fetchErrorPage(401, true);
-      const publishedCSS = await getSettingByKey('published_css');
+      const [publishedCSS, colorVariablesCss] = await Promise.all([
+        getSettingByKey('published_css'),
+        generateColorVariablesCss(),
+      ]);
 
       if (errorPageData) {
         const { page: errorPage, pageLayers: errorPageLayers, components: errorComponents } = errorPageData;
@@ -77,6 +81,7 @@ export default async function DynamicHome({ searchParams }: DynamicHomeProps) {
             layers={errorPageLayers.layers || []}
             components={errorComponents}
             generatedCss={publishedCSS}
+            colorVariablesCss={colorVariablesCss || undefined}
             passwordProtection={{
               pageId: protection.protectedBy === 'page' ? protection.protectedById : undefined,
               folderId: protection.protectedBy === 'folder' ? protection.protectedById : undefined,

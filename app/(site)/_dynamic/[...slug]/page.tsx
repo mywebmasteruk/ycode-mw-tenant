@@ -6,6 +6,7 @@ import PasswordForm from '@/components/PasswordForm';
 import { fetchGlobalPageSettings } from '@/lib/generate-page-metadata';
 import { getSettingByKey } from '@/lib/repositories/settingsRepository';
 import { parseAuthCookie, getPasswordProtection, fetchFoldersForAuth } from '@/lib/page-auth';
+import { matchRedirect } from '@/lib/redirect-utils';
 import type { Redirect as RedirectType } from '@/types';
 
 // Internal pagination path: always dynamic/no-store.
@@ -26,12 +27,12 @@ export default async function DynamicSlugPage({ params, searchParams }: DynamicS
 
   const redirects = await getSettingByKey('redirects') as RedirectType[] | null;
   if (redirects && Array.isArray(redirects)) {
-    const matchedRedirect = redirects.find((r) => r.oldUrl === currentPath);
-    if (matchedRedirect) {
-      if (matchedRedirect.type === '302') {
-        redirect(matchedRedirect.newUrl);
+    const matched = matchRedirect(currentPath, redirects);
+    if (matched) {
+      if (matched.type === '302') {
+        redirect(matched.newUrl);
       } else {
-        permanentRedirect(matchedRedirect.newUrl);
+        permanentRedirect(matched.newUrl);
       }
     }
   }
@@ -55,20 +56,24 @@ export default async function DynamicSlugPage({ params, searchParams }: DynamicS
     defaultPage: 1,
   };
 
-  const data = await fetchPageByPath(slugPath, true, paginationContext);
+  const [data, globalSettings] = await Promise.all([
+    fetchPageByPath(slugPath, true, paginationContext),
+    fetchGlobalPageSettings(),
+  ]);
 
   if (!data) {
     const errorPageData = await fetchErrorPage(404, true);
     if (errorPageData) {
       const { page, pageLayers, components } = errorPageData;
-      const publishedCSS = await getSettingByKey('published_css');
 
       return (
         <PageRenderer
           page={page}
           layers={pageLayers.layers || []}
           components={components}
-          generatedCss={publishedCSS}
+          generatedCss={globalSettings.publishedCss || undefined}
+          colorVariablesCss={globalSettings.colorVariablesCss || undefined}
+          ycodeBadge={globalSettings.ycodeBadge}
         />
       );
     }
@@ -76,7 +81,7 @@ export default async function DynamicSlugPage({ params, searchParams }: DynamicS
     notFound();
   }
 
-  const { page, pageLayers, components, collectionItem, collectionFields, locale, availableLocales, translations } = data;
+  const { page, pageLayers, components, collectionItem, collectionFields, pageCollectionSortedItemIds, pageCollectionSortedItemSlugs, locale, availableLocales, translations } = data;
 
   const folders = await fetchFoldersForAuth(true);
   const protectionCheck = getPasswordProtection(page, folders, null);
@@ -87,7 +92,6 @@ export default async function DynamicSlugPage({ params, searchParams }: DynamicS
 
     if (!protection.isUnlocked) {
       const errorPageData = await fetchErrorPage(401, true);
-      const publishedCSS = await getSettingByKey('published_css');
 
       if (errorPageData) {
         const { page: errorPage, pageLayers: errorPageLayers, components: errorComponents } = errorPageData;
@@ -97,7 +101,9 @@ export default async function DynamicSlugPage({ params, searchParams }: DynamicS
             page={errorPage}
             layers={errorPageLayers.layers || []}
             components={errorComponents}
-            generatedCss={publishedCSS}
+            generatedCss={globalSettings.publishedCss || undefined}
+            colorVariablesCss={globalSettings.colorVariablesCss || undefined}
+            ycodeBadge={globalSettings.ycodeBadge}
             passwordProtection={{
               pageId: protection.protectedBy === 'page' ? protection.protectedById : undefined,
               folderId: protection.protectedBy === 'folder' ? protection.protectedById : undefined,
@@ -126,8 +132,6 @@ export default async function DynamicSlugPage({ params, searchParams }: DynamicS
     }
   }
 
-  const globalSettings = await fetchGlobalPageSettings();
-
   return (
     <PageRenderer
       page={page}
@@ -137,6 +141,8 @@ export default async function DynamicSlugPage({ params, searchParams }: DynamicS
       colorVariablesCss={globalSettings.colorVariablesCss || undefined}
       collectionItem={collectionItem}
       collectionFields={collectionFields}
+      pageCollectionSortedItemIds={pageCollectionSortedItemIds}
+      pageCollectionSortedItemSlugs={pageCollectionSortedItemSlugs}
       locale={locale}
       availableLocales={availableLocales}
       translations={translations}

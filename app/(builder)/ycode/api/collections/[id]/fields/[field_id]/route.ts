@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getFieldById, updateField, deleteField } from '@/lib/repositories/collectionFieldRepository';
 import { isValidFieldType, VALID_FIELD_TYPES } from '@/lib/collection-field-utils';
 import { getItemsByCollectionId } from '@/lib/repositories/collectionItemRepository';
+import { clearValuesForField, renameValuesForField } from '@/lib/repositories/collectionItemValueRepository';
 import { deleteTranslationsInBulk } from '@/lib/repositories/translationRepository';
 import { noCache } from '@/lib/api-response';
 
@@ -73,7 +74,76 @@ export async function PUT(
       );
     }
 
+    // Validate count config when updating a count field. The field type can't
+    // change after creation but the count source could be re-pointed.
+    if (existingField.type === 'count' && body.data?.count) {
+      const cfg = body.data.count;
+      if (!cfg.collectionId || !cfg.fieldId) {
+        return noCache(
+          { error: 'Count fields require data.count.collectionId and data.count.fieldId' },
+          400,
+        );
+      }
+
+      const sourceField = await getFieldById(cfg.fieldId, false);
+      if (!sourceField || sourceField.collection_id !== cfg.collectionId) {
+        return noCache({ error: 'Count source field not found in the chosen collection' }, 400);
+      }
+      if (sourceField.type !== 'reference' && sourceField.type !== 'multi_reference') {
+        return noCache({ error: 'Count source field must be a reference or multi_reference field' }, 400);
+      }
+      if (sourceField.reference_collection_id !== existingField.collection_id) {
+        return noCache({ error: 'Count source field must reference this collection' }, 400);
+      }
+
+      // Count fields are always computed and never directly editable.
+      body.is_computed = true;
+      body.fillable = false;
+    }
+
+    // Detect option renames and removals (by stable id) for option-type
+    // fields. Item values store the option name, so we propagate renames and
+    // clear any item value whose option was removed from the field config.
+    const optionRenames: { oldName: string; newName: string }[] = [];
+    const removedOptionNames: string[] = [];
+    if (existingField.type === 'option' && Array.isArray(body.data?.options)) {
+      const previousOptions = Array.isArray(existingField.data?.options)
+        ? existingField.data.options
+        : [];
+      const nextOptions = body.data.options as { id: string; name: string }[];
+      const nextIds = new Set(nextOptions.map(o => o.id));
+      const previousById = new Map(previousOptions.map((o: { id: string; name: string }) => [o.id, o.name]));
+
+      for (const next of nextOptions) {
+        const previousName = previousById.get(next.id);
+        const newName = (next.name ?? '').trim();
+        if (typeof previousName === 'string' && previousName !== newName) {
+          optionRenames.push({ oldName: previousName, newName });
+        }
+      }
+
+      for (const previous of previousOptions as { id: string; name: string }[]) {
+        if (!nextIds.has(previous.id)) {
+          removedOptionNames.push(previous.name);
+        }
+      }
+    }
+
     const field = await updateField(fieldId, body);
+
+    if (optionRenames.length > 0) {
+      await Promise.all(
+        optionRenames.map(({ oldName, newName }) =>
+          renameValuesForField(fieldId, oldName, newName)
+        )
+      );
+    }
+
+    if (removedOptionNames.length > 0) {
+      await Promise.all(
+        removedOptionNames.map((name) => clearValuesForField(fieldId, name))
+      );
+    }
 
     return noCache({ data: field });
   } catch (error) {

@@ -7,7 +7,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 
 // 4. Internal components
 import LayersTree from './LayersTree';
-import LeftSidebarPages from './LeftSidebarPages';
+import LeftSidebarPages, { type LeftSidebarPagesHandle } from './LeftSidebarPages';
 
 // Lazy-loaded components (heavy, not needed immediately)
 const ElementLibrary = lazy(() => import('./ElementLibrary'));
@@ -24,6 +24,7 @@ import { resetBindingsAfterMove } from '@/lib/layer-utils';
 import { useEditorUrl } from '@/hooks/use-editor-url';
 import type { EditorTab } from '@/hooks/use-editor-url';
 import { useLayerLocks } from '@/hooks/use-layer-locks';
+import { useResizableSidebar } from '@/hooks/use-resizable-sidebar';
 
 // 6. Types
 import type { Layer } from '@/types';
@@ -53,6 +54,8 @@ const LeftSidebar = React.memo(function LeftSidebar({
 }: LeftSidebarProps) {
   const { sidebarTab } = useEditorUrl();
   const [showElementLibrary, setShowElementLibrary] = useState(false);
+  const { width: sidebarWidth, isDragging: isResizing, handleMouseDown: handleResizeMouseDown } = useResizableSidebar({ side: 'left' });
+  const pagesRef = useRef<LeftSidebarPagesHandle>(null);
   const [assetMessage, setAssetMessage] = useState<string | null>(null);
 
   // Optimize store subscriptions - scoped to current page only
@@ -284,13 +287,24 @@ const LeftSidebar = React.memo(function LeftSidebar({
 
   return (
     <>
-      <div className="w-64 shrink-0 bg-background border-r flex overflow-hidden p-4 pb-0">
+      <div
+        className="shrink-0 relative"
+        style={{ width: `${sidebarWidth}px` }}
+      >
+      <div
+        className="w-full h-full bg-background border-r flex overflow-hidden p-4 pb-0"
+      >
         {/* Tabs */}
         <div className="w-full">
           <Tabs
             value={activeTab}
-            onValueChange={(value) => {
+            onValueChange={async (value) => {
               const newTab = value as EditorTab;
+
+              if (newTab === 'layers' && pagesRef.current) {
+                const canSwitch = await pagesRef.current.checkAndCloseSettings();
+                if (!canSwitch) return;
+              }
 
               setActiveSidebarTab(newTab);
               setShowElementLibrary(false);
@@ -314,10 +328,10 @@ const LeftSidebar = React.memo(function LeftSidebar({
 
             {/* Content - forceMount keeps all tabs mounted for instant switching */}
             <TabsContent
-              value="layers" className="flex flex-col min-h-0 overflow-y-auto no-scrollbar"
+              value="layers" className="flex flex-col min-h-0"
               forceMount
             >
-              <header className="py-5 flex justify-between shrink-0 sticky top-0 bg-linear-to-b from-background to-transparent z-20">
+              <header className="py-5 flex justify-between shrink-0 z-20">
                 <span className="font-medium">{editingComponentId ? 'Layers' : 'Layers'}</span>
                 <div className="-my-1">
                   <Button
@@ -329,7 +343,10 @@ const LeftSidebar = React.memo(function LeftSidebar({
                 </div>
               </header>
 
-              <div className="flex flex-col flex-1 min-h-0">
+              <div
+                className="flex flex-col flex-1 min-h-0 overflow-y-auto overflow-x-auto no-scrollbar"
+                style={{ '--tree-available-width': `${sidebarWidth - 33}px` } as React.CSSProperties}
+              >
                 {!currentPageId && !editingComponentId ? (
                   <Empty>
                     <EmptyTitle>No page selected</EmptyTitle>
@@ -361,6 +378,7 @@ const LeftSidebar = React.memo(function LeftSidebar({
               forceMount
             >
               <LeftSidebarPages
+                ref={pagesRef}
                 pages={pages}
                 folders={folders}
                 currentPageId={currentPageId}
@@ -371,7 +389,22 @@ const LeftSidebar = React.memo(function LeftSidebar({
 
           </Tabs>
         </div>
+
       </div>
+
+      {/* Resize handle - wide hit area, thin visible line on hover */}
+      <div
+        onMouseDown={handleResizeMouseDown}
+        className="absolute top-0 -right-1.5 w-3 h-full cursor-col-resize z-30 flex items-center justify-center group/resize"
+      >
+        <div className="w-0.5 h-full bg-transparent group-hover/resize:bg-primary/50 group-active/resize:bg-primary/70 transition-colors" />
+      </div>
+      </div>
+
+      {/* Invisible overlay during resize to prevent iframe from capturing mouse events */}
+      {isResizing && (
+        <div className="fixed inset-0 z-50 cursor-col-resize" />
+      )}
 
       {/* Element Library Slide-Out (lazy loaded, always mounted to preserve state) */}
       <Suspense fallback={null}>

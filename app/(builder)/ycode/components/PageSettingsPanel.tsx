@@ -123,6 +123,7 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
   const [seoImage, setSeoImage] = useState<string | FieldVariable | null>(null);
   const [seoNoindex, setSeoNoindex] = useState(false);
   const { openFileManager } = useEditorStore();
+  const leftSidebarWidth = useEditorStore((state) => state.leftSidebarWidth);
 
   const nameInputRef = useRef<HTMLInputElement>(null);
 
@@ -139,6 +140,10 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
 
   const [collectionId, setCollectionId] = useState<string | null>(null);
   const [slugFieldId, setSlugFieldId] = useState<string | null>(null);
+  // Default item sort for the page's collection. Drives "Next item" /
+  // "Previous item" link resolution. `sort_by` is either 'manual' or a field id.
+  const [nextPrevSortBy, setNextPrevSortBy] = useState<string>('manual');
+  const [nextPrevSortOrder, setNextPrevSortOrder] = useState<'asc' | 'desc'>('asc');
 
   const { collections, fields } = useCollectionsStore();
 
@@ -211,6 +216,8 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
     authPassword: string;
     collectionId: string | null;
     slugFieldId: string | null;
+    nextPrevSortBy: string;
+    nextPrevSortOrder: 'asc' | 'desc';
   } | null>(null);
 
   const pages = usePagesStore((state) => state.pages);
@@ -360,7 +367,9 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
       authEnabled !== initial.authEnabled ||
       authPassword !== initial.authPassword ||
       collectionId !== initial.collectionId ||
-      slugFieldId !== initial.slugFieldId
+      slugFieldId !== initial.slugFieldId ||
+      nextPrevSortBy !== initial.nextPrevSortBy ||
+      nextPrevSortOrder !== initial.nextPrevSortOrder
     );
 
     // Clear rejected page when user makes changes (allows them to try navigating again)
@@ -370,7 +379,7 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
 
     return hasChanges;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, slug, pageFolderId, isIndex, seoTitle, seoDescription, seoImage, seoNoindex, customCodeHead, customCodeBody, authEnabled, authPassword, collectionId, slugFieldId, saveCounter]);
+  }, [name, slug, pageFolderId, isIndex, seoTitle, seoDescription, seoImage, seoNoindex, customCodeHead, customCodeBody, authEnabled, authPassword, collectionId, slugFieldId, nextPrevSortBy, nextPrevSortOrder, saveCounter]);
 
   // Expose method to check for unsaved changes externally
   useImperativeHandle(ref, () => ({
@@ -457,6 +466,11 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
           initialValuesRef.current.authPassword = settings?.auth?.password || '';
           initialValuesRef.current.collectionId = settings?.cms?.collection_id || null;
           initialValuesRef.current.slugFieldId = settings?.cms?.slug_field_id || null;
+          {
+            const initialIdFieldId = fields[settings?.cms?.collection_id || '']?.find(f => f.key === 'id')?.id;
+            initialValuesRef.current.nextPrevSortBy = settings?.cms?.next_previous?.sort_by || initialIdFieldId || 'manual';
+            initialValuesRef.current.nextPrevSortOrder = settings?.cms?.next_previous?.sort_order || 'asc';
+          }
         }
         return;
       } else {
@@ -482,7 +496,9 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
       authEnabled !== initialValuesRef.current.authEnabled ||
       authPassword !== initialValuesRef.current.authPassword ||
       collectionId !== initialValuesRef.current.collectionId ||
-      slugFieldId !== initialValuesRef.current.slugFieldId
+      slugFieldId !== initialValuesRef.current.slugFieldId ||
+      nextPrevSortBy !== initialValuesRef.current.nextPrevSortBy ||
+      nextPrevSortOrder !== initialValuesRef.current.nextPrevSortOrder
     );
 
     // If we have unsaved changes, show confirmation dialog BEFORE changing
@@ -524,6 +540,9 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
       const initialAuthPassword = settings?.auth?.password || '';
       const initialCollectionId = settings?.cms?.collection_id || null;
       const initialSlugFieldId = settings?.cms?.slug_field_id || null;
+      const initialIdFieldId = fields[settings?.cms?.collection_id || '']?.find(f => f.key === 'id')?.id;
+      const initialNextPrevSortBy = settings?.cms?.next_previous?.sort_by || initialIdFieldId || 'manual';
+      const initialNextPrevSortOrder: 'asc' | 'desc' = settings?.cms?.next_previous?.sort_order || 'asc';
 
       // IMPORTANT: Save initial values FIRST before updating form state
       // This prevents false "unsaved changes" detection when switching pages
@@ -542,6 +561,8 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
         authPassword: initialAuthPassword,
         collectionId: initialCollectionId,
         slugFieldId: initialSlugFieldId,
+        nextPrevSortBy: initialNextPrevSortBy,
+        nextPrevSortOrder: initialNextPrevSortOrder,
       };
 
       setName(initialName);
@@ -558,6 +579,8 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
       setAuthPassword(initialAuthPassword);
       setCollectionId(initialCollectionId);
       setSlugFieldId(initialSlugFieldId);
+      setNextPrevSortBy(initialNextPrevSortBy);
+      setNextPrevSortOrder(initialNextPrevSortOrder);
     } else {
       // Reset initial values for new page FIRST
       initialValuesRef.current = {
@@ -575,6 +598,8 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
         authPassword: '',
         collectionId: null,
         slugFieldId: null,
+        nextPrevSortBy: 'manual',
+        nextPrevSortOrder: 'asc',
       };
 
       setName('');
@@ -591,6 +616,8 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
       setAuthPassword('');
       setCollectionId(null);
       setSlugFieldId(null);
+      setNextPrevSortBy('manual');
+      setNextPrevSortOrder('asc');
     }
 
     // Clear error state when page changes
@@ -604,6 +631,9 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
       });
     }
 
+    // `fields` is intentionally omitted: this effect should re-run only when
+    // the page itself changes, not whenever the collections cache mutates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentPage, isErrorPage]);
 
   // Auto-generate slug from name for new pages (only if not index or error page)
@@ -804,6 +834,11 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
     } else {
       setSlugFieldId(null);
     }
+    // Reset default item sort to (id field, ascending) — field IDs from the
+    // previous collection won't exist in the new one.
+    const idField = collectionFields.find(field => field.key === 'id');
+    setNextPrevSortBy(idField?.id || 'manual');
+    setNextPrevSortOrder('asc');
   };
 
   const handleClose = () => {
@@ -835,6 +870,8 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
         setAuthPassword(initialValuesRef.current.authPassword);
         setCollectionId(initialValuesRef.current.collectionId);
         setSlugFieldId(initialValuesRef.current.slugFieldId);
+        setNextPrevSortBy(initialValuesRef.current.nextPrevSortBy);
+        setNextPrevSortOrder(initialValuesRef.current.nextPrevSortOrder);
       }
 
       rejectedPageRef.current = null;
@@ -862,6 +899,8 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
         setAuthPassword(initialValuesRef.current.authPassword);
         setCollectionId(initialValuesRef.current.collectionId);
         setSlugFieldId(initialValuesRef.current.slugFieldId);
+        setNextPrevSortBy(initialValuesRef.current.nextPrevSortBy);
+        setNextPrevSortOrder(initialValuesRef.current.nextPrevSortOrder);
       }
 
       rejectedPageRef.current = null;
@@ -1023,6 +1062,10 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
         cms: collectionId && slugFieldId ? {
           collection_id: collectionId,
           slug_field_id: slugFieldId,
+          next_previous: {
+            sort_by: nextPrevSortBy,
+            sort_order: nextPrevSortOrder,
+          },
         } : undefined,
       };
 
@@ -1062,6 +1105,11 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
       const savedSlugFieldId = collectionId && slugFieldId ? slugFieldId : null;
       setCollectionId(savedCollectionId);
       setSlugFieldId(savedSlugFieldId);
+      // Reset next/prev defaults when CMS settings are cleared.
+      const savedNextPrevSortBy = savedCollectionId ? nextPrevSortBy : 'manual';
+      const savedNextPrevSortOrder: 'asc' | 'desc' = savedCollectionId ? nextPrevSortOrder : 'asc';
+      setNextPrevSortBy(savedNextPrevSortBy);
+      setNextPrevSortOrder(savedNextPrevSortOrder);
 
       initialValuesRef.current = {
         name: trimmedName,
@@ -1078,6 +1126,8 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
         authPassword: trimmedAuthPassword,
         collectionId: savedCollectionId,
         slugFieldId: savedSlugFieldId,
+        nextPrevSortBy: savedNextPrevSortBy,
+        nextPrevSortOrder: savedNextPrevSortOrder,
       };
 
       rejectedPageRef.current = null;
@@ -1096,12 +1146,16 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
     <>
       {/* Backdrop */}
       <div
-        className="fixed inset-0 left-64 z-40"
+        className="fixed inset-0 z-40"
+        style={{ left: `${leftSidebarWidth}px` }}
         onClick={handleClose}
       />
 
       {/* Panel */}
-      <div className="fixed top-14 left-64 bottom-0 w-125 bg-background border-r z-50 flex flex-col">
+      <div
+        className="fixed top-14 bottom-0 w-125 bg-background border-r z-50 flex flex-col"
+        style={{ left: `${leftSidebarWidth}px` }}
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4">
           <div className="flex items-center justify-center gap-1.5">
@@ -1274,6 +1328,74 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
 
                         <FieldDescription>
                           {slugPathPreview}
+                        </FieldDescription>
+                      </Field>
+                    )}
+
+                    {isDynamicPage && (collectionId || currentPage?.settings?.cms?.collection_id) && (
+                      <Field>
+                        <div className="flex items-center gap-2">
+                          <div className="w-full space-y-2">
+                            <FieldLabel>Default item sort</FieldLabel>
+                            <Select
+                              value={nextPrevSortBy}
+                              onValueChange={(value) => {
+                                setNextPrevSortBy(value);
+                                if (value === 'manual') {
+                                  setNextPrevSortOrder('asc');
+                                }
+                              }}
+                            >
+                              <SelectTrigger className="w-full">
+                                <SelectValue placeholder="Select..." />
+                              </SelectTrigger>
+
+                              <SelectContent>
+                                <SelectGroup>
+                                  <SelectItem value="manual">Manual order</SelectItem>
+                                </SelectGroup>
+                                {(() => {
+                                  const activeCollectionId = collectionId || currentPage?.settings?.cms?.collection_id || '';
+                                  const allFields = fields[activeCollectionId] || [];
+                                  if (allFields.length === 0) return null;
+                                  return (
+                                    <SelectGroup>
+                                      {allFields.map((field) => (
+                                        <SelectItem key={field.id} value={field.id}>
+                                          <span className="flex items-center gap-2">
+                                            <Icon name={getFieldIcon(field.type)} className="size-3 text-muted-foreground shrink-0" />
+                                            {field.name}
+                                          </span>
+                                        </SelectItem>
+                                      ))}
+                                    </SelectGroup>
+                                  );
+                                })()}
+                              </SelectContent>
+                            </Select>
+                          </div>
+
+                          <div className="w-full space-y-2">
+                            <FieldLabel>Sort order</FieldLabel>
+                            <Select
+                              value={nextPrevSortOrder}
+                              onValueChange={(value) => setNextPrevSortOrder(value as 'asc' | 'desc')}
+                              disabled={nextPrevSortBy === 'manual'}
+                            >
+                              <SelectTrigger className="w-full">
+                                <SelectValue placeholder="Select..." />
+                              </SelectTrigger>
+
+                              <SelectContent>
+                                <SelectItem value="asc">Ascending</SelectItem>
+                                <SelectItem value="desc">Descending</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        </div>
+
+                        <FieldDescription>
+                          Used for &quot;Next item&quot; / &quot;Previous item&quot; links.
                         </FieldDescription>
                       </Field>
                     )}

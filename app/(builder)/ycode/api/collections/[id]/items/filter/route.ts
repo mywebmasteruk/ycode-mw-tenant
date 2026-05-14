@@ -3,6 +3,7 @@ import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { getItemsByCollectionId } from '@/lib/repositories/collectionItemRepository';
 import { getValuesByItemIds } from '@/lib/repositories/collectionItemValueRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
+import { enrichItemsWithCountValues } from '@/lib/repositories/collectionCountRepository';
 import { getAllPages } from '@/lib/repositories/pageRepository';
 import { getAllPageFolders } from '@/lib/repositories/pageFolderRepository';
 import { renderCollectionItemsToHtml, loadTranslationsForLocale } from '@/lib/page-fetcher';
@@ -113,6 +114,17 @@ async function getIdsMatchingFilter(
       return new Set(data.map(d => d.item_id));
     }
     case 'is': {
+      if (filter.fieldType === 'boolean') {
+        const targetBool = value.toLowerCase() === 'true';
+        const data = await chunkedQuery(chunk => selectIdsAndValues(chunk), allItemIds);
+        const result = new Set<string>();
+        for (const row of data) {
+          const raw = String(row.value ?? '').toLowerCase();
+          const isTruthy = raw === 'true' || raw === '1' || raw === 'yes';
+          if (isTruthy === targetBool) result.add(row.item_id);
+        }
+        return result;
+      }
       const data = await chunkedQuery(
         chunk => selectIds(chunk).ilike('value', escapeLikeValue(value)),
         allItemIds,
@@ -144,6 +156,17 @@ async function getIdsMatchingFilter(
       return new Set([...allSet].filter(id => !matchIds.has(id)));
     }
     case 'is_not': {
+      if (filter.fieldType === 'boolean') {
+        const targetBool = value.toLowerCase() === 'true';
+        const data = await chunkedQuery(chunk => selectIdsAndValues(chunk), allItemIds);
+        const result = new Set<string>();
+        for (const row of data) {
+          const raw = String(row.value ?? '').toLowerCase();
+          const isTruthy = raw === 'true' || raw === '1' || raw === 'yes';
+          if (isTruthy !== targetBool) result.add(row.item_id);
+        }
+        return result;
+      }
       const data = await chunkedQuery(
         chunk => selectIds(chunk).ilike('value', escapeLikeValue(value)),
         allItemIds,
@@ -497,6 +520,7 @@ export async function POST(
       localeCode,
       collectionLayerClasses,
       collectionLayerTag,
+      published: isPublished = true,
     } = body;
 
     if (!layerTemplate || !Array.isArray(layerTemplate)) {
@@ -508,7 +532,7 @@ export async function POST(
 
     const { matchingIds, total: filteredTotal } = await getFilteredItemIds(
       collectionId,
-      true,
+      isPublished,
       filterGroups,
     );
 
@@ -525,7 +549,7 @@ export async function POST(
 
     if (!sortBy || sortBy === 'none' || sortBy === 'manual') {
       // Let DB do ordering and pagination for cheap paths.
-      const { items } = await getItemsByCollectionId(collectionId, true, {
+      const { items } = await getItemsByCollectionId(collectionId, isPublished, {
         itemIds: matchingIds,
         limit: pageLimit,
         offset: pageOffset,
@@ -536,7 +560,7 @@ export async function POST(
       const randomizedIds = [...matchingIds].sort(() => Math.random() - 0.5);
       pageItemIds = randomizedIds.slice(pageOffset, pageOffset + pageLimit);
       if (pageItemIds.length > 0) {
-        const { items } = await getItemsByCollectionId(collectionId, true, {
+        const { items } = await getItemsByCollectionId(collectionId, isPublished, {
           itemIds: pageItemIds,
         });
         pageRawItems = reorderItemsById(items, pageItemIds);
@@ -544,7 +568,7 @@ export async function POST(
     } else {
       // For field-based sort, sort IDs using just the sort field values first,
       // then hydrate only the requested page window.
-      const sortValueByItem = await getFieldValuesForItems(sortBy, true, matchingIds);
+      const sortValueByItem = await getFieldValuesForItems(sortBy, isPublished, matchingIds);
       const sortedIds = [...matchingIds].sort((a, b) => {
         const aStr = String(sortValueByItem.get(a) || '');
         const bStr = String(sortValueByItem.get(b) || '');
@@ -559,7 +583,7 @@ export async function POST(
       });
       pageItemIds = sortedIds.slice(pageOffset, pageOffset + pageLimit);
       if (pageItemIds.length > 0) {
-        const { items } = await getItemsByCollectionId(collectionId, true, {
+        const { items } = await getItemsByCollectionId(collectionId, isPublished, {
           itemIds: pageItemIds,
         });
         pageRawItems = reorderItemsById(items, pageItemIds);
@@ -568,15 +592,20 @@ export async function POST(
 
     const valuesByItem = await getValuesByItemIds(
       pageRawItems.map(i => i.id),
-      true,
+      isPublished,
     );
     const paginatedItems: CollectionItemWithValues[] = pageRawItems.map(item => ({
       ...item,
       values: valuesByItem[item.id] || {},
     }));
+
+    // Inject computed count field values so layers bound to a count field
+    // render the live number in the filtered HTML.
+    await enrichItemsWithCountValues(paginatedItems, collectionId, isPublished);
+
     const hasMore = pageOffset + paginatedItems.length < filteredTotal;
 
-    const collectionFields = await getFieldsByCollectionId(collectionId, true, { excludeComputed: true });
+    const collectionFields = await getFieldsByCollectionId(collectionId, isPublished, { excludeComputed: true });
     const slugField = collectionFields.find(f => f.key === 'slug');
     const collectionItemSlugs: Record<string, string> = {};
     if (slugField) {
@@ -595,7 +624,7 @@ export async function POST(
     let locale = null;
     let translations: Record<string, any> | undefined;
     if (localeCode) {
-      const localeData = await loadTranslationsForLocale(localeCode, true);
+      const localeData = await loadTranslationsForLocale(localeCode, isPublished);
       locale = localeData.locale;
       translations = localeData.translations;
     }
@@ -605,7 +634,7 @@ export async function POST(
       layerTemplate as Layer[],
       collectionId,
       collectionLayerId,
-      true,
+      isPublished,
       pages,
       folders,
       collectionItemSlugs,

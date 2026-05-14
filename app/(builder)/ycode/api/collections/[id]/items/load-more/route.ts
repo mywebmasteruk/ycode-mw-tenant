@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { getItemsWithValues } from '@/lib/repositories/collectionItemRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
+import { enrichItemsWithCountValues } from '@/lib/repositories/collectionCountRepository';
 import { getAllPages } from '@/lib/repositories/pageRepository';
 import { getAllPageFolders } from '@/lib/repositories/pageFolderRepository';
 import { renderCollectionItemsToHtml, loadTranslationsForLocale } from '@/lib/page-fetcher';
@@ -81,6 +82,10 @@ export async function POST(
       published,
       filters
     );
+
+    // Inject computed count field values so layers bound to a count field
+    // render the live number in the rendered HTML.
+    await enrichItemsWithCountValues(items, collectionId, published);
 
     // Build collection item slugs from the items we're rendering
     const collectionItemSlugs: Record<string, string> = {};
@@ -196,6 +201,9 @@ export async function GET(
       isPublished,
       filters
     );
+
+    // Inject computed count field values for callers reading raw item data.
+    await enrichItemsWithCountValues(items, collectionId, isPublished);
 
     return noCache({
       data: {

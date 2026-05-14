@@ -5,7 +5,7 @@ import { cache } from 'react';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { buildSlugPath } from '@/lib/page-utils';
 import { generatePageMetadata, fetchGlobalPageSettings } from '@/lib/generate-page-metadata';
-import { fetchPageByPath, fetchErrorPage } from '@/lib/page-fetcher';
+import { fetchPageByPath, fetchPageByPathForMetadata, fetchErrorPage, splitPageData, reassemblePageData, slimPageData } from '@/lib/page-fetcher';
 import PageRenderer from '@/components/PageRenderer';
 import PasswordForm from '@/components/PasswordForm';
 import { getSettingByKey } from '@/lib/repositories/settingsRepository';
@@ -18,6 +18,7 @@ import {
   tenantRouteTag,
 } from '@/lib/masjidweb/tenant-cache-tags';
 import { getSiteBaseUrl } from '@/lib/url-utils';
+import { matchRedirect } from '@/lib/redirect-utils';
 import type { Page, PageFolder, Translation, Redirect as RedirectType } from '@/types';
 
 // Avoid ISR full-route caching on Netlify (stale HTML after publish).
@@ -191,27 +192,58 @@ export async function generateStaticParams() {
  */
 async function fetchPublishedPageWithLayers(slugPath: string) {
   const { effectiveTid, keySuffix } = await getTenantCacheContext();
+  const tags = [
+    tenantAllPagesTag(effectiveTid),
+    tenantRouteTag(effectiveTid, slugPath),
+  ];
+  const opts = { tags, revalidate: false as const };
+
   try {
-    return await unstable_cache(
-      async () => fetchPageByPath(slugPath, true),
-      [`data-for-route-/${slugPath}`, keySuffix],
-      {
-        tags: [
-          tenantAllPagesTag(effectiveTid),
-          tenantRouteTag(effectiveTid, slugPath),
-        ],
-        revalidate: false,
-      }
-    )();
+    const [core, layers] = await Promise.all([
+      unstable_cache(
+        async () => {
+          const data = await fetchPageByPath(slugPath, true);
+          if (!data) return null;
+          return splitPageData(data).core;
+        },
+        [`core-/${slugPath}`, keySuffix],
+        opts
+      )(),
+      unstable_cache(
+        async () => {
+          const data = await fetchPageByPath(slugPath, true);
+          if (!data) return null;
+          return splitPageData(data).layers;
+        },
+        [`layers-/${slugPath}`, keySuffix],
+        opts
+      )(),
+    ]);
+
+    if (!core) return null;
+    return reassemblePageData(core, layers || []);
   } catch {
-    // Fallback to uncached fetch when data exceeds cache size limit (2MB).
-    // If runtime credentials are unavailable (e.g. build-time), return null.
     try {
       return await fetchPageByPath(slugPath, true);
     } catch {
       return null;
     }
   }
+}
+
+async function fetchPublishedPageForMetadata(slugPath: string) {
+  const { effectiveTid, keySuffix } = await getTenantCacheContext();
+  return unstable_cache(
+    async () => fetchPageByPathForMetadata(slugPath, true),
+    [`metadata-/${slugPath}`, keySuffix],
+    {
+      tags: [
+        tenantAllPagesTag(effectiveTid),
+        tenantRouteTag(effectiveTid, slugPath),
+      ],
+      revalidate: false,
+    }
+  )();
 }
 
 async function fetchCachedRedirects(): Promise<RedirectType[] | null> {
@@ -268,8 +300,11 @@ async function fetchCachedErrorPage(errorCode: 401 | 404) {
   const { effectiveTid, keySuffix } = await getTenantCacheContext();
   try {
     return await unstable_cache(
-      async () => fetchErrorPage(errorCode, true),
-      [`data-for-error-page-${errorCode}`, keySuffix],
+      async () => {
+        const data = await fetchErrorPage(errorCode, true);
+        return data ? slimPageData(data) : null;
+      },
+      [`error-${errorCode}`, keySuffix],
       { tags: [tenantAllPagesTag(effectiveTid)], revalidate: false }
     )();
   } catch {
@@ -292,22 +327,21 @@ export default async function Page({ params }: PageProps) {
   const currentPath = `/${slugPath}`;
   const redirects = await fetchCachedRedirects();
   if (redirects && Array.isArray(redirects)) {
-    const matchedRedirect = redirects.find((r) => r.oldUrl === currentPath);
-    if (matchedRedirect) {
-      // Use permanentRedirect for 301 (default), redirect for 302
-      if (matchedRedirect.type === '302') {
-        redirect(matchedRedirect.newUrl);
+    const matched = matchRedirect(currentPath, redirects);
+    if (matched) {
+      if (matched.type === '302') {
+        redirect(matched.newUrl);
       } else {
-        permanentRedirect(matchedRedirect.newUrl);
+        permanentRedirect(matched.newUrl);
       }
     }
   }
 
-  // Cache-first slug path; pagination is served through internal dynamic routes.
-  const data = await fetchPublishedPageWithLayers(slugPath);
-
-  // Load all global settings early so error pages also get global custom code
-  const globalSettings = await fetchCachedGlobalSettings();
+  // Fetch page data and global settings in parallel
+  const [data, globalSettings] = await Promise.all([
+    fetchPublishedPageWithLayers(slugPath),
+    fetchCachedGlobalSettings(),
+  ]);
 
   // If page not found, try to show custom 404 error page
   if (!data) {
@@ -322,8 +356,10 @@ export default async function Page({ params }: PageProps) {
           layers={errorPageLayers.layers || []}
           components={errorComponents}
           generatedCss={globalSettings.publishedCss || undefined}
+          colorVariablesCss={globalSettings.colorVariablesCss || undefined}
           globalCustomCodeHead={globalSettings.globalCustomCodeHead}
           globalCustomCodeBody={globalSettings.globalCustomCodeBody}
+          ycodeBadge={globalSettings.ycodeBadge}
         />
       );
     }
@@ -332,7 +368,7 @@ export default async function Page({ params }: PageProps) {
     notFound();
   }
 
-  const { page, pageLayers, components, collectionItem, collectionFields, locale, availableLocales, translations } = data;
+  const { page, pageLayers, components, collectionItem, collectionFields, pageCollectionSortedItemIds, pageCollectionSortedItemSlugs, locale, availableLocales, translations } = data;
 
   // Check password protection for this page.
   // First evaluate without cookies() so non-protected pages stay cacheable.
@@ -357,8 +393,10 @@ export default async function Page({ params }: PageProps) {
             layers={errorPageLayers.layers || []}
             components={errorComponents}
             generatedCss={globalSettings.publishedCss || undefined}
+            colorVariablesCss={globalSettings.colorVariablesCss || undefined}
             globalCustomCodeHead={globalSettings.globalCustomCodeHead}
             globalCustomCodeBody={globalSettings.globalCustomCodeBody}
+            ycodeBadge={globalSettings.ycodeBadge}
             passwordProtection={{
               pageId: protection.protectedBy === 'page' ? protection.protectedById : undefined,
               folderId: protection.protectedBy === 'folder' ? protection.protectedById : undefined,
@@ -397,6 +435,8 @@ export default async function Page({ params }: PageProps) {
       colorVariablesCss={globalSettings.colorVariablesCss || undefined}
       collectionItem={collectionItem}
       collectionFields={collectionFields}
+      pageCollectionSortedItemIds={pageCollectionSortedItemIds}
+      pageCollectionSortedItemSlugs={pageCollectionSortedItemSlugs}
       locale={locale}
       availableLocales={availableLocales}
       translations={translations}
@@ -417,7 +457,7 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
 
   // Fetch page and global settings in parallel
   const [data, globalSettings] = await Promise.all([
-    fetchPublishedPageWithLayers(slugPath),
+    fetchPublishedPageForMetadata(slugPath),
     fetchCachedGlobalSettings(),
   ]);
 

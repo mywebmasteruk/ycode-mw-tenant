@@ -18,7 +18,7 @@ import { createRoot, Root } from 'react-dom/client';
 import LayerRenderer from '@/components/LayerRenderer';
 import { serializeLayers, getClassesString } from '@/lib/layer-utils';
 import { collectEditorHiddenLayerIds } from '@/lib/animation-utils';
-import { getCanvasIframeHtml } from '@/lib/canvas-utils';
+import { getCanvasIframeHtml, updateViewportOverrides, measureContentExtent } from '@/lib/canvas-utils';
 import { CanvasPortalProvider } from '@/lib/canvas-portal-context';
 import { cn } from '@/lib/utils';
 import { loadSwiperCss } from '@/lib/slider-utils';
@@ -27,7 +27,9 @@ import { useEditorStore } from '@/stores/useEditorStore';
 import { useFontsStore } from '@/stores/useFontsStore';
 import { useColorVariablesStore } from '@/stores/useColorVariablesStore';
 
-import type { Layer, Component, CollectionItemWithValues, CollectionField, Breakpoint, Asset, ComponentVariable } from '@/types';
+import { injectTranslatedText } from '@/lib/localisation-utils';
+
+import type { Layer, Component, CollectionItemWithValues, CollectionField, Breakpoint, Asset, ComponentVariable, Locale, Translation } from '@/types';
 import type { UseLiveLayerUpdatesReturn } from '@/hooks/use-live-layer-updates';
 import type { UseLiveComponentUpdatesReturn } from '@/hooks/use-live-component-updates';
 
@@ -98,12 +100,22 @@ interface CanvasProps {
   onLayerHover?: (layerId: string | null) => void;
   /** Callback when any click occurs inside the canvas (for closing panels) */
   onCanvasClick?: () => void;
+  /** Callback when a component instance is double-clicked on the canvas */
+  onComponentEdit?: (componentId: string, instanceLayerId: string) => void;
   /** Component variables when editing a component (for default value display) */
   editingComponentVariables?: ComponentVariable[];
   /** Disable editor hidden layers (e.g., when Interactions panel is active) */
   disableEditorHiddenLayers?: boolean;
   /** Current canvas zoom percentage (100 = 100%) */
   zoom?: number;
+  /** Fixed viewport height for stable measurement of content using vh/svh/dvh units */
+  referenceViewportHeight?: number;
+  /** Currently selected locale (controls translation injection on the canvas) */
+  currentLocale?: Locale | null;
+  /** All available locales (forwarded to LocaleSelector layers) */
+  availableLocales?: Locale[];
+  /** Translation map for the current locale (keyed by translatable key) */
+  translations?: Record<string, Translation> | null;
 }
 
 /**
@@ -126,6 +138,10 @@ interface CanvasContentProps {
   editorHiddenLayerIds?: Map<string, Breakpoint[]>;
   editorBreakpoint?: Breakpoint;
   zoom?: number;
+  onComponentEdit?: (componentId: string, instanceLayerId: string) => void;
+  currentLocale?: Locale | null;
+  availableLocales?: Locale[];
+  translations?: Record<string, Translation> | null;
 }
 
 function CanvasContent({
@@ -145,6 +161,10 @@ function CanvasContent({
   editorHiddenLayerIds,
   editorBreakpoint,
   zoom = 100,
+  onComponentEdit,
+  currentLocale,
+  availableLocales,
+  translations,
 }: CanvasContentProps) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(null);
@@ -158,26 +178,34 @@ function CanvasContent({
 
   // Select body layer when clicking on empty canvas space.
   // The #canvas-body div uses display:contents so it has no box — clicks on
-  // empty space land on the iframe <body>, which is outside the React root.
-  // We attach a native listener on the iframe body to handle this.
+  // empty space land on the iframe <body> (or sometimes <html> / one of the
+  // display:contents wrappers), which is outside the React root and therefore
+  // outside the layer onClick chain. We attach a native listener on the iframe
+  // document so any click that doesn't end up on an actual layer element
+  // (i.e. nothing with [data-layer-id] except the body wrapper itself) falls
+  // through to selecting the Body layer.
   useEffect(() => {
     if (!bodyRef.current) return;
-    const iframeBody = bodyRef.current.ownerDocument.body;
+    const iframeDoc = bodyRef.current.ownerDocument;
+    const iframeBody = iframeDoc.body;
 
     setPortalContainer(iframeBody);
 
     const handleBodyClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      const isCanvasChrome = target === iframeBody
-        || target.id === 'canvas-mount'
-        || target.id === 'canvas-body';
-      if (isCanvasChrome) {
-        onLayerClick('body');
-      }
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      // Walk up from the click target. If we find any layer element with
+      // data-layer-id !== 'body', that layer's own onClick handles selection
+      // and we should ignore this fallthrough. Otherwise the click landed on
+      // empty body space (or html / the display:contents wrappers) and we
+      // select the Body layer.
+      const layerEl = target.closest?.('[data-layer-id]') as HTMLElement | null;
+      if (layerEl && layerEl.getAttribute('data-layer-id') !== 'body') return;
+      onLayerClick('body');
     };
 
-    iframeBody.addEventListener('click', handleBodyClick);
-    return () => iframeBody.removeEventListener('click', handleBodyClick);
+    iframeDoc.addEventListener('click', handleBodyClick);
+    return () => iframeDoc.removeEventListener('click', handleBodyClick);
   }, [onLayerClick]);
 
   const bodyLayer = layers.find(l => l.id === 'body');
@@ -236,6 +264,10 @@ function CanvasContent({
           editorHiddenLayerIds={editorHiddenLayerIds}
           editorBreakpoint={editorBreakpoint}
           ancestorComponentIds={initialAncestorIds}
+          onComponentEdit={onComponentEdit}
+          currentLocale={currentLocale}
+          availableLocales={availableLocales}
+          translations={translations}
         />
       </div>
     </CanvasPortalProvider>
@@ -280,9 +312,14 @@ export default function Canvas({
   onIframeReady,
   onLayerHover,
   onCanvasClick,
+  onComponentEdit,
   editingComponentVariables,
   disableEditorHiddenLayers = false,
   zoom = 100,
+  referenceViewportHeight,
+  currentLocale,
+  availableLocales,
+  translations,
 }: CanvasProps) {
   // Refs
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -298,6 +335,34 @@ export default function Canvas({
   const { layers: resolvedLayers, componentMap } = useMemo(() => {
     return serializeLayers(layers, components, editingComponentVariables);
   }, [layers, components, editingComponentVariables]);
+
+  // When a non-default locale is active, swap layer text and translatable
+  // asset references with their translations so the canvas mirrors what the
+  // server-rendered preview / published page would output. The injection runs
+  // AFTER serializeLayers so component instance child IDs are already resolved
+  // (injectTranslatedText reads _originalLayerId / _masterComponentId to look
+  // up component-scoped translations).
+  //
+  // When the user is editing a component definition (editingComponentId set),
+  // the rendered layers are the component's raw layers (not a resolved
+  // instance), so they carry no _masterComponentId. Pass editingComponentId
+  // as the default so translations stored under `component:{id}:...` apply.
+  const localizedLayers = useMemo(() => {
+    if (!currentLocale || currentLocale.is_default || !translations) {
+      return resolvedLayers;
+    }
+    // pageId may be empty when editing a component without a page selected.
+    // injectTranslatedText still needs a non-empty value to perform lookups.
+    const lookupPageId = pageId || (editingComponentId ?? '');
+    if (!lookupPageId) return resolvedLayers;
+    // Builder canvas mirrors what the editor has saved, including in-progress
+    // translations that are not yet marked complete. Production rendering
+    // (page-fetcher) keeps the default behaviour and only ships completed ones.
+    return injectTranslatedText(resolvedLayers, lookupPageId, translations, {
+      includeIncomplete: true,
+      defaultMasterComponentId: editingComponentId ?? undefined,
+    });
+  }, [resolvedLayers, currentLocale, translations, pageId, editingComponentId]);
 
   // Enrich page collection item data with reference field dotted keys
   // so variables like "refFieldId.targetFieldId" resolve on canvas
@@ -481,7 +546,7 @@ export default function Canvas({
 
     rootRef.current.render(
       <CanvasContent
-        layers={resolvedLayers}
+        layers={localizedLayers}
         selectedLayerId={selectedLayerId}
         hoveredLayerId={effectiveHoveredLayerId}
         pageId={pageId}
@@ -497,6 +562,10 @@ export default function Canvas({
         editorHiddenLayerIds={editorHiddenLayerIds}
         editorBreakpoint={breakpoint}
         zoom={zoom}
+        onComponentEdit={onComponentEdit}
+        currentLocale={currentLocale}
+        availableLocales={availableLocales}
+        translations={translations}
       />
     );
   // selectedLayerId and hoveredLayerId are intentionally excluded from deps:
@@ -505,7 +574,7 @@ export default function Canvas({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     iframeReady,
-    resolvedLayers,
+    localizedLayers,
     editingComponentId,
     editingComponentVariables,
     pageId,
@@ -519,6 +588,10 @@ export default function Canvas({
     editorHiddenLayerIds,
     breakpoint,
     zoom,
+    onComponentEdit,
+    currentLocale,
+    availableLocales,
+    translations,
   ]);
 
   // Handle keyboard events from iframe
@@ -649,6 +722,10 @@ export default function Canvas({
     const doc = iframeRef.current.contentDocument;
     if (!doc) return;
 
+    // Reset so the first measurement after a breakpoint switch reports immediately
+    // instead of being delayed by the shrink timer
+    lastReportedHeightRef.current = 0;
+
     let shrinkTimer: ReturnType<typeof setTimeout> | undefined;
 
     const reportHeight = (height: number) => {
@@ -694,18 +771,27 @@ export default function Canvas({
         }
       }
 
-      // Page mode: measure full document height
-      const height = Math.max(
-        body.scrollHeight,
-        body.offsetHeight,
-        doc.documentElement?.scrollHeight || 0,
-        doc.documentElement?.offsetHeight || 0
-      );
-      reportHeight(height);
+      // Override viewport-height units (vh, svh, dvh, lvh) with fixed pixel
+      // values so layers using these units don't grow with the iframe height.
+      if (referenceViewportHeight && referenceViewportHeight > 0) {
+        updateViewportOverrides(doc, referenceViewportHeight);
+      }
+
+      // Page mode: use content extent (actual child bounds) rather than
+      // scrollHeight, which inflates when body h-full fills the iframe.
+      const extent = measureContentExtent(doc);
+      if (extent > 0) {
+        reportHeight(extent);
+      }
     };
 
-    // Measure after render
+    // Measure after render — multiple passes to handle Tailwind CDN race.
+    // Tailwind Browser CDN processes classes asynchronously via CSSOM APIs
+    // (not DOM mutations), so the MutationObserver alone can't detect when
+    // styles are applied. measureContentExtent is immune to iframe inflation,
+    // so later passes safely converge to the correct value.
     const timeoutId = setTimeout(measureContent, 100);
+    const lateTimeoutId = setTimeout(measureContent, 500);
 
     // Debounce observer to avoid measuring during transient DOM states
     let observerTimer: ReturnType<typeof setTimeout> | undefined;
@@ -722,13 +808,24 @@ export default function Canvas({
       attributes: true,
     });
 
+    // Also watch <head> for Tailwind CDN style injections that change layout
+    // Without this, the initial measurement fires before CSS is applied,
+    // and no body mutation triggers a re-measure after styles settle.
+    if (doc.head) {
+      observer.observe(doc.head, {
+        childList: true,
+        subtree: true,
+      });
+    }
+
     return () => {
       clearTimeout(timeoutId);
+      clearTimeout(lateTimeoutId);
       clearTimeout(shrinkTimer);
       clearTimeout(observerTimer);
       observer.disconnect();
     };
-  }, [iframeReady, onContentHeightChange, onContentWidthChange, resolvedLayers]);
+  }, [iframeReady, onContentHeightChange, onContentWidthChange, localizedLayers, referenceViewportHeight, breakpoint]);
 
   // Handle zoom gestures from iframe (Ctrl+wheel, trackpad pinch)
   useEffect(() => {

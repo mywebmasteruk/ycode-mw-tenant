@@ -1,0 +1,53 @@
+/*
+ * Slim Tailwind bundle for published & preview pages (the `(site)` route group).
+ *
+ * Why this exists: `app/globals.css` defines the full builder UI theme —
+ * shadcn color variables, dark-mode tokens, ProseMirror, Sonner toasts, etc.
+ * Public pages never reference any of it; per-page utilities used by user
+ * layers are inlined as `<style id="ycode-styles">` by `PageRenderer.tsx`.
+ *
+ * To keep this bundle small we let Tailwind scan the project as usual but
+ * exclude the heavy builder UI route group. Files like `lib/templates/**`,
+ * `lib/page-utils.ts`, `lib/text-format-utils.ts` and the public renderer
+ * components stay in scope so all the arbitrary-value classes they carry
+ * (gap-[20px], leading-[1.5], etc.) end up in the bundle.
+ */
+
+@import "tailwindcss";
+
+/* Builder UI is not rendered on published pages — drop ~150 KiB of
+   sidebar/modal/dropdown utilities by excluding the route group. */
+@source not "../app/(builder)";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  /* `--font-inter` is only defined inside the builder layout. On public
+     published pages the variable is undefined and these fall back to the
+     system font stacks — keeps marketing sites from downloading Inter just
+     because something used the generic `font-sans` class. */
+  --font-sans: var(--font-inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif);
+  --font-mono: var(--font-inter, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace);
+
+  /* Used by ShimmerSkeleton (shown in collection layouts while items load). */
+  --animate-shimmer: shimmer 2s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+/* Custom dropdown chevron for native <select> elements on published pages.
+   The native arrow is removed by the inline `ycode-form-reset` styles in
+   PageRenderer.tsx; this rule restores a consistent chevron. */
+#ybody select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23737373' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 16px 16px;
+}

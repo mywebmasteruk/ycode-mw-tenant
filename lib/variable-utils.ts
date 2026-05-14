@@ -65,6 +65,22 @@ export function createDynamicRichTextVariable(content: string): DynamicRichTextV
 }
 
 /**
+ * Create a DynamicRichTextVariable directly from plain text, without attempting
+ * JSON parsing. Use this when the source value is known to be plain text
+ * (e.g. a translation whose stored content_type is `text` even though the
+ * target variable is `dynamic_rich_text`), to avoid the noisy JSON.parse
+ * fallback in `createDynamicRichTextVariable`.
+ */
+export function createDynamicRichTextVariableFromPlainText(content: string): DynamicRichTextVariable {
+  return {
+    type: 'dynamic_rich_text',
+    data: {
+      content: stringToTiptapContent(content),
+    },
+  };
+}
+
+/**
  * Create an AssetVariable from an asset ID
  */
 export function createAssetVariable(assetId: string): AssetVariable {

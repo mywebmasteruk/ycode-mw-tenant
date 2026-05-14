@@ -12,7 +12,7 @@ import { useEffect, useRef, useMemo } from 'react';
 import Swiper from 'swiper';
 import type { Layer, SliderSettings } from '@/types';
 import { useEditorStore } from '@/stores/useEditorStore';
-import { DEFAULT_SLIDER_SETTINGS } from '@/lib/templates/utilities';
+import { DEFAULT_SLIDER_SETTINGS } from '@/lib/slider-constants';
 import { buildCanvasSwiperOptions, applySwiperEasing } from '@/lib/slider-utils';
 
 /** Registry of active Swiper instances and their layer refs */

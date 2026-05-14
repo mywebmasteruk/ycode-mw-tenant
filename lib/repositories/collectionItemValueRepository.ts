@@ -1,6 +1,7 @@
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
-import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSupabaseAdmin, getTenantIdFromHeaders } from '@/lib/supabase-server';
 import { SUPABASE_QUERY_LIMIT } from '@/lib/supabase-constants';
+import { getKnexClient } from '@/lib/knex-client';
 import type { CollectionItemValue, CollectionFieldType } from '@/types';
 import { castValue, valueToString } from '../collection-utils';
 import { generateCollectionItemContentHash } from '../hash-utils';
@@ -85,6 +86,38 @@ export async function insertValuesBulk(
   }
 }
 
+/**
+ * Insert values via Knex (direct PG connection) with an extended timeout.
+ * Used for oversized values that exceed PostgREST's statement timeout.
+ * Sets tenant context when available so DB triggers can populate tenant_id.
+ */
+export async function insertValuesDirectPg(
+  values: Array<{ item_id: string; field_id: string; value: string | null; is_published?: boolean }>
+): Promise<void> {
+  if (values.length === 0) return;
+
+  const knex = await getKnexClient();
+  const tenantId = await getTenantIdFromHeaders();
+  const now = new Date().toISOString();
+  const rows = values.map(v => ({
+    id: randomUUID(),
+    item_id: v.item_id,
+    field_id: v.field_id,
+    value: v.value,
+    is_published: v.is_published ?? false,
+    created_at: now,
+    updated_at: now,
+  }));
+
+  await knex.transaction(async (trx) => {
+    await trx.raw("SET LOCAL statement_timeout = '60s'");
+    if (tenantId) {
+      await trx.raw('SELECT set_tenant_context(?::uuid)', [tenantId]);
+    }
+    await trx('collection_item_values').insert(rows);
+  });
+}
+
 export interface UpdateCollectionItemValueData {
   value?: string | null;
 }
@@ -96,7 +129,9 @@ export interface UpdateCollectionItemValueData {
  */
 export async function getValuesByItemIds(
   item_ids: string[],
-  is_published: boolean = false
+  is_published: boolean = false,
+  knownFieldTypes?: Record<string, string>,
+  fieldIds?: string[],
 ): Promise<Record<string, Record<string, any>>> {
   const client = await getSupabaseAdmin();
 
@@ -109,41 +144,90 @@ export async function getValuesByItemIds(
   }
 
   const tenantId = await resolveEffectiveTenantId();
-
-  // Batch into chunks to avoid exceeding PostgREST URL length limits.
-  // Keep chunks small enough that total value rows stay under Supabase's
-  // default 1000-row response limit (50 items × ~20 fields = ~1000 rows).
-  const CHUNK_SIZE = 50;
   const valuesByItem: Record<string, Record<string, any>> = {};
+  let allRows: Array<{ item_id: string; field_id: string; value: string }> = [];
 
-  for (let i = 0; i < item_ids.length; i += CHUNK_SIZE) {
-    const chunk = item_ids.slice(i, i + CHUNK_SIZE);
-
-    let valQ = client
-      .from('collection_item_values')
-      .select('item_id, field_id, value, collection_fields!inner(type)')
-      .in('item_id', chunk)
-      .eq('is_published', is_published)
-      .is('deleted_at', null)
-      .limit(5000);
+  try {
+    const knex = await getKnexClient();
+    let query = knex('collection_item_values')
+      .select('item_id', 'field_id', 'value')
+      .whereIn('item_id', item_ids)
+      .andWhere('is_published', is_published)
+      .whereNull('deleted_at');
 
     if (tenantId) {
-      valQ = valQ.eq('tenant_id', tenantId);
+      query = query.andWhere('tenant_id', tenantId);
+    }
+    if (fieldIds) {
+      query = query.whereIn('field_id', fieldIds);
     }
 
-    const { data, error } = await valQ;
-
-    if (error) {
-      throw new Error(`Failed to fetch item values: ${error.message}`);
+    allRows = await query;
+  } catch {
+    const CHUNK_SIZE = 50;
+    const chunks: string[][] = [];
+    for (let i = 0; i < item_ids.length; i += CHUNK_SIZE) {
+      chunks.push(item_ids.slice(i, i + CHUNK_SIZE));
     }
 
-    data?.forEach((row: any) => {
-      if (!valuesByItem[row.item_id]) {
-        valuesByItem[row.item_id] = {};
+    const chunkResults = await Promise.all(
+      chunks.map(async (chunk) => {
+        let q = client
+          .from('collection_item_values')
+          .select('item_id, field_id, value')
+          .in('item_id', chunk)
+          .eq('is_published', is_published)
+          .is('deleted_at', null);
+        if (tenantId) {
+          q = q.eq('tenant_id', tenantId);
+        }
+        if (fieldIds) {
+          q = q.in('field_id', fieldIds);
+        }
+        const { data, error } = await q.limit(5000);
+
+        if (error) {
+          throw new Error(`Failed to fetch item values: ${error.message}`);
+        }
+
+        return data || [];
+      })
+    );
+
+    for (const rows of chunkResults) {
+      for (const row of rows) {
+        allRows.push(row);
       }
-      const fieldType = row.collection_fields?.type;
-      valuesByItem[row.item_id][row.field_id] = castValue(row.value, fieldType || 'text');
-    });
+    }
+  }
+
+  // Collect unique field IDs (only needed if caller didn't provide types)
+  const discoveredFieldIds = new Set<string>();
+  if (!knownFieldTypes) {
+    for (const row of allRows) {
+      discoveredFieldIds.add(row.field_id);
+    }
+  }
+
+  // Use caller-provided field types, or fetch them in a single query
+  let fieldTypeMap = knownFieldTypes;
+  if (!fieldTypeMap) {
+    fieldTypeMap = {};
+    if (discoveredFieldIds.size > 0) {
+      const { data: fields } = await client
+        .from('collection_fields')
+        .select('id, type')
+        .in('id', Array.from(discoveredFieldIds));
+
+      fields?.forEach((f: any) => { fieldTypeMap![f.id] = f.type; });
+    }
+  }
+
+  for (const row of allRows) {
+    if (!valuesByItem[row.item_id]) {
+      valuesByItem[row.item_id] = {};
+    }
+    valuesByItem[row.item_id][row.field_id] = castValue(row.value, (fieldTypeMap[row.field_id] || 'text') as any);
   }
 
   return valuesByItem;
@@ -568,6 +652,76 @@ export async function deleteValue(
   if (error) {
     throw new Error(`Failed to delete value: ${error.message}`);
   }
+}
+
+/**
+ * Soft-delete every stored value for a field whose value exactly matches
+ * `value`. Used when an option is removed from an option-type field so item
+ * values storing that option name are cleared from both draft and published
+ * rows.
+ * @returns Number of rows soft-deleted
+ */
+export async function clearValuesForField(
+  field_id: string,
+  value: string
+): Promise<number> {
+  const client = await getSupabaseAdmin();
+
+  if (!client) {
+    throw new Error('Supabase client not configured');
+  }
+
+  const now = new Date().toISOString();
+  const { data, error } = await client
+    .from('collection_item_values')
+    .update({ deleted_at: now, updated_at: now })
+    .eq('field_id', field_id)
+    .eq('value', value)
+    .is('deleted_at', null)
+    .select('id');
+
+  if (error) {
+    throw new Error(`Failed to clear values: ${error.message}`);
+  }
+
+  return data?.length || 0;
+}
+
+/**
+ * Replace stored values for a field where the value exactly matches `old_value`.
+ * Used to propagate option renames in option-type fields to all draft and
+ * published item values storing the previous option name.
+ * @returns Number of rows updated
+ */
+export async function renameValuesForField(
+  field_id: string,
+  old_value: string,
+  new_value: string
+): Promise<number> {
+  if (old_value === new_value) return 0;
+
+  const client = await getSupabaseAdmin();
+
+  if (!client) {
+    throw new Error('Supabase client not configured');
+  }
+
+  const { data, error } = await client
+    .from('collection_item_values')
+    .update({
+      value: new_value,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('field_id', field_id)
+    .eq('value', old_value)
+    .is('deleted_at', null)
+    .select('id');
+
+  if (error) {
+    throw new Error(`Failed to rename values: ${error.message}`);
+  }
+
+  return data?.length || 0;
 }
 
 /**

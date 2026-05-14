@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { createImport } from '@/lib/repositories/collectionImportRepository';
+import { createImport, cleanupStaleImports } from '@/lib/repositories/collectionImportRepository';
 import { getCollectionById } from '@/lib/repositories/collectionRepository';
 import { noCache } from '@/lib/api-response';
 import { getErrorMessage } from '@/lib/csv-utils';
@@ -10,11 +10,14 @@ export const revalidate = 0;
 
 /**
  * POST /ycode/api/collections/[id]/import
- * Create a new CSV import job for a collection
+ * Create a new CSV import job for a collection.
+ * The CSV file must already be uploaded to Supabase Storage;
+ * the client passes the storage path so the server can read it directly.
  *
  * Body:
  *  - columnMapping: Record<string, string> - Maps CSV column names to field IDs
- *  - csvData: Record<string, string>[] - Parsed CSV rows
+ *  - totalRows: number - Total number of rows to import
+ *  - csvStoragePath: string - Path to the CSV file in Supabase Storage
  */
 export async function POST(
   request: NextRequest,
@@ -33,7 +36,7 @@ export async function POST(
     }
 
     const body = await request.json();
-    const { columnMapping, csvData } = body;
+    const { columnMapping, totalRows, csvStoragePath } = body;
 
     // Validate required fields
     if (!columnMapping || typeof columnMapping !== 'object') {
@@ -43,19 +46,28 @@ export async function POST(
       );
     }
 
-    if (!csvData || !Array.isArray(csvData) || csvData.length === 0) {
+    if (!totalRows || typeof totalRows !== 'number' || totalRows <= 0) {
       return noCache(
-        { error: 'CSV data is required and must not be empty' },
+        { error: 'totalRows is required and must be a positive number' },
         400
       );
     }
 
-    // Create import job
+    if (!csvStoragePath || typeof csvStoragePath !== 'string') {
+      return noCache(
+        { error: 'csvStoragePath is required' },
+        400
+      );
+    }
+
+    // Clean up orphaned CSV files from abandoned imports (fire-and-forget)
+    cleanupStaleImports().catch(() => {});
+
     const importJob = await createImport({
       collection_id: id,
       column_mapping: columnMapping,
-      csv_data: csvData,
-      total_rows: csvData.length,
+      total_rows: totalRows,
+      csv_storage_path: csvStoragePath,
     });
 
     return noCache(

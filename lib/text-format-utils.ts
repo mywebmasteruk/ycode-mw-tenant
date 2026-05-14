@@ -5,6 +5,7 @@ import { formatFieldValue, resolveFieldFromSources } from '@/lib/cms-variables-u
 import { generateLinkHref, type LinkResolutionContext } from '@/lib/link-utils';
 import { contentHasBlockElements, hasBlockElementsWithResolver } from '@/lib/tiptap-utils';
 import { applyComponentOverrides, resolveComponents } from '@/lib/resolve-components';
+import HtmlEmbedRenderer from '@/components/HtmlEmbedRenderer';
 
 /**
  * Context for resolving rich text links - re-exports LinkResolutionContext for backwards compatibility
@@ -153,14 +154,14 @@ export const DEFAULT_TEXT_STYLES: Record<string, TextStyle> = {
     },
   },
   bulletList: {
-    label: 'Bullet List',
+    label: 'Bullet list',
     classes: 'ml-[8px] pl-[16px] list-disc',
     design: {
       spacing: { marginLeft: '8px', paddingLeft: '16px' },
     },
   },
   orderedList: {
-    label: 'Ordered List',
+    label: 'Ordered list',
     classes: 'ml-[8px] pl-[20px] list-decimal',
     design: {
       spacing: { marginLeft: '8px', paddingLeft: '20px' },
@@ -192,6 +193,44 @@ export const DEFAULT_TEXT_STYLES: Record<string, TextStyle> = {
     classes: 'border-t-[1px] border-[#aeaeae]',
     design: {
       borders: { borderTopWidth: '1px', borderColor: '#aeaeae' },
+    },
+  },
+  // Table elements
+  table: {
+    label: 'Table',
+    classes: 'w-full border-separate border-spacing-0 mt-[20px] mb-[20px] border-solid border-[1px] border-[#000000]/10 rounded-[10px] overflow-hidden',
+    design: {
+      sizing: { width: '100%' },
+      spacing: { marginTop: '20', marginBottom: '20', isActive: true },
+      borders: { isActive: true, borderColor: '#000000/10', borderStyle: 'solid', borderWidth: '1', borderRadius: '10' },
+    },
+  },
+  tableHeader: {
+    label: 'Table header cell',
+    classes: 'text-left font-[500] pt-[12px] pr-[12px] pb-[12px] pl-[12px] bg-[#000000]/5',
+    design: {
+      borders: { isActive: true, borderWidthMode: 'all' },
+      spacing: { paddingLeft: '12', paddingRight: '12', paddingTop: '12', paddingBottom: '12', isActive: true },
+      typography: { textAlign: 'left', fontWeight: '500', isActive: true },
+      backgrounds: { isActive: true, backgroundColor: '#000000/5' },
+    },
+  },
+  tableCell: {
+    label: 'Table cell',
+    classes: 'pt-[12px] pr-[12px] pb-[12px] pl-[12px]',
+    design: {
+      borders: { isActive: true, borderWidthMode: 'individual', borderRadiusMode: 'individual' },
+      spacing: { paddingLeft: '12', paddingRight: '12', paddingTop: '12', paddingBottom: '12', isActive: true },
+      typography: { textAlign: 'left', verticalAlign: 'top', isActive: true },
+      backgrounds: { isActive: true },
+    },
+  },
+  tableRow: {
+    label: 'Table row',
+    classes: '',
+    design: {
+      borders: { isActive: true },
+      backgrounds: { isActive: true },
     },
   },
 };
@@ -584,6 +623,14 @@ function renderInlineContent(
       return rendered ? [rendered] : [];
     }
 
+    // Handle HTML embed nodes that may appear inline from CMS rich_text expansion
+    if (node.type === 'richTextHtmlEmbed') {
+      const htmlCode = node.attrs?.code || '';
+      if (!htmlCode) return [];
+
+      return [React.createElement(HtmlEmbedRenderer, { key, code: htmlCode })];
+    }
+
     // Handle richTextImage nodes that may appear inline from CMS rich_text expansion
     if (node.type === 'richTextImage') {
       const imgProps: Record<string, any> = {
@@ -668,7 +715,7 @@ function renderRichTextComponentBlock(
   }
 
   const component = components?.find(c => c.id === componentId);
-  if (!component || !component.layers?.length) {
+  if (!component) {
     return React.createElement('span', { key, className: 'text-xs text-muted-foreground' }, '[missing component]');
   }
 
@@ -683,6 +730,11 @@ function renderRichTextComponentBlock(
   // Use pre-resolved layers (from server-side resolveRichTextCollections) when available
   if (block.attrs._resolvedLayers) {
     return renderComponentBlock(component, block.attrs._resolvedLayers, overrides, key, updatedAncestors);
+  }
+
+  // Fallback: resolve from component definition (edit mode)
+  if (!component.layers?.length) {
+    return React.createElement('span', { key, className: 'text-xs text-muted-foreground' }, '[missing component]');
   }
 
   const withOverrides = applyComponentOverrides(
@@ -857,7 +909,102 @@ function renderBlock(
     return renderRichTextComponentBlock(block, key, components, renderComponentBlock, ancestorComponentIds);
   }
 
+  if (block.type === 'table') {
+    const rows = (block.content || []).map((row: any, rowIdx: number) =>
+      renderTableNode(row, `${key}-row-${rowIdx}`, collectionItemData, pageCollectionItemData, textStyles, isEditMode, linkContext, timezone, layerDataMap, components, renderComponentBlock, ancestorComponentIds, rowIdx)
+    );
+
+    const tbodyProps: Record<string, any> = { key: `${key}-tbody` };
+    const tableClass = getTextStyleClasses(textStyles, 'table');
+    const tableProps: Record<string, any> = { key: `${key}-table` };
+    if (tableClass) tableProps.className = tableClass;
+    if (isEditMode) tableProps['data-style'] = 'table';
+
+    return React.createElement(
+      'div',
+      { key, className: 'overflow-x-auto max-w-full' },
+      React.createElement('table', tableProps,
+        React.createElement('tbody', tbodyProps, rows)
+      )
+    );
+  }
+
+  // Handle HTML embed blocks
+  if (block.type === 'richTextHtmlEmbed') {
+    const htmlCode = block.attrs?.code || '';
+    if (!htmlCode) return null;
+
+    return React.createElement(HtmlEmbedRenderer, { key, code: htmlCode });
+  }
+
   return null;
+}
+
+/**
+ * Recursively render a Tiptap table node (tableRow, tableCell, tableHeader)
+ */
+function renderTableNode(
+  node: any,
+  key: string,
+  collectionItemData?: Record<string, string>,
+  pageCollectionItemData?: Record<string, string>,
+  textStyles?: Record<string, TextStyle>,
+  isEditMode = false,
+  linkContext?: RichTextLinkContext,
+  timezone: string = 'UTC',
+  layerDataMap?: Record<string, Record<string, string>>,
+  components?: Component[],
+  renderComponentBlock?: RenderComponentBlockFn,
+  ancestorComponentIds?: Set<string>,
+  nodeIdx = 0,
+  parentRowIdx = 0,
+): React.ReactNode {
+  if (!node) return null;
+
+  const rowIdx = node.type === 'tableRow' ? nodeIdx : parentRowIdx;
+
+  const children = (node.content || []).map((child: any, idx: number) => {
+    if (child.type === 'tableRow' || child.type === 'tableCell' || child.type === 'tableHeader') {
+      return renderTableNode(child, `${key}-${idx}`, collectionItemData, pageCollectionItemData, textStyles, isEditMode, linkContext, timezone, layerDataMap, components, renderComponentBlock, ancestorComponentIds, idx, rowIdx);
+    }
+    return renderBlock(child, idx, collectionItemData, pageCollectionItemData, textStyles, false, isEditMode, linkContext, timezone, layerDataMap, components, renderComponentBlock, ancestorComponentIds);
+  });
+
+  const tagMap: Record<string, string> = {
+    tableRow: 'tr',
+    tableCell: 'td',
+    tableHeader: 'th',
+  };
+
+  const tag = tagMap[node.type] || 'div';
+  const styleKeyMap: Record<string, string> = {
+    tableRow: 'tableRow',
+    tableCell: 'tableCell',
+    tableHeader: 'tableHeader',
+  };
+  const styleKey = styleKeyMap[node.type];
+  let className = styleKey ? getTextStyleClasses(textStyles, styleKey) : '';
+
+  if (node.type === 'tableCell' || node.type === 'tableHeader') {
+    const borders: string[] = [];
+    if (parentRowIdx > 0) borders.push('border-t-[1px]');
+    if (nodeIdx > 0) borders.push('border-l-[1px]');
+    if (borders.length > 0) {
+      const borderClasses = `${borders.join(' ')} border-solid border-[#000000]/10`;
+      className = className ? `${className} ${borderClasses}` : borderClasses;
+    }
+  }
+
+  const props: Record<string, any> = { key };
+  if (className) props.className = className;
+  if (isEditMode && styleKey) props['data-style'] = styleKey;
+
+  if ((node.type === 'tableCell' || node.type === 'tableHeader') && node.attrs) {
+    if (node.attrs.colspan && node.attrs.colspan > 1) props.colSpan = node.attrs.colspan;
+    if (node.attrs.rowspan && node.attrs.rowspan > 1) props.rowSpan = node.attrs.rowspan;
+  }
+
+  return React.createElement(tag, props, children);
 }
 
 /**

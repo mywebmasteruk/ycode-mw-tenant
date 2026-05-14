@@ -49,7 +49,7 @@ export function createSplitTextAnimation(
 
 // Types
 export type TriggerType = 'click' | 'hover' | 'scroll-into-view' | 'while-scrolling' | 'load';
-export type PropertyType = 'position-x' | 'position-y' | 'scale' | 'rotation' | 'skew-x' | 'skew-y' | 'opacity' | 'display' | 'split-text';
+export type PropertyType = 'position-x' | 'position-y' | 'scale' | 'rotation' | 'skew-x' | 'skew-y' | 'opacity' | 'width' | 'height' | 'background-color' | 'display' | 'split-text';
 
 export interface PropertyConfig {
   key: keyof TweenProperties;
@@ -60,12 +60,96 @@ export interface PropertyConfig {
   options?: Array<{ value: string; label: string }>;
   /** If true, only show the "to" value in UI (no "from" input) */
   toOnly?: boolean;
+  /** Available units for this property — enables unit selector in UI */
+  units?: string[];
 }
 
 export interface PropertyOption {
   type: PropertyType;
   label: string;
   properties: PropertyConfig[];
+}
+
+// Unit constants
+const POSITION_UNITS = ['px', '%', 'rem', 'em', 'vw', 'vh', 'svh', 'dvh'];
+const ANGLE_UNITS = ['deg', 'rad', 'turn'];
+const SIZE_UNITS = ['px', '%', 'rem', 'em', 'vh', 'svh', 'dvh'];
+
+export interface ParsedAnimationValue {
+  number: string;
+  unit: string;
+}
+
+/** Splits a CSS value into number and unit parts. Falls back to defaultUnit for bare numbers. */
+export function parseAnimationValue(value: string | null | undefined, defaultUnit: string): ParsedAnimationValue {
+  if (!value) return { number: '', unit: defaultUnit };
+
+  const trimmed = value.trim();
+  if (!trimmed) return { number: '', unit: defaultUnit };
+
+  // Special non-numeric values (auto, etc.) — return as-is with empty unit
+  if (!/^-?[\d.]/.test(trimmed)) return { number: trimmed, unit: '' };
+
+  // Match number followed by optional unit
+  const match = trimmed.match(/^(-?[\d.]+)\s*(.*)$/);
+  if (!match) return { number: trimmed, unit: defaultUnit };
+
+  const num = match[1];
+  const unitPart = match[2] || defaultUnit;
+
+  return { number: num, unit: unitPart };
+}
+
+/** Combines a number and unit into a single CSS value string */
+export function formatAnimationValue(number: string, unit: string): string {
+  if (!number) return '';
+  if (!unit) return number;
+  return `${number}${unit}`;
+}
+
+// Optional module-level resolver for ColorPicker color variable references
+// (e.g. "color:var(--{id})"). Consumers can register a resolver so GSAP
+// receives raw rgba values that it can interpolate; without one, the CSS
+// `var(--id)` form is emitted instead (suitable for static initial CSS where
+// the browser resolves it natively).
+let _colorVariableResolver: ((id: string) => string | undefined) | null = null;
+
+/** Register a resolver mapping a color variable id to its raw value
+ * ("#hex" or "#hex/opacity"). Pass null to clear. */
+export function setColorVariableResolver(
+  resolver: ((id: string) => string | undefined) | null
+): void {
+  _colorVariableResolver = resolver;
+}
+
+/**
+ * Convert a ColorPicker-formatted color (`#hex`, `#hex/opacity`, or
+ * `color:var(--id)`) to a CSS-tweenable string. Plain hex strings are
+ * returned as-is.
+ */
+function colorToCss(value: string): string {
+  if (!value) return value;
+
+  const varMatch = value.match(/^color:var\(--([^)]+)\)$/);
+  if (varMatch) {
+    const id = varMatch[1];
+    const raw = _colorVariableResolver?.(id);
+    if (raw) return colorToCss(raw);
+    // Fallback: emit a plain CSS var() — the browser resolves it natively
+    // (e.g. for SSR-injected initial animation styles).
+    return `var(--${id})`;
+  }
+
+  const parts = value.split('/');
+  if (parts.length < 2) return value;
+  const hex = parts[0];
+  const opacity = parseInt(parts[1], 10) / 100;
+  if (Number.isNaN(opacity)) return hex;
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  if ([r, g, b].some(Number.isNaN)) return hex;
+  return `rgba(${r},${g},${b},${opacity})`;
 }
 
 // Constants
@@ -76,9 +160,10 @@ export const PROPERTY_OPTIONS: PropertyOption[] = [
     properties: [{
       key: 'x',
       unit: 'px',
-      defaultFrom: '0',
-      defaultFromAfterCurrent: '0',
-      defaultTo: '100',
+      units: POSITION_UNITS,
+      defaultFrom: '0px',
+      defaultFromAfterCurrent: '0px',
+      defaultTo: '100px',
     }],
   },
   {
@@ -87,9 +172,10 @@ export const PROPERTY_OPTIONS: PropertyOption[] = [
     properties: [{
       key: 'y',
       unit: 'px',
-      defaultFrom: '0',
-      defaultFromAfterCurrent: '0',
-      defaultTo: '100',
+      units: POSITION_UNITS,
+      defaultFrom: '0px',
+      defaultFromAfterCurrent: '0px',
+      defaultTo: '100px',
     }],
   },
   {
@@ -109,9 +195,10 @@ export const PROPERTY_OPTIONS: PropertyOption[] = [
     properties: [{
       key: 'rotation',
       unit: 'deg',
-      defaultFrom: '0',
-      defaultFromAfterCurrent: '0',
-      defaultTo: '45',
+      units: ANGLE_UNITS,
+      defaultFrom: '0deg',
+      defaultFromAfterCurrent: '0deg',
+      defaultTo: '45deg',
     }],
   },
   {
@@ -120,9 +207,10 @@ export const PROPERTY_OPTIONS: PropertyOption[] = [
     properties: [{
       key: 'skewX',
       unit: 'deg',
-      defaultFrom: '0',
-      defaultFromAfterCurrent: '0',
-      defaultTo: '30',
+      units: ANGLE_UNITS,
+      defaultFrom: '0deg',
+      defaultFromAfterCurrent: '0deg',
+      defaultTo: '30deg',
     }],
   },
   {
@@ -131,9 +219,10 @@ export const PROPERTY_OPTIONS: PropertyOption[] = [
     properties: [{
       key: 'skewY',
       unit: 'deg',
-      defaultFrom: '0',
-      defaultFromAfterCurrent: '0',
-      defaultTo: '30',
+      units: ANGLE_UNITS,
+      defaultFrom: '0deg',
+      defaultFromAfterCurrent: '0deg',
+      defaultTo: '30deg',
     }],
   },
   {
@@ -145,6 +234,41 @@ export const PROPERTY_OPTIONS: PropertyOption[] = [
       defaultFrom: '100',
       defaultFromAfterCurrent: '100',
       defaultTo: '0',
+    }],
+  },
+  {
+    type: 'height',
+    label: 'Height',
+    properties: [{
+      key: 'height',
+      unit: 'px',
+      units: SIZE_UNITS,
+      defaultFrom: '0px',
+      defaultFromAfterCurrent: '0px',
+      defaultTo: '100px',
+    }],
+  },
+  {
+    type: 'width',
+    label: 'Width',
+    properties: [{
+      key: 'width',
+      unit: 'px',
+      units: SIZE_UNITS,
+      defaultFrom: '0px',
+      defaultFromAfterCurrent: '0px',
+      defaultTo: '100px',
+    }],
+  },
+  {
+    type: 'background-color',
+    label: 'Background color',
+    properties: [{
+      key: 'backgroundColor',
+      unit: '',
+      defaultFrom: '#ffffff',
+      defaultFromAfterCurrent: '#ffffff',
+      defaultTo: '#000000',
     }],
   },
   {
@@ -224,15 +348,28 @@ export function calculateTweenStartTime(tweens: InteractionTween[], index: numbe
   return 0;
 }
 
+/**
+ * Resolve a stored value into a CSS-compatible string.
+ * Multi-unit properties store value with unit (e.g. "100px"); bare numbers get the default unit.
+ */
+export function resolveCssValue(value: string, prop: PropertyConfig): string {
+  if (prop.units) {
+    if (/^-?[\d.]+$/.test(value)) return `${value}${prop.unit}`;
+    return value;
+  }
+  return prop.unit ? `${value}${prop.unit}` : value;
+}
+
 /** Convert a property value to GSAP-compatible format */
 export function toGsapValue(value: string | null | undefined, prop: PropertyConfig): string | number | undefined {
   if (value === null || value === undefined) return undefined;
-  // autoAlpha is stored as percentage (0-100), convert to decimal (0-1) for GSAP
   if (prop.key === 'autoAlpha') {
     return Number(value) / 100;
   }
-  // For other properties with units, append the unit
-  return prop.unit ? `${value}${prop.unit}` : value;
+  if (prop.key === 'backgroundColor') {
+    return colorToCss(value);
+  }
+  return resolveCssValue(value, prop);
 }
 
 /** Get all property options that are set in a tween (check both from and to) */
@@ -463,25 +600,33 @@ export function generateInitialAnimationCSS(layers: Layer[]): InitialAnimationRe
                 const value = tween.from[prop.key];
                 if (value === null || value === undefined) return;
 
+                const cssVal = resolveCssValue(value, prop);
+
                 // Convert to CSS property - collect transforms separately to combine them
                 if (prop.key === 'x') {
-                  transforms.push(`translateX(${value}${prop.unit})`);
+                  transforms.push(`translateX(${cssVal})`);
                 } else if (prop.key === 'y') {
-                  transforms.push(`translateY(${value}${prop.unit})`);
+                  transforms.push(`translateY(${cssVal})`);
                 } else if (prop.key === 'rotation') {
-                  transforms.push(`rotate(${value}${prop.unit})`);
+                  transforms.push(`rotate(${cssVal})`);
                 } else if (prop.key === 'scale') {
                   transforms.push(`scale(${value})`);
                 } else if (prop.key === 'skewX') {
-                  transforms.push(`skewX(${value}${prop.unit})`);
+                  transforms.push(`skewX(${cssVal})`);
                 } else if (prop.key === 'skewY') {
-                  transforms.push(`skewY(${value}${prop.unit})`);
+                  transforms.push(`skewY(${cssVal})`);
                 } else if (prop.key === 'autoAlpha') {
                   const opacity = Number(value) / 100;
                   styles.push(`opacity: ${opacity}`);
                   if (opacity === 0) {
                     styles.push(`visibility: hidden`);
                   }
+                } else if (prop.key === 'width') {
+                  styles.push(`width: ${cssVal}`);
+                } else if (prop.key === 'height') {
+                  styles.push(`height: ${cssVal}`);
+                } else if (prop.key === 'backgroundColor') {
+                  styles.push(`background-color: ${colorToCss(value)}`);
                 } else if (prop.key === 'display') {
                   // Track elements that should start hidden using data attribute
                   if (value === 'hidden') {

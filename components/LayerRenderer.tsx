@@ -7,17 +7,16 @@ import LayerLockIndicator from '@/components/collaboration/LayerLockIndicator';
 import EditingIndicator from '@/components/collaboration/EditingIndicator';
 import { useCollaborationPresenceStore, getResourceLockKey, RESOURCE_TYPES } from '@/stores/useCollaborationPresenceStore';
 import { useAuthStore } from '@/stores/useAuthStore';
-import { useLocalisationStore } from '@/stores/useLocalisationStore';
 import type { Layer, Locale, ComponentVariable, FormSettings, LinkSettings, Breakpoint, CollectionItemWithValues, Component } from '@/types';
 import type { UseLiveLayerUpdatesReturn } from '@/hooks/use-live-layer-updates';
 import type { UseLiveComponentUpdatesReturn } from '@/hooks/use-live-component-updates';
-import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextEditable, isTextContentLayer, isRichTextLayer, getCollectionVariable, evaluateVisibility, findAncestorByName, filterDisabledSliderLayers, getLayerCmsFieldBinding } from '@/lib/layer-utils';
+import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextEditable, isTextContentLayer, isRichTextLayer, getCollectionVariable, evaluateVisibility, findAncestorByName, filterDisabledSliderLayers, getLayerCmsFieldBinding, findLayerById } from '@/lib/layer-utils';
 import { getMapIframeProps, DEFAULT_MAP_SETTINGS, resolveMarkerColor } from '@/lib/map-utils';
-import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/templates/utilities';
+import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
 import { useCanvasSlider } from '@/hooks/use-canvas-slider';
 import { resolveFieldFromSources } from '@/lib/cms-variables-utils';
 import { getDynamicTextContent, getImageUrlFromVariable, getVideoUrlFromVariable, getIframeUrlFromVariable, isFieldVariable, isAssetVariable, isStaticTextVariable, isDynamicTextVariable, getAssetId, getStaticTextContent, createAssetVariable, createDynamicTextVariable, resolveDesignStyles } from '@/lib/variable-utils';
-import { getTranslatedAssetId, getTranslatedText } from '@/lib/localisation-utils';
+import { getTranslatedAssetId, getTranslatedText, applyCmsTranslations, injectTranslatedText } from '@/lib/localisation-utils';
 import { isValidLinkSettings } from '@/lib/link-utils';
 import { DEFAULT_ASSETS, ASSET_CATEGORIES, isAssetOfType } from '@/lib/asset-utils';
 import { parseMultiAssetFieldValue, buildAssetVirtualValues } from '@/lib/multi-asset-utils';
@@ -46,7 +45,7 @@ import FilterableCollection from '@/components/FilterableCollection';
 import LocaleSelector from '@/components/layers/LocaleSelector';
 import { usePagesStore } from '@/stores/usePagesStore';
 import { useSettingsStore } from '@/stores/useSettingsStore';
-import { generateLinkHref, resolveLinkAttrs, type LinkResolutionContext } from '@/lib/link-utils';
+import { generateLinkHref, resolveLinkAttrs, isLinkAtCollectionBoundary, type LinkResolutionContext } from '@/lib/link-utils';
 import { collectEditorHiddenLayerIds, type HiddenLayerInfo } from '@/lib/animation-utils';
 import AnimationInitializer from '@/components/AnimationInitializer';
 import { transformLayerIdsForInstance, resolveVariableLinks } from '@/lib/resolve-components';
@@ -94,6 +93,8 @@ interface LayerRendererProps {
   layerDataMap?: Record<string, Record<string, string>>; // Map of collection layer ID -> item data for layer-specific resolution
   pageCollectionItemId?: string; // The ID of the page's collection item (for dynamic pages)
   pageCollectionItemData?: Record<string, string> | null; // Page's collection item data (for dynamic pages)
+  /** Ordered ids of the dynamic page's collection — powers `next-item` / `previous-item` link keywords. */
+  pageCollectionSortedItemIds?: string[];
   hiddenLayerInfo?: HiddenLayerInfo[]; // Layer IDs with breakpoint info for animations
   editorHiddenLayerIds?: Map<string, Breakpoint[]>; // Layer IDs to hide on canvas (edit mode only) with breakpoint info
   editorBreakpoint?: Breakpoint; // Current breakpoint in editor
@@ -103,10 +104,12 @@ interface LayerRendererProps {
   liveLayerUpdates?: UseLiveLayerUpdatesReturn | null; // For collaboration broadcasts
   liveComponentUpdates?: UseLiveComponentUpdatesReturn | null; // For component collaboration broadcasts
   parentComponentLayerId?: string; // ID of the parent component layer (if rendering inside a component)
+  parentComponentId?: string; // ID of the parent component (mirror of parentComponentLayerId for double-click-to-edit)
   parentComponentOverrides?: Layer['componentOverrides']; // Override values from parent component instance
   parentComponentVariables?: ComponentVariable[]; // Component's variables for default value lookup
   editingComponentVariables?: ComponentVariable[]; // Variables when directly editing a component
   isInsideForm?: boolean; // Whether this layer is inside a form (for button type handling)
+  isInsideLink?: boolean; // Whether this layer is inside an ancestor <a> (prevents nested <a> tags)
   parentFormSettings?: FormSettings; // Form settings from parent form layer
   pages?: any[]; // Pages for link resolution
   folders?: any[]; // Folders for link resolution
@@ -126,6 +129,15 @@ interface LayerRendererProps {
   serverSettings?: Record<string, unknown>;
   /** When true, the component root layer (layer.id === parentComponentLayerId) renders its own context menu */
   componentRootContextMenu?: boolean;
+  /** Called when a component instance is double-clicked on the canvas (edit mode only). */
+  onComponentEdit?: (componentId: string, instanceLayerId: string) => void;
+  /**
+   * Layer id of the LCP candidate image. When this image renders it gets
+   * `loading="eager"` + `fetchpriority="high"` regardless of any
+   * `attributes.loading` value, so the browser prioritizes the hero image
+   * over the rest of the page. Computed server-side by PageRenderer.
+   */
+  lcpCandidateLayerId?: string | null;
 }
 
 const LayerRenderer: React.FC<LayerRendererProps> = ({
@@ -146,6 +158,7 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
   layerDataMap,
   pageCollectionItemId,
   pageCollectionItemData,
+  pageCollectionSortedItemIds,
   collectionItemSlugs,
   hiddenLayerInfo,
   editorHiddenLayerIds,
@@ -156,10 +169,12 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
   liveLayerUpdates,
   liveComponentUpdates,
   parentComponentLayerId,
+  parentComponentId,
   parentComponentOverrides,
   parentComponentVariables,
   editingComponentVariables,
   isInsideForm = false,
+  isInsideLink = false,
   parentFormSettings,
   pages: pagesProp,
   folders: foldersProp,
@@ -172,6 +187,8 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
   isSlideChild: isSlideChildProp,
   serverSettings,
   componentRootContextMenu,
+  onComponentEdit,
+  lcpCandidateLayerId,
 }) => {
   const [editingLayerId, setEditingLayerId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState<string>('');
@@ -246,6 +263,7 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
               layerTemplate={layer._filterConfig!.layerTemplate}
               collectionLayerClasses={layer._filterConfig!.collectionLayerClasses}
               collectionLayerTag={layer._filterConfig!.collectionLayerTag}
+              isPublished={layer._filterConfig!.isPublished}
             >
               {content}
             </FilterableCollection>
@@ -288,6 +306,7 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
         layerDataMap={layerDataMap}
         pageCollectionItemId={pageCollectionItemId}
         pageCollectionItemData={pageCollectionItemData}
+        pageCollectionSortedItemIds={pageCollectionSortedItemIds}
         hiddenLayerInfo={hiddenLayerInfo}
         editorHiddenLayerIds={editorHiddenLayerIds}
         editorBreakpoint={editorBreakpoint}
@@ -297,10 +316,12 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
         liveLayerUpdates={liveLayerUpdates}
         liveComponentUpdates={liveComponentUpdates}
         parentComponentLayerId={parentComponentLayerId}
+        parentComponentId={parentComponentId}
         parentComponentOverrides={parentComponentOverrides}
         parentComponentVariables={parentComponentVariables}
         editingComponentVariables={editingComponentVariables}
         isInsideForm={isInsideForm}
+        isInsideLink={isInsideLink}
         parentFormSettings={parentFormSettings}
         pages={pages}
         folders={folders}
@@ -314,6 +335,8 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
         isSlideChild={isSlideChildProp}
         serverSettings={serverSettings}
         componentRootContextMenu={componentRootContextMenu}
+        onComponentEdit={onComponentEdit}
+        lcpCandidateLayerId={lcpCandidateLayerId}
       />
     );
   };
@@ -350,6 +373,8 @@ const LayerItem: React.FC<{
   layerDataMap?: Record<string, Record<string, string>>; // Map of collection layer ID -> item data
   pageCollectionItemId?: string; // The ID of the page's collection item (for dynamic pages)
   pageCollectionItemData?: Record<string, string> | null;
+  /** Ordered ids of the dynamic page's collection — powers `next-item` / `previous-item` link keywords. */
+  pageCollectionSortedItemIds?: string[];
   hiddenLayerInfo?: HiddenLayerInfo[];
   editorHiddenLayerIds?: Map<string, Breakpoint[]>;
   editorBreakpoint?: Breakpoint;
@@ -359,10 +384,12 @@ const LayerItem: React.FC<{
   liveLayerUpdates?: UseLiveLayerUpdatesReturn | null;
   liveComponentUpdates?: UseLiveComponentUpdatesReturn | null;
   parentComponentLayerId?: string; // ID of the parent component layer (if this layer is inside a component)
+  parentComponentId?: string; // ID of the parent component (mirrors parentComponentLayerId)
   parentComponentOverrides?: Layer['componentOverrides']; // Override values from parent component instance
   parentComponentVariables?: ComponentVariable[]; // Component's variables for default value lookup
   editingComponentVariables?: ComponentVariable[]; // Variables when directly editing a component
   isInsideForm?: boolean; // Whether this layer is inside a form
+  isInsideLink?: boolean; // Whether this layer is inside an ancestor <a>
   parentFormSettings?: FormSettings; // Form settings from parent form layer
   pages?: any[]; // Pages for link resolution
   folders?: any[]; // Folders for link resolution
@@ -376,6 +403,8 @@ const LayerItem: React.FC<{
   isSlideChild?: boolean;
   serverSettings?: Record<string, unknown>;
   componentRootContextMenu?: boolean;
+  onComponentEdit?: (componentId: string, instanceLayerId: string) => void;
+  lcpCandidateLayerId?: string | null;
 }> = ({
   layer,
   isEditMode,
@@ -400,6 +429,7 @@ const LayerItem: React.FC<{
   layerDataMap,
   pageCollectionItemId,
   pageCollectionItemData,
+  pageCollectionSortedItemIds,
   hiddenLayerInfo,
   editorHiddenLayerIds,
   editorBreakpoint,
@@ -409,10 +439,12 @@ const LayerItem: React.FC<{
   liveLayerUpdates,
   liveComponentUpdates,
   parentComponentLayerId,
+  parentComponentId,
   parentComponentOverrides,
   parentComponentVariables,
   editingComponentVariables,
   isInsideForm = false,
+  isInsideLink = false,
   parentFormSettings,
   pages,
   folders,
@@ -422,10 +454,12 @@ const LayerItem: React.FC<{
   anchorMap,
   resolvedAssets,
   components: componentsProp,
+  onComponentEdit,
   ancestorComponentIds,
   isSlideChild,
   serverSettings,
   componentRootContextMenu,
+  lcpCandidateLayerId,
 }) => {
   // Subscribe to selection state from the store for reactive updates without
   // forcing the entire LayerRenderer tree to re-render when selection changes
@@ -476,8 +510,6 @@ const LayerItem: React.FC<{
     return getAssetFromStore(id);
   }, [resolvedAssets, getAssetFromStore]);
   const openFileManager = useEditorStore((state) => state.openFileManager);
-  const allTranslations = useLocalisationStore((state) => state.translations);
-  const editModeTranslations = isEditMode && currentLocale ? allTranslations[currentLocale.id] : null;
   const storeComponents = useComponentsStore((state) => state.components);
   const allComponents = storeComponents.length > 0 ? storeComponents : (componentsProp ?? []);
 
@@ -498,6 +530,7 @@ const LayerItem: React.FC<{
     layerDataMap: effectiveLayerDataMap,
     pageCollectionItemId,
     pageCollectionItemData,
+    pageCollectionSortedItemIds,
     hiddenLayerInfo,
     editorHiddenLayerIds,
     editorBreakpoint,
@@ -507,6 +540,7 @@ const LayerItem: React.FC<{
     liveLayerUpdates,
     liveComponentUpdates,
     isInsideForm,
+    isInsideLink,
     parentFormSettings,
     pages,
     folders,
@@ -517,10 +551,12 @@ const LayerItem: React.FC<{
     resolvedAssets,
     components: componentsProp,
     serverSettings,
+    onComponentEdit,
+    lcpCandidateLayerId,
   // selectedLayerId and hoveredLayerId kept in the object for SSR/published mode
   // but excluded from deps so changes don't cascade re-renders in edit mode.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [isEditMode, isPublished, onLayerClick, onLayerUpdate, onLayerHover, pageId, collectionLayerData, collectionLayerItemId, effectiveLayerDataMap, pageCollectionItemId, pageCollectionItemData, hiddenLayerInfo, editorHiddenLayerIds, editorBreakpoint, currentLocale, availableLocales, localeSelectorFormat, liveLayerUpdates, liveComponentUpdates, isInsideForm, parentFormSettings, pages, folders, collectionItemSlugs, isPreview, translations, anchorMap, resolvedAssets, componentsProp, serverSettings]);
+  }), [isEditMode, isPublished, onLayerClick, onLayerUpdate, onLayerHover, pageId, collectionLayerData, collectionLayerItemId, effectiveLayerDataMap, pageCollectionItemId, pageCollectionItemData, pageCollectionSortedItemIds, hiddenLayerInfo, editorHiddenLayerIds, editorBreakpoint, currentLocale, availableLocales, localeSelectorFormat, liveLayerUpdates, liveComponentUpdates, isInsideForm, isInsideLink, parentFormSettings, pages, folders, collectionItemSlugs, isPreview, translations, anchorMap, resolvedAssets, componentsProp, serverSettings, onComponentEdit, lcpCandidateLayerId]);
 
   // Callback for rendering embedded components inside rich-text content
   // Clicks on the embedded component's internal layers should select the text layer
@@ -622,6 +658,7 @@ const LayerItem: React.FC<{
   // wrapped in <a><button></button></a> which is invalid HTML
   const isButtonWithLink = layer.name === 'button'
     && !isInsideForm
+    && !isInsideLink
     && isValidLinkSettings(layer.variables?.link);
   if (isButtonWithLink) {
     htmlTag = 'a';
@@ -632,6 +669,7 @@ const LayerItem: React.FC<{
   // Only match actual div layers (layer.name === 'div'), not other layers
   // whose tag was forced to 'div' by earlier overrides (e.g. headings with lists).
   const isDivWithLink = !isButtonWithLink
+    && !isInsideLink
     && layer.name === 'div'
     && htmlTag === 'div'
     && layer.id !== 'body'
@@ -803,7 +841,7 @@ const LayerItem: React.FC<{
         if (!inputLayerId) return;
         const nameAttr = inputEl.getAttribute('name');
         if (nameAttr) nameMap[inputLayerId] = nameAttr;
-        if (inputEl.type === 'checkbox') {
+        if (inputEl.type === 'checkbox' || inputEl.type === 'radio') {
           const checked = (inputEl as HTMLInputElement).checked;
           const val = checked ? ((inputEl as HTMLInputElement).value || 'true') : '';
           inputValues[inputLayerId] = val;
@@ -888,8 +926,11 @@ const LayerItem: React.FC<{
 
   // Resolve text and image URLs with field binding support
   const textContent = (() => {
-    // Special handling for locale selector label
-    if (layer.key === 'localeSelectorLabel' && !isEditMode) {
+    // Special handling for locale selector label.
+    // Runs in both edit and runtime modes so the builder canvas reflects the
+    // active locale chosen via the header dropdown — otherwise the label
+    // would show stale placeholder text while the rest of the canvas updates.
+    if (layer.key === 'localeSelectorLabel') {
       // Get default locale if no locale is detected
       const defaultLocale = availableLocales?.find(l => l.is_default) || availableLocales?.[0];
       const displayLocale = currentLocale || defaultLocale;
@@ -921,6 +962,7 @@ const LayerItem: React.FC<{
         anchorMap,
         resolvedAssets,
         layerDataMap: effectiveLayerDataMap,
+        pageCollectionSortedItemIds,
       };
 
     // Check for component variable override or default value
@@ -1126,13 +1168,24 @@ const LayerItem: React.FC<{
   const component = (isEditMode && layer.componentId) ? getComponentById(layer.componentId) : null;
 
   // Transform component layers for this instance to ensure unique IDs per instance
-  // This enables animations to target the correct elements when multiple instances exist
+  // This enables animations to target the correct elements when multiple instances exist.
+  //
+  // Also inject translations for the active locale: in edit mode the component
+  // is re-resolved here from the store, bypassing the canvas-level
+  // injectTranslatedText pass on the serialized page layers. Without injecting
+  // here, component content would always render in the default language even
+  // when the user previews a non-default locale on a page.
   const transformedComponentLayers = useMemo(() => {
-    if (isEditMode && component && component.layers && component.layers.length > 0) {
-      return transformLayerIdsForInstance(component.layers, layer.id);
+    if (!isEditMode || !component?.layers?.length) return null;
+    const transformed = transformLayerIdsForInstance(component.layers, layer.id);
+    if (!currentLocale || currentLocale.is_default || !translations) {
+      return transformed;
     }
-    return null;
-  }, [isEditMode, component, layer.id]);
+    return injectTranslatedText(transformed, pageId || component.id, translations, {
+      includeIncomplete: true,
+      defaultMasterComponentId: component.id,
+    });
+  }, [isEditMode, component, layer.id, currentLocale, translations, pageId]);
 
   // Collect hidden layer IDs from the component's transformed layers
   // Needed because Canvas computes editorHiddenLayerIds from serializeLayers (different ID transform)
@@ -1221,7 +1274,8 @@ const LayerItem: React.FC<{
         return ids.includes(parentId);
       });
     } else if (!sourceFieldId) {
-      items = allCollectionItems;
+      // Multi-asset without a selected field has no items to render
+      items = sourceFieldType === 'multi_asset' ? [] : allCollectionItems;
     } else {
       // Get the reference field value using source-aware resolution
       const refValue = resolveFieldFromSources(sourceFieldId, undefined, collectionLayerData, pageCollectionItemData);
@@ -1270,6 +1324,33 @@ const LayerItem: React.FC<{
   }, [collectionId, allCollectionItems, sourceFieldId, sourceFieldType, sourceFieldSource, collectionLayerData, pageCollectionItemData, collectionLayerItemId, pageCollectionItemId, getAsset, collectionVariable?.filters, isEditMode]);
 
   const optionsSourceSort = layer.settings?.optionsSource;
+
+  // Subscribe to the linked sort-by/sort-order input layers' default `value`
+  // attribute so the canvas re-fetches when the user changes the default in the
+  // SelectOptionsSettings panel. On the canvas there is no live `<select>`
+  // value, so the layer attribute drives the effective sort.
+  const sortByInputDefaultValue = usePagesStore((state) => {
+    const inputLayerId = collectionVariable?.sort_by_inputLayerId;
+    if (!inputLayerId) return undefined;
+    for (const draft of Object.values(state.draftsByPageId)) {
+      if (!draft) continue;
+      const found = findLayerById(draft.layers, inputLayerId);
+      if (found) return found.attributes?.value;
+    }
+    return undefined;
+  });
+
+  const sortOrderInputDefaultValue = usePagesStore((state) => {
+    const inputLayerId = collectionVariable?.sort_order_inputLayerId;
+    if (!inputLayerId) return undefined;
+    for (const draft of Object.values(state.draftsByPageId)) {
+      if (!draft) continue;
+      const found = findLayerById(draft.layers, inputLayerId);
+      if (found) return found.attributes?.value;
+    }
+    return undefined;
+  });
+
   useEffect(() => {
     if (!isEditMode) return;
     if (!collectionVariable?.id) return;
@@ -1279,8 +1360,20 @@ const LayerItem: React.FC<{
     if (isLoadingLayerData) return;
 
     // Checkbox wrappers store sort config in settings.optionsSource, not in the collection variable
-    const sortBy = optionsSourceSort?.sortFieldId || collectionVariable.sort_by;
-    const sortOrder = optionsSourceSort?.sortOrder || collectionVariable.sort_order;
+    let sortBy = optionsSourceSort?.sortFieldId || collectionVariable.sort_by;
+    let sortOrder = optionsSourceSort?.sortOrder || collectionVariable.sort_order;
+
+    // Mirror runtime behavior on the canvas: when the sort is bound to an
+    // input layer, use that layer's default `value` as the effective sort.
+    if (collectionVariable.sort_by_inputLayerId && typeof sortByInputDefaultValue === 'string' && sortByInputDefaultValue.trim() && sortByInputDefaultValue.trim().toLowerCase() !== 'none') {
+      sortBy = sortByInputDefaultValue.trim();
+    }
+    if (collectionVariable.sort_order_inputLayerId) {
+      const normalized = (sortOrderInputDefaultValue || '').toString().trim().toLowerCase();
+      if (normalized === 'asc' || normalized === 'desc') {
+        sortOrder = normalized;
+      }
+    }
 
     fetchLayerData(
       layer.id,
@@ -1296,10 +1389,14 @@ const LayerItem: React.FC<{
     collectionVariable?.source_field_type,
     collectionVariable?.sort_by,
     collectionVariable?.sort_order,
+    collectionVariable?.sort_by_inputLayerId,
+    collectionVariable?.sort_order_inputLayerId,
     collectionVariable?.limit,
     collectionVariable?.offset,
     optionsSourceSort?.sortFieldId,
     optionsSourceSort?.sortOrder,
+    sortByInputDefaultValue,
+    sortOrderInputDefaultValue,
     isLoadingLayerData,
     fetchLayerData,
     layer.id,
@@ -1369,7 +1466,7 @@ const LayerItem: React.FC<{
     transition,
   } = useSortable({
     id: layer.id,
-    disabled: !enableDragDrop || isEditing || isLockedByOther,
+    disabled: !enableDragDrop || isEditing || isLockedByOther || !!(currentLocale && !currentLocale.is_default),
     data: {
       layer,
     },
@@ -1379,9 +1476,14 @@ const LayerItem: React.FC<{
   const sliderRef = useRef<HTMLElement | null>(null);
   useCanvasSlider(sliderRef, layer, isEditMode);
 
+  // Block inline canvas editing while in a non-default locale: source layer
+  // text must only be edited via the default locale. Translations are saved
+  // through the right-sidebar Translate panel instead.
+  const isLocalizingLayer = !!(currentLocale && !currentLocale.is_default);
+
   const startEditing = (clickX?: number, clickY?: number) => {
     // Enable inline editing for text layers (both rich text and plain text)
-    if (textEditable && isEditMode && !isLockedByOther) {
+    if (textEditable && isEditMode && !isLockedByOther && !isLocalizingLayer) {
       setEditingLayerId(layer.id);
       // Clear sublayer selection when entering edit mode
       useEditorStore.getState().setActiveSublayerIndex(null);
@@ -1555,6 +1657,7 @@ const LayerItem: React.FC<{
     anchorMap,
     resolvedAssets,
     layerDataMap: effectiveLayerDataMap,
+    pageCollectionSortedItemIds,
   };
 
   // Render element-specific content
@@ -1587,6 +1690,7 @@ const LayerItem: React.FC<{
           activeLayerId={activeLayerId}
           projected={projected}
           parentComponentLayerId={layer.id}
+          parentComponentId={layer.componentId}
           parentComponentOverrides={effectiveOverrides}
           parentComponentVariables={component?.variables}
           ancestorComponentIds={effectiveAncestorIds}
@@ -1732,7 +1836,12 @@ const LayerItem: React.FC<{
       }
       if (layerLinkContext && isValidLinkSettings(layer.variables.link)) {
         const linkAttrs = resolveLinkAttrs(layer.variables.link, layerLinkContext);
-        if (linkAttrs) Object.assign(elementProps, linkAttrs);
+        if (linkAttrs) {
+          Object.assign(elementProps, linkAttrs);
+        } else if (isLinkAtCollectionBoundary(layer.variables.link, layerLinkContext)) {
+          elementProps['aria-disabled'] = 'true';
+          elementProps['data-link-disabled'] = 'true';
+        }
       }
     }
 
@@ -1897,6 +2006,15 @@ const LayerItem: React.FC<{
         if (isLockedByOther) return;
         e.stopPropagation();
 
+        // Component instance (or any layer inside one): open the master
+        // component for editing. Mirrors the "Edit component" sidebar button.
+        const componentEditTargetId = layer.componentId || parentComponentId;
+        const componentEditInstanceLayerId = layer.componentId ? layer.id : parentComponentLayerId;
+        if (onComponentEdit && componentEditTargetId && componentEditInstanceLayerId) {
+          onComponentEdit(componentEditTargetId, componentEditInstanceLayerId);
+          return;
+        }
+
         // Any element with CMS field binding: open collection item editor
         const cmsBinding = getLayerCmsFieldBinding(layer);
         if (cmsBinding) {
@@ -2001,8 +2119,8 @@ const LayerItem: React.FC<{
       const finalImageUrl = imageUrl && imageUrl.trim() !== '' ? imageUrl : DEFAULT_ASSETS.IMAGE;
 
       // Resolve intrinsic dimensions: explicit attributes > asset record > URL reverse-lookup
-      let imgWidth = layer.attributes?.width as string | undefined;
-      let imgHeight = layer.attributes?.height as string | undefined;
+      let imgWidth = layer.attributes?.width != null ? String(layer.attributes.width) : undefined;
+      let imgHeight = layer.attributes?.height != null ? String(layer.attributes.height) : undefined;
 
       if (!imgWidth || !imgHeight) {
         const assetId = isAssetVariable(imageVariable) ? getAssetId(imageVariable) : undefined;
@@ -2022,21 +2140,38 @@ const LayerItem: React.FC<{
         }
       }
 
-      const imgLoading = layer.attributes?.loading as string | undefined;
+      const isLcpCandidate = !!lcpCandidateLayerId && layer.id === lcpCandidateLayerId;
+      const imgLoadingAttr = layer.attributes?.loading as string | undefined;
+      // LCP candidate always loads eagerly with high fetchpriority — overrides
+      // the image template's default `loading="lazy"`. Other images keep
+      // whatever the user/template set (defaults to lazy).
+      const effectiveLoading = isLcpCandidate ? 'eager' : imgLoadingAttr;
 
       const optimizedSrc = getOptimizedImageUrl(finalImageUrl, 1920, 85);
       const srcset = generateImageSrcset(finalImageUrl);
-      const sizes = getImageSizes();
+
+      // Prefer an explicit `sizes` attribute. Otherwise, if we have an
+      // intrinsic pixel width, emit a media-aware sizes string so browsers
+      // download a more appropriately sized variant on desktop. Falls back
+      // to `100vw` when width is unknown.
+      const explicitSizes = (layer.attributes?.sizes as string | undefined)?.trim();
+      const widthForSizes = imgWidth && /^\d+(\.\d+)?(px)?$/i.test(imgWidth)
+        ? imgWidth.replace(/px$/i, '')
+        : null;
+      const sizes = explicitSizes
+        || (widthForSizes ? `(max-width: 768px) 100vw, ${widthForSizes}px` : getImageSizes());
 
       const imageProps: Record<string, any> = {
         ...elementProps,
         alt: imageAlt,
         src: optimizedSrc,
+        decoding: 'async',
       };
 
       if (imgWidth) imageProps.width = imgWidth;
       if (imgHeight) imageProps.height = imgHeight;
-      if (imgLoading) imageProps.loading = imgLoading;
+      if (effectiveLoading) imageProps.loading = effectiveLoading;
+      if (isLcpCandidate) imageProps.fetchPriority = 'high';
 
       if (srcset) {
         imageProps.srcSet = srcset;
@@ -2103,11 +2238,17 @@ const LayerItem: React.FC<{
         elementProps.name = layer.settings?.id || layer.id;
       }
 
-      // Keep select uncontrolled while still supporting default selection
-      // from layer attributes (e.g. collection-sourced default option).
+      // In edit mode, keep value controlled (canvas selects aren't interactive)
+      // so the rendered selection reflects default changes in real time.
+      // In preview/published, convert to defaultValue so the field is uncontrolled
+      // and users can pick a different option.
       if ('value' in elementProps) {
-        elementProps.defaultValue = elementProps.value;
-        delete elementProps.value;
+        if (isEditMode) {
+          elementProps.onChange = () => {};
+        } else {
+          elementProps.defaultValue = elementProps.value;
+          delete elementProps.value;
+        }
       }
 
       if (isEditMode && layer.settings?.optionsSource?.collectionId) {
@@ -2656,6 +2797,7 @@ const LayerItem: React.FC<{
               layerDataMap={effectiveLayerDataMap}
               pageCollectionItemId={pageCollectionItemId}
               pageCollectionItemData={pageCollectionItemData}
+              pageCollectionSortedItemIds={pageCollectionSortedItemIds}
               pages={pages}
               folders={folders}
               collectionItemSlugs={collectionItemSlugs}
@@ -2668,14 +2810,16 @@ const LayerItem: React.FC<{
               editorBreakpoint={editorBreakpoint}
               currentLocale={currentLocale}
               availableLocales={availableLocales}
-              localeSelectorFormat={localeSelectorFormat}
+              localeSelectorFormat={layer.name === 'localeSelector' ? (layer.settings?.locale?.format || 'locale') : localeSelectorFormat}
               liveLayerUpdates={liveLayerUpdates}
               isInsideForm={isInsideForm}
+              isInsideLink={isInsideLink}
               parentFormSettings={parentFormSettings}
               components={componentsProp}
               ancestorComponentIds={effectiveAncestorIds}
               isSlideChild={layer.name === 'slides'}
               serverSettings={serverSettings}
+              lcpCandidateLayerId={lcpCandidateLayerId}
             />
           )}
         </Tag>
@@ -2725,6 +2869,11 @@ const LayerItem: React.FC<{
       );
     }
 
+    // Resolved parent-component context to pass to child LayerRenderers.
+    // Innermost component wins so double-click-to-edit targets the correct component.
+    const childParentComponentLayerId = layer.componentId ? layer.id : parentComponentLayerId;
+    const childParentComponentId = layer.componentId || parentComponentId;
+
     // Collection layers - repeat the element for each item (design applies to each looped item)
     if (isCollectionLayer && isEditMode) {
       if (isLoadingLayerData) {
@@ -2765,15 +2914,24 @@ const LayerItem: React.FC<{
             // Get collection fields for reference resolution
             const collectionFields = collectionId ? fieldsByCollectionId[collectionId] || [] : [];
 
+            // Apply CMS translations to this item's values when localizing so
+            // repeater children render translated text/rich-text values. Mirrors
+            // what the server-side page fetcher does on /preview and published
+            // routes via applyCmsTranslations.
+            const baseItemValues = item.values || {};
+            const translatedItemValues = (currentLocale && !currentLocale.is_default && translations)
+              ? applyCmsTranslations(item.id, baseItemValues, collectionFields, translations, isEditMode ? { includeIncomplete: true } : undefined)
+              : baseItemValues;
+
             // Resolve reference fields to add relationship paths (e.g., "refFieldId.targetFieldId")
             const enhancedItemValues = collectionFields.length > 0
               ? resolveReferenceFieldsSync(
-                item.values || {},
+                translatedItemValues,
                 collectionFields,
                 itemsByCollectionId,
                 fieldsByCollectionId
               )
-              : (item.values || {});
+              : translatedItemValues;
 
             // Merge parent collection data with enhanced item values
             // Parent data provides access to fields from outer collection layers
@@ -2791,9 +2949,15 @@ const LayerItem: React.FC<{
             };
 
             // Resolve per-item background image from CMS field variable → CSS variable (combined with gradient)
+            // For multi-asset collections, virtual asset fields (__asset_url etc.) live in
+            // enhancedItemValues only. If the binding was authored with source='page' (legacy),
+            // expose those values via pageCollectionItemData so resolution still succeeds.
             let itemElementProps = elementProps;
             if (bgImageVariable && isFieldVariable(bgImageVariable) && bgImageVariable.data.field_id) {
-              const resolvedBgAssetId = resolveFieldValue(bgImageVariable, mergedItemData, pageCollectionItemData, updatedLayerDataMap);
+              const bgPageData = sourceFieldType === 'multi_asset'
+                ? { ...pageCollectionItemData, ...enhancedItemValues }
+                : pageCollectionItemData;
+              const resolvedBgAssetId = resolveFieldValue(bgImageVariable, mergedItemData, bgPageData, updatedLayerDataMap);
               if (resolvedBgAssetId) {
                 const bgAsset = assetsById[resolvedBgAssetId] || getAsset(resolvedBgAssetId);
                 const bgUrl = bgAsset?.public_url || resolvedBgAssetId;
@@ -2860,17 +3024,20 @@ const LayerItem: React.FC<{
                         ? { ...pageCollectionItemData, ...enhancedItemValues }
                         : pageCollectionItemData
                     }
+                    pageCollectionSortedItemIds={pageCollectionSortedItemIds}
                     hiddenLayerInfo={hiddenLayerInfo}
                     editorHiddenLayerIds={editorHiddenLayerIds}
                     editorBreakpoint={editorBreakpoint}
                     currentLocale={currentLocale}
                     availableLocales={availableLocales}
                     liveLayerUpdates={liveLayerUpdates}
-                    parentComponentLayerId={parentComponentLayerId || (layer.componentId ? layer.id : undefined)}
+                    parentComponentLayerId={childParentComponentLayerId}
+                    parentComponentId={childParentComponentId}
                     parentComponentOverrides={parentComponentOverrides}
                     parentComponentVariables={parentComponentVariables}
                     editingComponentVariables={editingComponentVariables}
                     isInsideForm={isInsideForm || htmlTag === 'form'}
+                    isInsideLink={isInsideLink || htmlTag === 'a'}
                     parentFormSettings={htmlTag === 'form' ? layer.settings?.form : parentFormSettings}
                     pages={pages}
                     folders={folders}
@@ -2883,6 +3050,8 @@ const LayerItem: React.FC<{
                     ancestorComponentIds={effectiveAncestorIds}
                     isSlideChild={layer.name === 'slides'}
                     serverSettings={serverSettings}
+                    onComponentEdit={onComponentEdit}
+                    lcpCandidateLayerId={lcpCandidateLayerId}
                   />
                 )}
               </Tag>
@@ -2926,6 +3095,7 @@ const LayerItem: React.FC<{
               layerDataMap={effectiveLayerDataMap}
               pageCollectionItemId={pageCollectionItemId}
               pageCollectionItemData={pageCollectionItemData}
+              pageCollectionSortedItemIds={pageCollectionSortedItemIds}
               pages={pages}
               folders={folders}
               collectionItemSlugs={collectionItemSlugs}
@@ -2940,15 +3110,19 @@ const LayerItem: React.FC<{
               availableLocales={availableLocales}
               localeSelectorFormat={format}
               liveLayerUpdates={liveLayerUpdates}
-              parentComponentLayerId={layer.componentId ? layer.id : parentComponentLayerId}
+              parentComponentLayerId={childParentComponentLayerId}
+              parentComponentId={childParentComponentId}
               parentComponentOverrides={parentComponentOverrides}
               parentComponentVariables={parentComponentVariables}
               editingComponentVariables={editingComponentVariables}
               isInsideForm={isInsideForm || htmlTag === 'form'}
+              isInsideLink={isInsideLink || htmlTag === 'a'}
               parentFormSettings={htmlTag === 'form' ? layer.settings?.form : parentFormSettings}
               components={componentsProp}
               ancestorComponentIds={effectiveAncestorIds}
               serverSettings={serverSettings}
+              onComponentEdit={onComponentEdit}
+              lcpCandidateLayerId={lcpCandidateLayerId}
             />
           )}
 
@@ -2997,6 +3171,7 @@ const LayerItem: React.FC<{
             layerDataMap={effectiveLayerDataMap}
             pageCollectionItemId={pageCollectionItemId}
             pageCollectionItemData={pageCollectionItemData}
+            pageCollectionSortedItemIds={pageCollectionSortedItemIds}
             hiddenLayerInfo={hiddenLayerInfo}
             editorHiddenLayerIds={editorHiddenLayerIds}
             editorBreakpoint={editorBreakpoint}
@@ -3004,11 +3179,13 @@ const LayerItem: React.FC<{
             availableLocales={availableLocales}
             localeSelectorFormat={localeSelectorFormat}
             liveLayerUpdates={liveLayerUpdates}
-            parentComponentLayerId={parentComponentLayerId || (layer.componentId ? layer.id : undefined)}
+            parentComponentLayerId={childParentComponentLayerId}
+            parentComponentId={childParentComponentId}
             parentComponentOverrides={parentComponentOverrides}
             parentComponentVariables={parentComponentVariables}
             editingComponentVariables={editingComponentVariables}
             isInsideForm={isInsideForm || htmlTag === 'form'}
+            isInsideLink={isInsideLink || htmlTag === 'a'}
             parentFormSettings={htmlTag === 'form' ? layer.settings?.form : parentFormSettings}
             pages={pages}
             folders={folders}
@@ -3021,6 +3198,8 @@ const LayerItem: React.FC<{
             ancestorComponentIds={effectiveAncestorIds}
             isSlideChild={layer.name === 'slides'}
             serverSettings={serverSettings}
+            onComponentEdit={onComponentEdit}
+            lcpCandidateLayerId={lcpCandidateLayerId}
           />
         )}
       </Tag>
@@ -3050,6 +3229,7 @@ const LayerItem: React.FC<{
   const linkSettings = layer.variables?.link;
   const shouldWrapWithLink = !isButtonWithLink
     && !isDivWithLink
+    && !isInsideLink
     && htmlTag !== 'a'
     && !subtreeHasInteractiveDescendants
     && isValidLinkSettings(linkSettings);
@@ -3067,6 +3247,16 @@ const LayerItem: React.FC<{
         content = (
           <a
             {...linkAttrs}
+            className="contents"
+          >
+            {content}
+          </a>
+        );
+      } else if (isLinkAtCollectionBoundary(linkSettings, layerLinkContext)) {
+        content = (
+          <a
+            aria-disabled="true"
+            data-link-disabled="true"
             className="contents"
           >
             {content}

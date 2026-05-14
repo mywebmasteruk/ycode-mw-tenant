@@ -1,9 +1,33 @@
-import '@/app/globals.css';
+import '@/app/site.css';
+import type { Metadata } from 'next';
 import RootLayoutShell, { defaultMetadata } from '@/components/RootLayoutShell';
 import { fetchGlobalPageSettings } from '@/lib/generate-page-metadata';
 import { renderRootLayoutHeadCode } from '@/lib/parse-head-html';
 
-export const metadata = defaultMetadata;
+export async function generateMetadata(): Promise<Metadata> {
+  if (process.env.SKIP_SETUP === 'true') {
+    return defaultMetadata;
+  }
+
+  try {
+    const globalSettings = await fetchGlobalPageSettings();
+    const metadata: Metadata = { ...defaultMetadata };
+
+    if (globalSettings.faviconUrl || globalSettings.webClipUrl) {
+      metadata.icons = {};
+      if (globalSettings.faviconUrl) {
+        metadata.icons.icon = globalSettings.faviconUrl;
+      }
+      if (globalSettings.webClipUrl) {
+        metadata.icons.apple = globalSettings.webClipUrl;
+      }
+    }
+
+    return metadata;
+  } catch {
+    return defaultMetadata;
+  }
+}
 
 export default async function SiteLayout({
   children,

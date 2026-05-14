@@ -59,6 +59,10 @@ interface ColorPickerProps {
   defaultValue?: string;
   placeholder?: string;
   solidOnly?: boolean;
+  /** Render a compact swatch-only trigger (hides hex/label and clear button). Useful in tight UI like inline animation inputs. */
+  swatchOnly?: boolean;
+  /** Called when the popover open state changes (for callers that need to react to open/close, e.g. canvas previews). */
+  onOpenChange?: (open: boolean) => void;
   /** CMS color field binding (optional) */
   binding?: ColorPickerBindingProps;
   /** Called when the clear button is clicked (in addition to onChange('')) */
@@ -1131,6 +1135,8 @@ export default function ColorPicker({
   defaultValue = '#ffffff',
   placeholder = '#ffffff',
   solidOnly = false,
+  swatchOnly = false,
+  onOpenChange: onOpenChangeProp,
   binding,
   onClear,
   imageTab,
@@ -1350,6 +1356,7 @@ export default function ColorPicker({
 
   const handleOpenChange = (newOpen: boolean) => {
     setOpen(newOpen);
+    onOpenChangeProp?.(newOpen);
     if (newOpen && !hasValue) {
       // Initialize internal color picker state with default (don't push to layer yet)
       const defaultColor = parseColor(defaultValue);
@@ -1936,7 +1943,29 @@ export default function ColorPicker({
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
-      {hasValue || imagePreviewUrl ? (
+      {swatchOnly ? (
+        <button
+          type="button"
+          className="size-7 rounded-md bg-input hover:bg-input/60 cursor-pointer flex items-center justify-center"
+          aria-label="Pick color"
+        >
+          <div className="size-5 rounded-[6px] shrink-0 relative overflow-hidden outline dark:outline-white/10 -outline-offset-1">
+            {(hasValue || imagePreviewUrl) ? (
+              imagePreviewUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={imagePreviewUrl}
+                  className="absolute inset-0 w-full h-full object-cover z-20"
+                  alt=""
+                />
+              ) : (
+                <div className="absolute inset-0 z-20" style={isTransparent ? undefined : { background: isColorVariable && activeVariable ? hexToRgba(activeVariable.value) : isGradient ? resolvedDisplayValue : `rgba(${Math.round(rgbaColor.r)},${Math.round(rgbaColor.g)},${Math.round(rgbaColor.b)},${rgbaColor.a})` }} />
+              )
+            ) : null}
+            <div className="absolute inset-0 opacity-15 bg-checkerboard bg-background z-10" />
+          </div>
+        </button>
+      ) : hasValue || imagePreviewUrl ? (
         <div className="flex items-center justify-start h-8 rounded-lg bg-input hover:bg-input/60 px-2.5 cursor-pointer">
           <div className={cn('size-5 rounded-[6px] shrink-0 mr-2 -ml-1 relative overflow-hidden outline dark:outline-white/10 -outline-offset-1', (isTransparent || imagePreviewUrl || isColorVariable) && 'overflow-hidden')}>
             {imagePreviewUrl ? (

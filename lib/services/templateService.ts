@@ -21,6 +21,8 @@ const TABLES_TO_TRUNCATE = [
   'page_layers',
   'pages',
   'page_folders',
+  'color_variables',
+  'fonts',
 ];
 
 export interface TemplateCategory {
@@ -197,6 +199,71 @@ async function copyTemplateAssetsToUserStorage(knex: ReturnType<typeof getKnexCl
         });
     } catch (err) {
       console.warn(`[copyTemplateAssets] Error copying ${asset.filename}:`, err);
+    }
+  }
+
+  // Copy custom font files (fonts with url from template CDN but no storage_path)
+  const fontsTableExists = await knex.schema.hasTable('fonts');
+  if (fontsTableExists) {
+    const templateFonts = await knex('fonts')
+      .whereNotNull('url')
+      .whereNull('storage_path')
+      .select('id', 'name', 'kind', 'url');
+
+    for (const font of templateFonts) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000);
+
+        let response: Response;
+        try {
+          response = await fetch(font.url, { signal: controller.signal });
+        } catch (fetchErr) {
+          clearTimeout(timeout);
+          console.warn(`[copyTemplateAssets] Failed to fetch font ${font.name}:`, fetchErr);
+          continue;
+        }
+        clearTimeout(timeout);
+
+        if (!response.ok) {
+          console.warn(`[copyTemplateAssets] Failed to download font ${font.name}: ${response.status}`);
+          continue;
+        }
+
+        const blob = await response.blob();
+        const buffer = Buffer.from(await blob.arrayBuffer());
+
+        const timestamp = Date.now();
+        const random = Math.random().toString(36).substring(2, 15);
+        const extension = font.kind || 'woff2';
+        const storagePath = `${STORAGE_FOLDERS.WEBSITE}/fonts/${timestamp}-${random}.${extension}`;
+
+        const { data, error } = await supabase.storage
+          .from(STORAGE_BUCKET)
+          .upload(storagePath, buffer, {
+            contentType: extension === 'woff2' ? 'font/woff2' : 'font/ttf',
+            cacheControl: '31536000',
+            upsert: false,
+          });
+
+        if (error) {
+          console.warn(`[copyTemplateAssets] Failed to upload font ${font.name}:`, error);
+          continue;
+        }
+
+        const { data: urlData } = supabase.storage
+          .from(STORAGE_BUCKET)
+          .getPublicUrl(data.path);
+
+        await knex('fonts')
+          .where('id', font.id)
+          .update({
+            storage_path: data.path,
+            url: urlData.publicUrl,
+          });
+      } catch (err) {
+        console.warn(`[copyTemplateAssets] Error copying font ${font.name}:`, err);
+      }
     }
   }
 }

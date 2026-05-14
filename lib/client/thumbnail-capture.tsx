@@ -18,6 +18,7 @@ import { getCanvasIframeHtml } from '@/lib/canvas-utils';
 import { componentsApi } from '@/lib/api';
 import { serializeLayers } from '@/lib/layer-utils';
 import { DEFAULT_ASSETS } from '@/lib/asset-constants';
+import { useColorVariablesStore } from '@/stores/useColorVariablesStore';
 import type { Layer, Component } from '@/types';
 
 /** Default placeholder image for failed CORS fetches (base64 data URI) */
@@ -65,6 +66,15 @@ async function captureLayersAsBlob(
     doc.open();
     doc.write(getCanvasIframeHtml('thumbnail-mount'));
     doc.close();
+
+    // Inject color variable CSS custom properties
+    const colorVarCss = useColorVariablesStore.getState().generateCssDeclarations();
+    if (colorVarCss) {
+      const colorStyle = doc.createElement('style');
+      colorStyle.id = 'ycode-color-vars';
+      colorStyle.textContent = colorVarCss;
+      doc.head.appendChild(colorStyle);
+    }
 
     // Wait for Tailwind CDN to initialize
     await new Promise((resolve) => setTimeout(resolve, 200));

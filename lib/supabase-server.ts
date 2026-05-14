@@ -5,6 +5,7 @@ import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { credentials } from './credentials';
 import { parseSupabaseConfig } from './supabase-config-parser';
 import type { SupabaseConfig, SupabaseCredentials } from '@/types';
+import { withLimit } from './supabase-limiter';
 
 /**
  * Supabase Server Client
@@ -49,14 +50,20 @@ async function getSupabaseCredentials(): Promise<SupabaseCredentials | null> {
  */
 export const getSupabaseConfig = getSupabaseCredentials;
 
-let cachedClient: SupabaseClient | null = null;
-let cachedCredentials: string | null = null;
+const globalForSupabase = globalThis as unknown as {
+  __supabaseClient?: SupabaseClient;
+  __supabaseCredKey?: string;
+};
 
 let loggedMissingAdminCreds = false;
 
 /**
  * Get Supabase client with service role key (admin access).
  * Tenant scoping is done in queries (e.g. `resolveEffectiveTenantId`), not on the client.
+ *
+ * Stored on globalThis so the client survives Next.js HMR in dev mode.
+ * Module-level variables get reset on each hot reload, which would
+ * orphan any in-flight requests on the old client.
  */
 export async function getSupabaseAdmin(): Promise<SupabaseClient | null> {
   const creds = await getSupabaseCredentials();
@@ -72,23 +79,25 @@ export async function getSupabaseAdmin(): Promise<SupabaseClient | null> {
     return null;
   }
 
-  // Cache client if credentials haven't changed
   const credKey = `${creds.projectUrl}:${creds.serviceRoleKey}`;
-  if (cachedClient && cachedCredentials === credKey) {
-    return cachedClient;
+  if (globalForSupabase.__supabaseClient && globalForSupabase.__supabaseCredKey === credKey) {
+    return globalForSupabase.__supabaseClient;
   }
 
-  // Create new client
-  cachedClient = createClient(creds.projectUrl, creds.serviceRoleKey, {
+  const limitedFetch: typeof globalThis.fetch = (input, init) =>
+    withLimit(() => globalThis.fetch(input, init));
+
+  globalForSupabase.__supabaseClient = createClient(creds.projectUrl, creds.serviceRoleKey, {
     auth: {
       autoRefreshToken: false,
       persistSession: false,
     },
+    global: { fetch: limitedFetch },
   });
 
-  cachedCredentials = credKey;
+  globalForSupabase.__supabaseCredKey = credKey;
 
-  return cachedClient;
+  return globalForSupabase.__supabaseClient;
 }
 
 /**
@@ -107,19 +116,19 @@ export async function testSupabaseConnection(
       },
     });
 
-    // Test connection by trying to list users (requires service role key)
-    // This verifies both connection and authentication
     const { error } = await client.auth.admin.listUsers({
       page: 1,
       perPage: 1,
     });
 
     if (error) {
+      console.error('[testSupabaseConnection] Failed:', { url: parsed.projectUrl, error: error.message, status: error.status });
       return { success: false, error: error.message };
     }
 
     return { success: true };
   } catch (error) {
+    console.error('[testSupabaseConnection] Failed:', error);
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Connection failed',

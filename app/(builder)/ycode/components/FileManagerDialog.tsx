@@ -47,7 +47,7 @@ import { cn } from '@/lib/utils';
 import { assetFoldersApi, assetsApi, uploadFileApi } from '@/lib/api';
 import type { AssetFolder, Asset } from '@/types';
 import type { AssetUsageResult, CmsItemUsageEntry, FieldDefaultUsageEntry } from '@/lib/asset-usage-utils';
-import { getAcceptString, getAssetIcon, getOptimizedImageUrl, isAssetOfType, matchesCategoryFilter, normalizeCategoryFilter } from '@/lib/asset-utils';
+import { getAcceptString, getAssetIcon, getAssetProxyUrl, getOptimizedImageUrl, isAssetOfType, matchesCategoryFilter, normalizeCategoryFilter } from '@/lib/asset-utils';
 import { ASSET_CATEGORIES } from '@/lib/asset-constants';
 import type { AssetCategory, AssetCategoryFilter } from '@/types';
 
@@ -473,7 +473,7 @@ function FileGridItem({
               side="bottom"
               className="min-w-24"
             >
-              {isImage && onPreview && (
+              {onPreview && (
                 <DropdownMenuItem
                   onClick={(e) => {
                     e.stopPropagation();
@@ -1536,9 +1536,8 @@ export default function FileManagerDialog({
     }
   };
 
-  // Preview asset (open in new tab)
-  const handlePreviewAsset = (imageUrl: string) => {
-    window.open(imageUrl, '_blank', 'noopener,noreferrer');
+  const handlePreviewAsset = (url: string) => {
+    window.open(url, '_blank', 'noopener,noreferrer');
   };
 
   // Start creating SVG
@@ -2561,8 +2560,8 @@ export default function FileManagerDialog({
                           isSelected={selectedAssetIds.has(asset.id)}
                           onSelectChange={(selected) => handleAssetSelect(asset.id, selected)}
                           onPreview={
-                            asset.mime_type?.startsWith('image/') && asset.public_url
-                              ? () => handlePreviewAsset(asset.public_url!)
+                            asset.public_url || asset.storage_path
+                              ? () => handlePreviewAsset(getAssetProxyUrl(asset) || asset.public_url!)
                               : undefined
                           }
                           onEdit={() => handleEditAsset(asset.id)}

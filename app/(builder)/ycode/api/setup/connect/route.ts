@@ -14,7 +14,7 @@ import type { SupabaseConfig } from '@/types';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { anon_key, service_role_key, connection_url, db_password } = body;
+    const { anon_key, service_role_key, connection_url, db_password, supabase_url } = body;
 
     // Validate required fields
     if (!anon_key || !service_role_key || !connection_url || !db_password) {
@@ -30,6 +30,7 @@ export async function POST(request: NextRequest) {
       serviceRoleKey: service_role_key,
       connectionUrl: connection_url,
       dbPassword: db_password,
+      ...(supabase_url ? { supabaseUrl: supabase_url } : {}),
     };
 
     let parsed;
@@ -45,10 +46,20 @@ export async function POST(request: NextRequest) {
     // Test Supabase API connection
     const supabaseTestResult = await testSupabaseConnection(config);
     if (!supabaseTestResult.success) {
-      return noCache(
-        { error: supabaseTestResult.error || 'Supabase API connection test failed' },
-        400
-      );
+      const isSelfHosted = !!supabase_url;
+      const rawError = supabaseTestResult.error || 'Supabase API connection test failed';
+      const isAuthError = /unauthorized|invalid.*key|forbidden/i.test(rawError);
+
+      let error = rawError;
+      if (isSelfHosted && isAuthError) {
+        error =
+          `Supabase API returned "${rawError}". ` +
+          'For self-hosted setups, verify that SERVICE_ROLE_KEY and ANON_KEY in your .env ' +
+          'were generated with the same JWT_SECRET. If you changed any of these values, restart ' +
+          'your Docker containers with "docker compose down && docker compose up -d".';
+      }
+
+      return noCache({ error }, 400);
     }
 
     // Test database connection
@@ -58,6 +69,7 @@ export async function POST(request: NextRequest) {
       dbName: parsed.dbName,
       dbUser: parsed.dbUser,
       dbPassword: parsed.dbPassword,
+      ssl: !supabase_url,
     });
     if (!dbTestResult.success) {
       return noCache(

@@ -8,7 +8,8 @@ import { useEditorStore } from '@/stores/useEditorStore';
 import { removeSpaces } from '@/lib/utils';
 import { setBreakpointClass, propertyToClass, buildBgImgVarName, buildBgImgClass } from '@/lib/tailwind-class-mapper';
 import { ASSET_CATEGORIES, isAssetOfType } from '@/lib/asset-utils';
-import { IMAGE_FIELD_TYPES, filterFieldGroupsByType, flattenFieldGroups } from '@/lib/collection-field-utils';
+import { IMAGE_FIELD_TYPES, filterFieldGroupsByType, flattenFieldGroups, buildMultiAssetVirtualFields, isVirtualAssetField } from '@/lib/collection-field-utils';
+import { isFieldVariable } from '@/lib/variable-utils';
 import { getCollectionVariable, isTextContentLayer } from '@/lib/layer-utils';
 import {
   createAssetVariable,
@@ -108,7 +109,26 @@ const BackgroundsControls = memo(function BackgroundsControls({ layer, onLayerUp
     const groups: FieldGroup[] = [...(fieldGroups || [])];
 
     const collectionVar = layer ? getCollectionVariable(layer) : null;
-    if (collectionVar?.id && allFields) {
+    const isMultiAssetLayer = collectionVar?.source_field_type === 'multi_asset';
+
+    // Expose virtual per-asset fields whenever this layer (or its existing background
+    // binding) is in a multi-asset context, so the picker stays consistent and the
+    // current binding can always be restored.
+    const bgIsVirtualAsset = !!(
+      bgImageVariable && isFieldVariable(bgImageVariable) && bgImageVariable.data.field_id && isVirtualAssetField(bgImageVariable.data.field_id)
+    );
+
+    if (isMultiAssetLayer || bgIsVirtualAsset) {
+      // Virtual asset field values live in the per-iteration item data only
+      // (never in pageCollectionItemData). Always use 'collection' so the
+      // value resolves correctly even if the parent multi-image field is page-bound.
+      groups.unshift({
+        fields: buildMultiAssetVirtualFields(),
+        label: 'File fields',
+        source: 'collection',
+        layerId: layer?.id,
+      });
+    } else if (collectionVar?.id && allFields) {
       const ownFields = allFields[collectionVar.id] || [];
       const alreadyIncluded = groups.some(g =>
         g.fields.length > 0 && ownFields.length > 0 && g.fields[0]?.id === ownFields[0]?.id
@@ -124,7 +144,7 @@ const BackgroundsControls = memo(function BackgroundsControls({ layer, onLayerUp
     }
 
     return groups.length > 0 ? groups : undefined;
-  }, [fieldGroups, layer, allFields]);
+  }, [fieldGroups, layer, allFields, bgImageVariable]);
 
   // Filter field groups to image-bindable types
   const imageFieldGroups = useMemo(() => {

@@ -213,7 +213,7 @@ function PageRow({
         {/* Icon */}
         <Icon
           name={getNodeIcon(node)}
-          className={`size-3 ml-1 mr-2 ${isSelected ? 'opacity-90' : 'opacity-50'}`}
+          className={`size-3 ml-1 mr-2 shrink-0 ${isSelected ? 'opacity-90' : 'opacity-50'}`}
         />
 
         {/* Label */}

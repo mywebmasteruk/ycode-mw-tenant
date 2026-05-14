@@ -258,36 +258,50 @@ export function isComponentInstance(layer: Layer): boolean {
 }
 
 /**
+ * Returns true if the layer tree contains an instance of the given component.
+ * Short-circuits on first match.
+ */
+export function containsComponent(layers: Layer[], componentId: string): boolean {
+  for (const layer of layers) {
+    if (layer.componentId === componentId) return true;
+    if (layer.children && layer.children.length > 0) {
+      if (containsComponent(layer.children, componentId)) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Update all layers using a specific component
  * Recursively traverses layer tree and updates component instances
  * This is used when the master component is updated to sync all instances
+ *
+ * Preserves referential identity for subtrees that contain no matching instance,
+ * so React reconciliation can skip untouched branches.
  */
 export function updateLayersWithComponent(
   layers: Layer[],
   componentId: string,
-  newComponentLayers: Layer[]
 ): Layer[] {
-  return layers.map(layer => {
-    // If this layer is an instance of the component, update it
-    // Note: The actual rendering logic will use newComponentLayers
-    // This just ensures the componentId is maintained
+  let changed = false;
+  const result = layers.map(layer => {
     if (layer.componentId === componentId) {
-      return {
-        ...layer,
-        // componentId stays the same, but rendering will use updated component
-      };
+      changed = true;
+      return { ...layer };
     }
 
-    // Recursively update children
     if (layer.children && layer.children.length > 0) {
-      return {
-        ...layer,
-        children: updateLayersWithComponent(layer.children, componentId, newComponentLayers),
-      };
+      const newChildren = updateLayersWithComponent(layer.children, componentId);
+      if (newChildren !== layer.children) {
+        changed = true;
+        return { ...layer, children: newChildren };
+      }
     }
 
     return layer;
   });
+
+  return changed ? result : layers;
 }
 
 /**

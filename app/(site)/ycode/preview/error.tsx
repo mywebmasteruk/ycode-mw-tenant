@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import LayerRenderer from '@/components/LayerRenderer';
+import LayerRendererPublic from '@/components/LayerRendererPublic';
 import type { PageData } from '@/lib/page-fetcher';
 
 interface ErrorProps {
@@ -16,13 +16,12 @@ interface ErrorProps {
 export default function Error({ error, reset }: ErrorProps) {
   const [errorPageData, setErrorPageData] = useState<PageData | null>(null);
   const [generatedCss, setGeneratedCss] = useState<string>('');
+  const [colorVariablesCss, setColorVariablesCss] = useState<string>('');
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    // Log the error
     console.error('Preview page error:', error);
 
-    // Fetch custom 500 error page (draft version)
     async function fetchErrorPage() {
       try {
         const response = await fetch('/ycode/api/error-page?code=500&published=false');
@@ -30,6 +29,7 @@ export default function Error({ error, reset }: ErrorProps) {
           const data = await response.json();
           setErrorPageData(data.pageData);
           setGeneratedCss(data.css || '');
+          setColorVariablesCss(data.colorVariablesCss || '');
         }
       } catch (err) {
         console.error('Failed to fetch custom 500 page:', err);
@@ -56,13 +56,18 @@ export default function Error({ error, reset }: ErrorProps) {
             dangerouslySetInnerHTML={{ __html: generatedCss }}
           />
         )}
+        {colorVariablesCss && (
+          <style
+            id="ycode-color-vars"
+            dangerouslySetInnerHTML={{ __html: colorVariablesCss }}
+          />
+        )}
         {customCodeHead && (
           <div dangerouslySetInnerHTML={{ __html: customCodeHead }} />
         )}
         <div className="min-h-screen bg-white">
-          <LayerRenderer
+          <LayerRendererPublic
             layers={errorPageData.pageLayers.layers || []}
-            isEditMode={false}
             isPublished={false}
             pageCollectionItemId={errorPageData.collectionItem?.id}
             pageCollectionItemData={errorPageData.collectionItem?.values || undefined}

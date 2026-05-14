@@ -1,13 +1,16 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { Icon } from '@/components/ui/icon';
 import { Spinner } from '@/components/ui/spinner';
 import { Separator } from '@/components/ui/separator';
 import RichTextEditor from './RichTextEditor';
+import RichTextEditorSheet from './RichTextEditorSheet';
 import type { FieldGroup } from './CollectionFieldSelector';
 import FileManagerDialog from './FileManagerDialog';
 import { sanitizeSlug, checkDuplicatePageSlug, checkDuplicateFolderSlug, type ValidationResult } from '@/lib/page-utils';
+import { parseValueToContent } from '@/lib/cms-variables-utils';
+import { flattenFieldGroups, SIMPLE_TEXT_FIELD_TYPES } from '@/lib/collection-field-utils';
 import type { TranslatableItem } from '@/lib/localisation-utils';
 import type { Translation, CollectionField, Collection, CreateTranslationData, UpdateTranslationData, Page, PageFolder, Asset } from '@/types';
 import { useAsset } from '@/hooks/use-asset';
@@ -52,7 +55,6 @@ export default function TranslationRow({
   onLocalValueClear,
   getTranslationByKey,
   createTranslation,
-  updateTranslation,
   updateTranslationValue,
   updateTranslationStatus,
   deleteTranslation,
@@ -65,8 +67,10 @@ export default function TranslationRow({
 }: TranslationRowProps) {
   const [validationError, setValidationError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-  const [isSavingStatus, setIsSavingStatus] = useState(false);
+  
   const [isAssetPickerOpen, setIsAssetPickerOpen] = useState(false);
+  const [isRichTextSheetOpen, setIsRichTextSheetOpen] = useState(false);
+  const richTextValueRef = useRef<string | null>(null);
   const [pendingCompletions, setPendingCompletions] = useState<Record<string, boolean | null>>({});
   const [isUpdatingCompletion, setIsUpdatingCompletion] = useState(false);
 
@@ -78,21 +82,33 @@ export default function TranslationRow({
 
   // Check if this is rich text content (stored as JSON string)
   const isRichText = item.content_type === 'richtext';
+  const openInSheet = isRichText && item.open_in_sheet === true;
+
+  // Flatten field groups for parseValueToContent fallback
+  const flatFields = React.useMemo(() => flattenFieldGroups(fieldGroups), [fieldGroups]);
+
+  const emptyDoc = { type: 'doc', content: [{ type: 'paragraph' }] };
+
+  // Parse a richtext value (always Tiptap JSON after migration).
+  // Falls back to parseValueToContent for legacy inline-variable strings.
+  const parseRichTextValue = (val: string): any => {
+    const trimmed = val.trim();
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(val);
+        if (parsed?.type === 'doc') return parsed;
+      } catch { /* not valid JSON */ }
+    }
+    return parseValueToContent(val, flatFields, undefined, allFields);
+  };
 
   // Parse original value if it's rich text (JSON string → Tiptap JSON)
   let originalValueForEditor: string | any = item.content_value;
   if (isRichText) {
     if (item.content_value && typeof item.content_value === 'string') {
-      try {
-        originalValueForEditor = JSON.parse(item.content_value);
-      } catch (error) {
-        // If parsing fails, use empty Tiptap document
-        console.error('Failed to parse original value JSON:', error, item.content_value);
-        originalValueForEditor = { type: 'doc', content: [{ type: 'paragraph' }] };
-      }
+      originalValueForEditor = parseRichTextValue(item.content_value);
     } else if (!item.content_value) {
-      // Empty original value - use empty Tiptap document
-      originalValueForEditor = { type: 'doc', content: [{ type: 'paragraph' }] };
+      originalValueForEditor = emptyDoc;
     }
   }
 
@@ -105,18 +121,48 @@ export default function TranslationRow({
   let translationValueForEditor: string | any = translationValue;
   if (isRichText) {
     if (translationValue && typeof translationValue === 'string') {
-      try {
-        translationValueForEditor = JSON.parse(translationValue);
-      } catch (error) {
-        // If parsing fails, use empty Tiptap document
-        console.error('Failed to parse translation JSON:', error, translationValue);
-        translationValueForEditor = { type: 'doc', content: [{ type: 'paragraph' }] };
-      }
+      translationValueForEditor = parseRichTextValue(translationValue);
     } else if (!translationValue) {
-      // Empty translation - use empty Tiptap document structure
-      translationValueForEditor = { type: 'doc', content: [{ type: 'paragraph' }] };
+      translationValueForEditor = emptyDoc;
     }
   }
+
+  // Check if the rich text translation is empty (no real text content) — only relevant for sheet items
+  const isRichTextTranslationEmpty = openInSheet && (
+    !translationValue ||
+    translationValue === '' ||
+    (() => {
+      if (typeof translationValueForEditor === 'object' && translationValueForEditor?.content) {
+        return !translationValueForEditor.content.some((block: any) =>
+          block.content?.some((node: any) =>
+            (node.type === 'text' && node.text?.trim()) || node.type === 'dynamicVariable'
+          )
+        );
+      }
+      return true;
+    })()
+  );
+
+  // Build a preview string from the original value for use as the right-side placeholder.
+  // Variable references are rendered as `[Label]` so they're clearly distinguished from
+  // user-translatable text (mirrors the old localization UI).
+  const originalPreviewText = (() => {
+    const tiptapDoc = isRichText && typeof originalValueForEditor === 'object'
+      ? originalValueForEditor
+      : (item.content_value ? parseValueToContent(item.content_value, flatFields, undefined, allFields) : null);
+    if (!tiptapDoc?.content) return '';
+    const walk = (nodes: any[]): string =>
+      nodes.map((n: any) => {
+        if (n.type === 'text') return n.text || '';
+        if (n.type === 'dynamicVariable') {
+          const label = n.attrs?.label || n.attrs?.variable?.label || 'variable';
+          return `[${label}]`;
+        }
+        if (n.content) return walk(n.content);
+        return '';
+      }).join('');
+    return walk(tiptapDoc.content).trim();
+  })();
 
   // Check if this is an asset
   const isAsset = item.content_type === 'asset_id';
@@ -159,6 +205,13 @@ export default function TranslationRow({
       setValidationError(null);
     }
   };
+
+  // Dedicated handler for the rich text sheet — writes to ref so close handler always reads latest
+  const handleRichTextSheetChange = useCallback((value: any) => {
+    const stringified = typeof value === 'object' ? JSON.stringify(value) : value;
+    richTextValueRef.current = stringified;
+    onLocalValueChange(item.key, stringified);
+  }, [item.key, onLocalValueChange]);
 
   // Save to store/API on blur (optimistic update + API call)
   const handleTranslationBlur = (value: string | any) => {
@@ -513,7 +566,7 @@ export default function TranslationRow({
             className={`flex items-center justify-center pl-2 pr-2.5 py-0.75 gap-1.25 rounded-sm transition-colors cursor-pointer ${translation?.is_completed === true ? 'bg-green-400/6' : 'bg-secondary/50'} disabled:opacity-50 disabled:cursor-not-allowed`}
             title={isUpdatingCompletion ? 'Updating...' : (translation?.is_completed === true ? 'Mark as not completed' : 'Mark as completed')}
           >
-            {isSavingStatus ? (
+            {isUpdatingCompletion ? (
               <Spinner className="size-3 text-muted-foreground/50" />
             ) : translation?.is_completed === true ? (
               <Icon name="check" className="size-3 text-green-600 dark:text-green-400" />
@@ -537,13 +590,14 @@ export default function TranslationRow({
             <div className="text-sm opacity-50">
               <RichTextEditor
                 value={originalValueForEditor}
-                onChange={() => {}} // Read-only on left side
+                onChange={() => {}}
                 placeholder=""
                 fieldGroups={fieldGroups}
                 allFields={allFields}
                 collections={collections}
                 disabled={true}
                 withFormatting={isRichText}
+                showFormattingToolbar={false}
               />
             </div>
           )}
@@ -561,6 +615,51 @@ export default function TranslationRow({
                   </>
                 )}
               </div>
+            ) : openInSheet ? (
+              <div
+                className="cursor-pointer"
+                onClick={() => setIsRichTextSheetOpen(true)}
+              >
+                {isRichTextTranslationEmpty ? (
+                  <div className="min-h-[28px] px-2.5 py-1 flex items-center">
+                    <span className="text-muted-foreground/50 text-xs">
+                      {translation?.is_completed === true ? '(Using original)' : 'Click to edit...'}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="pointer-events-none">
+                    <RichTextEditor
+                      value={translationValueForEditor}
+                      onChange={() => {}}
+                      placeholder=""
+                      fieldGroups={fieldGroups}
+                      allFields={allFields}
+                      collections={collections}
+                      withFormatting={true}
+                      showFormattingToolbar={false}
+                      disabled={true}
+                    />
+                  </div>
+                )}
+              </div>
+            ) : isRichText ? (
+              <RichTextEditor
+                value={translationValueForEditor}
+                onChange={handleTranslationChange}
+                onBlur={handleTranslationBlur}
+                placeholder={
+                  translation?.is_completed === true
+                    ? '(Using original)'
+                    : (originalPreviewText || 'Enter translation...')
+                }
+                className={`min-h-[28px] [&_.ProseMirror]:py-1 [&_.ProseMirror]:px-2.5 [&_.ProseMirror]:!bg-transparent`}
+                fieldGroups={fieldGroups}
+                allFields={allFields}
+                collections={collections}
+                withFormatting={true}
+                showFormattingToolbar={false}
+                allowedFieldTypes={SIMPLE_TEXT_FIELD_TYPES}
+              />
             ) : (
               <RichTextEditor
                 value={translationValueForEditor}
@@ -569,7 +668,7 @@ export default function TranslationRow({
                 placeholder={
                   translation?.is_completed === true
                     ? '(Using original)'
-                    : (isRichText ? 'Enter translation...' : (item.content_value || 'Enter translation...'))
+                    : (originalPreviewText || 'Enter translation...')
                 }
                 className={`min-h-[28px] [&_.ProseMirror]:py-1 [&_.ProseMirror]:px-2.5 [&_.ProseMirror]:!bg-transparent ${
                   validationError ? '[&_.ProseMirror]:!border-destructive' : ''
@@ -577,7 +676,7 @@ export default function TranslationRow({
                 fieldGroups={fieldGroups}
                 allFields={allFields}
                 collections={collections}
-                withFormatting={isRichText}
+                allowedFieldTypes={SIMPLE_TEXT_FIELD_TYPES}
               />
             )}
             {validationError && (
@@ -595,6 +694,47 @@ export default function TranslationRow({
           onAssetSelect={handleAssetSelect}
           assetId={translationValue || item.content_value || null}
           category={assetCategory || undefined}
+        />
+      )}
+
+      {/* Rich Text Editor Sheet */}
+      {openInSheet && (
+        <RichTextEditorSheet
+          open={isRichTextSheetOpen}
+          onOpenChange={(open) => {
+            if (!open && selectedLocaleId) {
+              const latestValue = richTextValueRef.current;
+              if (latestValue !== null && latestValue !== storeValue) {
+                const translationData: CreateTranslationData = {
+                  locale_id: selectedLocaleId,
+                  source_type: item.source_type as CreateTranslationData['source_type'],
+                  source_id: item.source_id,
+                  content_key: item.content_key,
+                  content_type: item.content_type as CreateTranslationData['content_type'],
+                  content_value: latestValue,
+                };
+
+                const existingTranslation = getTranslationByKey(selectedLocaleId, item.key);
+                const savePromise = existingTranslation
+                  ? updateTranslationValue(existingTranslation, latestValue)
+                  : createTranslation(translationData);
+
+                savePromise
+                  .then(() => onLocalValueClear(item.key))
+                  .catch((error) => console.error('Failed to save rich text translation:', error));
+              }
+              richTextValueRef.current = null;
+            }
+            setIsRichTextSheetOpen(open);
+          }}
+          title={item.info.label}
+          description={item.info.description || undefined}
+          value={translationValueForEditor}
+          onChange={handleRichTextSheetChange}
+          placeholder="Enter translation..."
+          fieldGroups={fieldGroups}
+          allFields={allFields}
+          collections={collections}
         />
       )}
     </li>

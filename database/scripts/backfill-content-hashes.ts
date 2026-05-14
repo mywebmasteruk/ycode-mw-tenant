@@ -23,12 +23,12 @@ import {
   generateComponentContentHash,
   generateLayerStyleContentHash,
   generateAssetContentHash,
+  generateCollectionItemContentHash,
 } from '../../lib/hash-utils';
-import { generateCollectionItemContentHash } from '../../lib/hash-utils';
 
 const PAGE_SIZE = 1000;
 
-/** Create Supabase client from .credentials.json (bypasses server-only modules) */
+/** Create Supabase client from .credentials.json or env vars (bypasses server-only modules) */
 async function getSupabaseClient(): Promise<SupabaseClient> {
   const credentialsPath = path.join(process.cwd(), '.credentials.json');
 
@@ -46,13 +46,20 @@ async function getSupabaseClient(): Promise<SupabaseClient> {
     throw new Error('Invalid Supabase configuration in .credentials.json');
   }
 
-  const match = config.connectionUrl.match(/postgres\.([^:]+)/);
-  if (!match) {
-    throw new Error('Could not parse project reference from connection URL');
-  }
+  let projectUrl: string;
 
-  const projectRef = match[1];
-  const projectUrl = `https://${projectRef}.supabase.co`;
+  if (config.supabaseUrl || process.env.SUPABASE_URL) {
+    projectUrl = (config.supabaseUrl || process.env.SUPABASE_URL).replace(/\/+$/, '');
+  } else {
+    const match = config.connectionUrl.match(/postgres\.([^:]+)/);
+    if (!match) {
+      throw new Error(
+        'Could not derive Supabase API URL from connection string.\n' +
+        'For self-hosted instances, set SUPABASE_URL in your environment or .env file.'
+      );
+    }
+    projectUrl = `https://${match[1]}.supabase.co`;
+  }
 
   return createClient(projectUrl, config.serviceRoleKey, {
     auth: {

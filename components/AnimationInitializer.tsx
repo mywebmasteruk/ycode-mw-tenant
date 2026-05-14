@@ -13,8 +13,9 @@ import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { SplitText } from 'gsap/SplitText';
 
-import { buildGsapProps, addTweenToTimeline, createSplitTextAnimation, generateInitialAnimationCSS } from '@/lib/animation-utils';
+import { buildGsapProps, addTweenToTimeline, createSplitTextAnimation, generateInitialAnimationCSS, setColorVariableResolver } from '@/lib/animation-utils';
 import { getCurrentBreakpoint } from '@/lib/breakpoint-utils';
+import { useColorVariablesStore } from '@/stores/useColorVariablesStore';
 import type { Layer, LayerInteraction, Breakpoint } from '@/types';
 
 // Register GSAP plugins
@@ -291,6 +292,14 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
   const prevBreakpointRef = useRef<Breakpoint | null>(null);
   const [currentBreakpoint, setCurrentBreakpoint] = useState<Breakpoint>(() => getCurrentBreakpoint());
   const styleRef = useRef<HTMLStyleElement | null>(null);
+
+  // Register a color variable resolver so backgroundColor tweens that
+  // reference color variables (e.g. "color:var(--id)") can be resolved to a
+  // concrete rgba value GSAP can interpolate.
+  useEffect(() => {
+    setColorVariableResolver((id) => useColorVariablesStore.getState().getVariableById(id)?.value);
+    return () => setColorVariableResolver(null);
+  }, []);
 
   // Inject initial animation CSS for subtrees not covered by the page-level style tag
   // (e.g. components embedded in rich text whose layer IDs are namespaced differently)

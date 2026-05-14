@@ -36,6 +36,7 @@ export interface TypographyDesign {
   textAlign?: string;
   textTransform?: string;
   textDecoration?: string;
+  lineClamp?: string;
   textDecorationColor?: string;
   textDecorationThickness?: string;
   underlineOffset?: string;
@@ -68,6 +69,7 @@ export interface SizingDesign {
   minHeight?: string;
   maxWidth?: string;
   maxHeight?: string;
+  overflow?: string;
   aspectRatio?: string | null;
   objectFit?: string | null;
   gridColumnSpan?: string | null;
@@ -133,6 +135,25 @@ export interface PositioningDesign {
   zIndex?: string;
 }
 
+export interface TransformsDesign {
+  isActive?: boolean;
+  scale?: string;
+  rotate?: string;
+  translateX?: string;
+  translateY?: string;
+  skewX?: string;
+  skewY?: string;
+  transformOrigin?: string;
+}
+
+export interface TransitionsDesign {
+  isActive?: boolean;
+  transitionProperty?: string;
+  duration?: string;
+  easing?: string;
+  delay?: string;
+}
+
 export interface DesignProperties {
   layout?: LayoutDesign;
   typography?: TypographyDesign;
@@ -142,6 +163,8 @@ export interface DesignProperties {
   backgrounds?: BackgroundsDesign;
   effects?: EffectsDesign;
   positioning?: PositioningDesign;
+  transforms?: TransformsDesign;
+  transitions?: TransitionsDesign;
 }
 
 export interface FormSettings {
@@ -305,9 +328,9 @@ export interface InteractionTween {
 
 export type ApplyStyles = 'on-load' | 'on-trigger';
 
-export type TweenPropertyKey = 'x' | 'y' | 'rotation' | 'scale' | 'skewX' | 'skewY' | 'autoAlpha' | 'display';
+export type TweenPropertyKey = 'x' | 'y' | 'rotation' | 'scale' | 'skewX' | 'skewY' | 'autoAlpha' | 'display' | 'width' | 'height' | 'backgroundColor';
 
-export type InteractionApplyStyles = Record<TweenPropertyKey, ApplyStyles>;
+export type InteractionApplyStyles = Partial<Record<TweenPropertyKey, ApplyStyles>>;
 
 export type TweenProperties = {
   [K in TweenPropertyKey]?: string | null;
@@ -407,6 +430,8 @@ export interface Layer {
   _layerDataMap?: Record<string, Record<string, string>>;
   // SSR-only property for master component ID (for translation lookups)
   _masterComponentId?: string;
+  // SSR-only property for original layer ID before instance-specific ID transform (for translation lookups)
+  _originalLayerId?: string;
   // SSR-only property for pagination metadata (when pagination is enabled)
   _paginationMeta?: CollectionPaginationMeta;
   // SSR-only property for dynamic inline styles from CMS color field bindings
@@ -425,6 +450,7 @@ export interface Layer {
     layerTemplate: Layer[];
     collectionLayerClasses?: string[];
     collectionLayerTag?: string;
+    isPublished?: boolean;
   };
 }
 
@@ -494,7 +520,7 @@ export interface DesignColorVariable {
 export type LinkType = 'url' | 'email' | 'phone' | 'asset' | 'page' | 'field';
 
 // Collection link field types (simplified for CMS fields)
-export type CollectionLinkType = 'url' | 'page';
+export type CollectionLinkType = 'url' | 'page' | 'asset';
 
 // Collection Link Field Value (stored as JSON in collection item values)
 // Note: Link behavior (target, rel) is set on the layer, not in the CMS value
@@ -509,6 +535,11 @@ export interface CollectionLinkValue {
     id: string; // Page ID
     collection_item_id?: string | null; // Static collection item ID (no current-page/current-collection)
     anchor_layer_id?: string | null; // Optional layer ID for anchor links
+  };
+
+  // Asset link - link to a downloadable asset
+  asset?: {
+    id: string | null;
   };
 }
 
@@ -624,6 +655,16 @@ export interface PageSettings {
   cms?: {
     collection_id: string;
     slug_field_id: string;
+    /**
+     * Controls the order in which `next-item` / `previous-item` link keywords
+     * traverse this dynamic page's collection. When omitted, items are sorted
+     * by their `manual_order` ascending — the same default used elsewhere in
+     * the system.
+     */
+    next_previous?: {
+      sort_by?: 'manual' | string; // 'manual' or a collection field id
+      sort_order?: 'asc' | 'desc';
+    };
   };
   auth?: {
     enabled: boolean;
@@ -820,6 +861,7 @@ export interface SupabaseConfig {
   serviceRoleKey: string;
   connectionUrl: string; // With [YOUR-PASSWORD] placeholder
   dbPassword: string; // Actual password to replace [YOUR-PASSWORD]
+  supabaseUrl?: string; // Explicit API URL for self-hosted instances (e.g. https://supabase.my-company.com)
 }
 
 // Internal credentials structure (derived from SupabaseConfig)
@@ -830,7 +872,7 @@ export interface SupabaseCredentials {
   dbPassword: string;
   // Derived properties
   projectId: string;
-  projectUrl: string; // API URL: https://[PROJECT_ID].supabase.co
+  projectUrl: string; // API URL — explicit or derived from project ID
   dbHost: string;
   dbPort: number;
   dbName: string;
@@ -929,7 +971,7 @@ export interface ActivityNotification {
 }
 
 // Collection Types (EAV Architecture)
-export type CollectionFieldType = 'text' | 'number' | 'boolean' | 'date' | 'date_only' | 'color' | 'reference' | 'multi_reference' | 'rich_text' | 'image' | 'audio' | 'video' | 'document' | 'link' | 'email' | 'phone' | 'status';
+export type CollectionFieldType = 'text' | 'number' | 'boolean' | 'date' | 'date_only' | 'color' | 'reference' | 'multi_reference' | 'rich_text' | 'image' | 'audio' | 'video' | 'document' | 'link' | 'email' | 'phone' | 'option' | 'count' | 'status';
 export type CollectionSortDirection = 'asc' | 'desc' | 'manual';
 
 export interface CollectionSorting {
@@ -967,6 +1009,9 @@ export interface UpdateCollectionData {
 /** Field-specific settings stored in the data column */
 export interface CollectionFieldData {
   multiple?: boolean; // For asset fields - allow multiple files
+  options?: { id: string; name: string }[]; // For option fields - selectable values
+  // For count fields: which child collection / reference field to count back from
+  count?: { collectionId: string; fieldId: string };
 }
 
 export interface CreateCollectionFieldData {
@@ -1055,7 +1100,7 @@ export interface CollectionImport {
   processed_rows: number;
   failed_rows: number;
   column_mapping: Record<string, string>; // csvColumn -> fieldId
-  csv_data: Record<string, string>[]; // Array of row objects
+  csv_data: { storage_path: string } | Record<string, string>[] | null;
   errors: string[] | null;
   created_at: string;
   updated_at: string;
@@ -1098,6 +1143,8 @@ export interface FieldVariable extends VariableType {
     source?: 'page' | 'collection';
     /** ID of the collection layer this field belongs to (for nested collections) */
     collection_layer_id?: string;
+    /** Pre-resolved raw value from injectCollectionData (survives stripSSROnlyData) */
+    _resolvedValue?: string;
   };
 }
 

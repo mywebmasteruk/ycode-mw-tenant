@@ -4,13 +4,15 @@
  * Collection Link Field Input
  *
  * Input component for editing link field values in collection items.
- * Supports URL and Page link types (no email, phone, asset, or dynamic options).
+ * Supports URL, Page, and Asset link types.
  */
 
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import Icon from '@/components/ui/icon';
+import type { IconProps } from '@/components/ui/icon';
 import {
   Select,
   SelectContent,
@@ -18,11 +20,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import type { CollectionLinkValue, CollectionLinkType, CollectionItemWithValues, Layer } from '@/types';
+import type { CollectionLinkValue, CollectionLinkType, CollectionItemWithValues } from '@/types';
 import { usePagesStore } from '@/stores/usePagesStore';
 import { useCollectionsStore } from '@/stores/useCollectionsStore';
+import { useEditorStore } from '@/stores/useEditorStore';
+import { useAssetsStore } from '@/stores/useAssetsStore';
 import { collectionsApi } from '@/lib/api';
-import { getLayerIcon, getLayerName } from '@/lib/layer-utils';
+import { getAssetIcon } from '@/lib/asset-utils';
+import { findLayersWithAnchorId } from '@/lib/layer-utils';
+import { getLayerIcon, getLayerName } from '@/lib/layer-display-utils';
 import PageSelector from './PageSelector';
 
 interface CollectionLinkFieldInputProps {
@@ -69,11 +75,15 @@ export default function CollectionLinkFieldInput({
 }: CollectionLinkFieldInputProps) {
   const [collectionItems, setCollectionItems] = useState<CollectionItemWithValues[]>([]);
   const [loadingItems, setLoadingItems] = useState(false);
+  const [collectionItemSearch, setCollectionItemSearch] = useState('');
 
   // Stores
   const pages = usePagesStore((state) => state.pages);
   const draftsByPageId = usePagesStore((state) => state.draftsByPageId);
+  const loadDraft = usePagesStore((state) => state.loadDraft);
   const { fields: collectionsFields } = useCollectionsStore();
+  const openFileManager = useEditorStore((state) => state.openFileManager);
+  const getAsset = useAssetsStore((state) => state.getAsset);
 
   // Parse current value
   const linkValue = useMemo(() => parseLinkValue(value), [value]);
@@ -81,29 +91,13 @@ export default function CollectionLinkFieldInput({
 
   // Current values
   const urlValue = linkValue?.url || '';
+  const assetId = linkValue?.asset?.id || null;
   const pageId = linkValue?.page?.id || '';
   const collectionItemId = linkValue?.page?.collection_item_id || null;
   const anchorLayerId = linkValue?.page?.anchor_layer_id || '';
 
-  // Find layers with ID attribute for anchor selection
-  const findLayersWithId = useCallback((layers: Layer[]): Array<{ layer: Layer; id: string }> => {
-    const result: Array<{ layer: Layer; id: string }> = [];
-    const stack: Layer[] = [...layers];
-
-    while (stack.length > 0) {
-      const layer = stack.pop()!;
-
-      if (layer.attributes?.id) {
-        result.push({ layer, id: layer.attributes.id });
-      }
-
-      if (layer.children) {
-        stack.push(...layer.children);
-      }
-    }
-
-    return result;
-  }, []);
+  // Get asset info for display
+  const selectedAsset = assetId ? getAsset(assetId) : null;
 
   // Get layers for anchor selection from the selected page
   const anchorLayers = useMemo(() => {
@@ -112,8 +106,15 @@ export default function CollectionLinkFieldInput({
     const draft = draftsByPageId[pageId];
     if (!draft || !draft.layers) return [];
 
-    return findLayersWithId(draft.layers);
-  }, [pageId, draftsByPageId, findLayersWithId]);
+    return findLayersWithAnchorId(draft.layers);
+  }, [pageId, draftsByPageId]);
+
+  // Load draft for selected page so anchor layers are available
+  useEffect(() => {
+    if (pageId && !draftsByPageId[pageId]) {
+      loadDraft(pageId);
+    }
+  }, [pageId, draftsByPageId, loadDraft]);
 
   // Get the selected page
   const selectedPage = useMemo(() => {
@@ -185,6 +186,8 @@ export default function CollectionLinkFieldInput({
   // Handle link type change
   const handleLinkTypeChange = useCallback(
     (newType: CollectionLinkType | 'none') => {
+      if (!newType || newType === linkType) return;
+
       if (newType === 'none') {
         updateLinkValue(null);
         return;
@@ -200,11 +203,13 @@ export default function CollectionLinkFieldInput({
         newValue.url = '';
       } else if (newType === 'page') {
         newValue.page = { id: '', collection_item_id: null };
+      } else if (newType === 'asset') {
+        newValue.asset = { id: null };
       }
 
       updateLinkValue(newValue);
     },
-    [updateLinkValue]
+    [updateLinkValue, linkType]
   );
 
   // Handle URL change
@@ -218,6 +223,21 @@ export default function CollectionLinkFieldInput({
     },
     [linkValue, updateLinkValue]
   );
+
+  // Handle asset selection via file manager
+  const handleAssetSelect = useCallback(() => {
+    if (!linkValue) return;
+    openFileManager(
+      (asset) => {
+        updateLinkValue({
+          ...linkValue,
+          asset: { id: asset.id },
+        });
+      },
+      assetId || undefined,
+      undefined
+    );
+  }, [linkValue, assetId, openFileManager, updateLinkValue]);
 
   // Handle page selection
   const handlePageChange = useCallback(
@@ -269,6 +289,7 @@ export default function CollectionLinkFieldInput({
   const linkTypeOptions = [
     { value: 'none', label: 'No link', detail: null, icon: 'none' },
     { value: 'page', label: 'Page', detail: 'Link to a regular or dynamic page', icon: 'page' },
+    { value: 'asset', label: 'Asset', detail: 'Link to a downloadable file', icon: 'paperclip' },
     { value: 'url', label: 'URL', detail: 'Link to a custom URL', icon: 'link' },
   ];
 
@@ -316,6 +337,27 @@ export default function CollectionLinkFieldInput({
         </div>
       )}
 
+      {/* Asset Selection */}
+      {linkType === 'asset' && (
+        <div className="flex flex-col gap-1.5">
+          <Label className="text-xs text-muted-foreground">Asset</Label>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={handleAssetSelect}
+            disabled={disabled}
+            className="w-full justify-start"
+          >
+            <Icon
+              name={(selectedAsset ? getAssetIcon(selectedAsset.mime_type) : 'paperclip') as IconProps['name']}
+              className="size-3 mr-0.5"
+            />
+            {selectedAsset ? selectedAsset.filename : 'Select asset...'}
+          </Button>
+        </div>
+      )}
+
       {/* Page Selection */}
       {linkType === 'page' && (
         <div className="flex flex-wrap gap-3">
@@ -339,18 +381,45 @@ export default function CollectionLinkFieldInput({
                 <Label className="text-xs text-muted-foreground">CMS item</Label>
                 <Select
                   value={collectionItemId || ''}
-                  onValueChange={handleCollectionItemChange}
+                  onValueChange={(value) => {
+                    handleCollectionItemChange(value);
+                    setCollectionItemSearch('');
+                  }}
+                  onOpenChange={(open) => {
+                    if (!open) setCollectionItemSearch('');
+                  }}
                   disabled={disabled || loadingItems}
                 >
                   <SelectTrigger className="w-full">
                     <SelectValue placeholder={loadingItems ? 'Loading...' : 'Select...'} />
                   </SelectTrigger>
-                  <SelectContent>
-                    {collectionItems.map((item) => (
-                      <SelectItem key={item.id} value={item.id}>
-                        {getItemDisplayName(item.id)}
-                      </SelectItem>
-                    ))}
+                  <SelectContent
+                    searchable
+                    searchValue={collectionItemSearch}
+                    onSearchChange={setCollectionItemSearch}
+                    searchPlaceholder="Search items..."
+                    className="w-72"
+                  >
+                    {(() => {
+                      const query = collectionItemSearch.trim().toLowerCase();
+                      const filtered = query
+                        ? collectionItems.filter(item =>
+                          getItemDisplayName(item.id).toLowerCase().includes(query)
+                        )
+                        : collectionItems;
+                      if (filtered.length === 0) {
+                        return (
+                          <div className="px-2 py-4 text-center text-xs text-muted-foreground">
+                            {query ? 'No items found' : 'No items available'}
+                          </div>
+                        );
+                      }
+                      return filtered.map((item) => (
+                        <SelectItem key={item.id} value={item.id}>
+                          {getItemDisplayName(item.id)}
+                        </SelectItem>
+                      ));
+                    })()}
                   </SelectContent>
                 </Select>
               </div>

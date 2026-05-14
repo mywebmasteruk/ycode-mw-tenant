@@ -64,6 +64,8 @@ import InteractionsPanel from './InteractionsPanel';
 import LayoutControls from './LayoutControls';
 import LayerStylesPanel from './LayerStylesPanel';
 import PositionControls from './PositionControls';
+import TransformControls from './TransformControls';
+import TransitionControls from './TransitionControls';
 import SettingsPanel from './SettingsPanel';
 import SizingControls from './SizingControls';
 import SpacingControls from './SpacingControls';
@@ -79,6 +81,10 @@ import { useCollectionsStore } from '@/stores/useCollectionsStore';
 import { useLayerStylesStore } from '@/stores/useLayerStylesStore';
 import { useCanvasTextEditorStore } from '@/stores/useCanvasTextEditorStore';
 import { useEditorActions, useEditorUrl } from '@/hooks/use-editor-url';
+import { useLocalizationMode } from '@/hooks/use-localization-mode';
+import SidebarTranslationRow from './SidebarTranslationRow';
+import { extractLayerTranslatableItemsShallow } from '@/lib/localisation-utils';
+import { useLocalisationStore } from '@/stores/useLocalisationStore';
 
 // 5.5 Hooks
 import { useLayerLocks } from '@/hooks/use-layer-locks';
@@ -94,7 +100,7 @@ import { isFieldVariable, getCollectionVariable, findParentCollectionLayer, find
 import { detachSpecificLayerFromComponent } from '@/lib/component-utils';
 import { convertContentToValue, parseValueToContent } from '@/lib/cms-variables-utils';
 import { createTextComponentVariableValue } from '@/lib/variable-utils';
-import { getRichTextValue, extractPlainTextFromTiptap } from '@/lib/tiptap-utils';
+import { getRichTextValue, extractPlainTextFromTiptap, getSoleCmsFieldBinding } from '@/lib/tiptap-utils';
 import { DEFAULT_TEXT_STYLES, getTextStyle, getTiptapTextContent } from '@/lib/text-format-utils';
 import { buildFieldGroupsForLayer, getFieldIcon, isMultipleAssetField, MULTI_ASSET_COLLECTION_ID, SIMPLE_TEXT_FIELD_TYPES } from '@/lib/collection-field-utils';
 import { getInverseReferenceFields } from '@/lib/collection-utils';
@@ -116,12 +122,43 @@ interface RightSidebarProps {
   onLayerUpdate: (layerId: string, updates: Partial<Layer>) => void;
 }
 
+/**
+ * Recursively remove heading/text descendants from a layer subtree.
+ * Used when binding a slide to a multi-image field — the assets are typically
+ * the focus, so any leftover text/heading scaffolding is auto-pruned.
+ */
+function pruneTextDescendants(children: Layer[] | undefined): Layer[] {
+  if (!children?.length) return [];
+  return children
+    .filter(c => !isTextContentLayer(c))
+    .map(c => (c.children?.length ? { ...c, children: pruneTextDescendants(c.children) } : c));
+}
+
 const RightSidebar = React.memo(function RightSidebar({
   selectedLayerId,
   onLayerUpdate,
 }: RightSidebarProps) {
   const { openComponent, urlState, updateQueryParams } = useEditorActions();
   const { routeType } = useEditorUrl();
+  const { isLocalizing, currentLocale, defaultLocale } = useLocalizationMode();
+
+  // Translation editor state + store actions used by the per-layer Translate
+  // panel rendered inside the Settings tab when a non-default locale is active.
+  const selectedLocaleId = useLocalisationStore((state) => state.selectedLocaleId);
+  const getTranslationByKey = useLocalisationStore((state) => state.getTranslationByKey);
+  const createTranslation = useLocalisationStore((state) => state.createTranslation);
+  const updateTranslation = useLocalisationStore((state) => state.updateTranslation);
+  const [translationLocalInputValues, setTranslationLocalInputValues] = useState<Record<string, string>>({});
+  const handleTranslationLocalValueChange = useCallback((key: string, value: string) => {
+    setTranslationLocalInputValues((prev) => ({ ...prev, [key]: value }));
+  }, []);
+  const handleTranslationLocalValueClear = useCallback((key: string) => {
+    setTranslationLocalInputValues((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }, []);
 
   // Local state for immediate UI feedback
   const [activeTab, setActiveTab] = useState<'design' | 'settings' | 'interactions' | undefined>(
@@ -196,6 +233,7 @@ const RightSidebar = React.memo(function RightSidebar({
   const startElementPicker = useEditorStore((state) => state.startElementPicker);
   const stopElementPicker = useEditorStore((state) => state.stopElementPicker);
   const isElementPickerActive = useEditorStore((state) => !!state.elementPicker?.active);
+  const openRichTextSheet = useEditorStore((state) => state.openRichTextSheet);
 
   // Check if text is being edited on canvas
   const isTextEditingOnCanvas = useCanvasTextEditorStore((state) => state.isEditing);
@@ -241,6 +279,49 @@ const RightSidebar = React.memo(function RightSidebar({
 
   const selectedLayerRef = useRef(selectedLayer);
   selectedLayerRef.current = selectedLayer;
+
+  // Translatable items for the selected layer, computed only when actually
+  // localizing. The source resolution mirrors the server: layers inside a
+  // component are scoped to that component (via _masterComponentId on the
+  // server / editingComponentId here) so a single translation propagates to
+  // all instances of the component on the site.
+  const translationSource = useMemo(() => {
+    if (!selectedLayer || !isLocalizing) return null;
+    if (editingComponentId) {
+      return { sourceType: 'component' as const, sourceId: editingComponentId };
+    }
+    if (currentPageId) {
+      return { sourceType: 'page' as const, sourceId: currentPageId };
+    }
+    return null;
+  }, [selectedLayer, isLocalizing, editingComponentId, currentPageId]);
+
+  const translatableItemsForSelectedLayer = useMemo(() => {
+    if (!selectedLayer || !translationSource) return [];
+    return extractLayerTranslatableItemsShallow(
+      selectedLayer,
+      translationSource.sourceType,
+      translationSource.sourceId,
+    );
+  }, [selectedLayer, translationSource]);
+
+  // When the selected layer's text is a single CMS-bound variable (e.g. a
+  // heading whose only content is a `[Content]` field reference), the textarea
+  // editor in the sidebar would just show "[Content]" — the actual translation
+  // happens against the bound CMS item, not against the layer. Detect this so
+  // the panel can render a read-only "Content → variable" row instead, and
+  // hide the unhelpful textarea pair.
+  const layerCmsTextBinding = useMemo(() => {
+    if (!selectedLayer || !isLocalizing) return null;
+    if (selectedLayer.variables?.text?.type !== 'dynamic_rich_text') return null;
+    const richValue = getRichTextValue(selectedLayer.variables);
+    return getSoleCmsFieldBinding(richValue);
+  }, [selectedLayer, isLocalizing]);
+
+  const translatableItemsExcludingCmsText = useMemo(() => {
+    if (!layerCmsTextBinding) return translatableItemsForSelectedLayer;
+    return translatableItemsForSelectedLayer.filter((item) => !item.content_key.endsWith(':text'));
+  }, [translatableItemsForSelectedLayer, layerCmsTextBinding]);
 
   const hasCustomAttributes = !!(selectedLayer?.settings?.customAttributes &&
     Object.keys(selectedLayer.settings.customAttributes).length > 0);
@@ -479,7 +560,10 @@ const RightSidebar = React.memo(function RightSidebar({
       case 'borders':
         // Border controls: hide for pure text elements (show for buttons and containers)
         // Show in text edit mode for block elements that need border styling (Separator, Image)
-        if (showTextStyleControls) return activeTextStyleKey === 'horizontalRule' || activeTextStyleKey === 'richTextImage';
+        if (showTextStyleControls) {
+          const borderStyleKeys = ['horizontalRule', 'richTextImage', 'table', 'tableHeader', 'tableCell', 'tableRow'];
+          return !!activeTextStyleKey && borderStyleKeys.includes(activeTextStyleKey);
+        }
         return !isTextLayer(layer) || isButtonLayer(layer);
 
       case 'effects':
@@ -491,6 +575,20 @@ const RightSidebar = React.memo(function RightSidebar({
         // In text style mode, hide position controls
         if (showTextStyleControls) return false;
         // Position controls: show for all
+        return true;
+
+      case 'transforms':
+        // In text style mode, hide transform controls
+        if (showTextStyleControls) return false;
+        // Hide for text-only layers (not buttons)
+        if (isTextLayer(layer) && !isButtonLayer(layer)) return false;
+        return true;
+
+      case 'transitions':
+        // In text style mode, hide transition controls
+        if (showTextStyleControls) return false;
+        // Transitions: show for all non-text layers (and buttons)
+        if (isTextLayer(layer) && !isButtonLayer(layer)) return false;
         return true;
 
       default:
@@ -1007,7 +1105,7 @@ const RightSidebar = React.memo(function RightSidebar({
       const selectedField = parentCollectionFields.find(f => f.id === value);
 
       if (selectedField && isMultipleAssetField(selectedField)) {
-        handleLayerUpdate(selectedLayerId, {
+        const updates: Partial<Layer> = {
           variables: {
             ...selectedLayer?.variables,
             collection: {
@@ -1018,7 +1116,13 @@ const RightSidebar = React.memo(function RightSidebar({
               source_field_source: 'collection',
             }
           }
-        });
+        };
+        // Slides bound to a multi-image field are typically image-only —
+        // strip any leftover heading/text scaffolding so the user starts clean.
+        if (selectedLayer.name === 'slide') {
+          updates.children = pruneTextDescendants(selectedLayer.children);
+        }
+        handleLayerUpdate(selectedLayerId, updates);
       } else if (selectedField?.reference_collection_id) {
         handleLayerUpdate(selectedLayerId, {
           variables: {
@@ -1098,10 +1202,15 @@ const RightSidebar = React.memo(function RightSidebar({
 
     if (!newCollectionVar) return;
 
-    // Update the collection source on the layer
-    handleLayerUpdate(selectedLayerId, {
-      variables: { ...selectedLayer?.variables, collection: newCollectionVar }
-    });
+    const updates: Partial<Layer> = {
+      variables: { ...selectedLayer?.variables, collection: newCollectionVar },
+    };
+    // Slides bound to a multi-image field are typically image-only —
+    // strip any leftover heading/text scaffolding so the user starts clean.
+    if (newCollectionVar.source_field_type === 'multi_asset' && selectedLayer.name === 'slide') {
+      updates.children = pruneTextDescendants(selectedLayer.children);
+    }
+    handleLayerUpdate(selectedLayerId, updates);
 
     resetChildBindings(selectedLayerId);
   };
@@ -1739,17 +1848,21 @@ const RightSidebar = React.memo(function RightSidebar({
 
   return (
     <div className="w-64 shrink-0 bg-background border-l flex flex-col p-4 pb-0 h-full overflow-hidden">
-      {/* Tabs */}
+      {/* Tabs.
+          When the user is translating (non-default locale active) we keep the
+          tab list visible but disable Design + Interactions and force the
+          Settings tab, which is where the per-layer Translate panel renders.
+          Mirrors the disabled-tabs pattern used for component instances. */}
       <Tabs
-        value={activeTab}
-        onValueChange={handleTabChange}
+        value={isLocalizing ? 'settings' : activeTab}
+        onValueChange={isLocalizing ? () => { } : handleTabChange}
         className="flex flex-col flex-1 min-h-0 gap-0"
       >
         <div className="">
           <TabsList className="w-full">
-            <TabsTrigger value="design">Design</TabsTrigger>
+            <TabsTrigger value="design" disabled={isLocalizing}>Design</TabsTrigger>
             <TabsTrigger value="settings">Settings</TabsTrigger>
-            <TabsTrigger value="interactions">Interactions</TabsTrigger>
+            <TabsTrigger value="interactions" disabled={isLocalizing}>Interactions</TabsTrigger>
           </TabsList>
         </div>
 
@@ -1839,6 +1952,14 @@ const RightSidebar = React.memo(function RightSidebar({
             <PositionControls layer={selectedLayer} onLayerUpdate={handleLayerUpdate} />
           )}
 
+          {shouldShowControl('transforms', selectedLayer) && (
+            <TransformControls layer={selectedLayer} onLayerUpdate={handleLayerUpdate} />
+          )}
+
+          {shouldShowControl('transitions', selectedLayer) && (
+            <TransitionControls layer={selectedLayer} onLayerUpdate={handleLayerUpdate} />
+          )}
+
           {/* Classes panel - shows classes for active text style or layer */}
           <SettingsPanel
             title="Classes"
@@ -1926,7 +2047,92 @@ const RightSidebar = React.memo(function RightSidebar({
 
         <TabsContent value="settings" className="flex-1 overflow-y-auto no-scrollbar mt-0 data-[state=inactive]:hidden">
           <div className="flex flex-col divide-y">
-            {selectedLayerId !== 'body' && (<>
+            {/* Translate panel — replaces all design/settings controls when a
+                non-default locale is active. Stacked Framer-style layout: one
+                source + translation Textarea pair per translatable property of
+                the selected layer. */}
+            {isLocalizing && selectedLayer && currentLocale && (
+              <div className="flex flex-col gap-6 py-5">
+                {/* CMS-bound text indicator — shown when the layer's text is a
+                    single CMS variable. The translation happens on the bound
+                    CMS item (via the collection item sheet), not here, so the
+                    sidebar just surfaces the connected variable for context.
+                    No clear/X button — the binding can't be removed in
+                    translation mode. */}
+                {layerCmsTextBinding && (
+                  <div className="grid grid-cols-3 items-center">
+                    <Label variant="muted">Content</Label>
+                    <div className="col-span-2 *:w-full">
+                      <Button
+                        asChild
+                        variant="data"
+                        className="justify-between! cursor-default"
+                      >
+                        <div>
+                          <span className="flex items-center gap-1.5 truncate">
+                            <Icon name="database" className="size-3 opacity-60 shrink-0" />
+                            <span className="truncate">{layerCmsTextBinding.label || 'CMS Field'}</span>
+                          </span>
+                        </div>
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {translatableItemsExcludingCmsText.length === 0 && !layerCmsTextBinding ? (
+                  <Empty>
+                    <EmptyMedia variant="icon">
+                      <Icon name="globe" />
+                    </EmptyMedia>
+                    <EmptyTitle>Nothing to translate</EmptyTitle>
+                    <EmptyDescription>
+                      This layer has no translatable content. Select a text or media element.
+                    </EmptyDescription>
+                  </Empty>
+                ) : translatableItemsExcludingCmsText.length > 0 ? (
+                  // Group rows under language headers: all source values for
+                  // the default locale first, then the editable translations
+                  // for the active locale. Easier to scan when a layer has
+                  // multiple translatable properties (e.g. image src + alt).
+                  (['source', 'translation'] as const).map((side) => (
+                    <div key={side} className="flex flex-col gap-4">
+                      <Label className="text-xs font-medium">
+                        {side === 'source'
+                          ? defaultLocale?.label || 'Default'
+                          : currentLocale.label}
+                      </Label>
+                      {translatableItemsExcludingCmsText.map((item) => {
+                        // Rich-text element layers are previewed read-only and
+                        // edited in the dedicated RichTextEditorSheet overlay,
+                        // launched via the per-row "Expand to edit" button.
+                        const isRichTextElementContent =
+                          isRichTextLayer(selectedLayer) && item.content_type === 'richtext';
+                        return (
+                          <SidebarTranslationRow
+                            key={`${side}:${item.key}`}
+                            item={item}
+                            side={side}
+                            selectedLocaleId={selectedLocaleId}
+                            localInputValues={translationLocalInputValues}
+                            onLocalValueChange={handleTranslationLocalValueChange}
+                            onLocalValueClear={handleTranslationLocalValueClear}
+                            getTranslationByKey={getTranslationByKey}
+                            createTranslation={createTranslation}
+                            updateTranslation={updateTranslation}
+                            previewOnly={isRichTextElementContent}
+                            onExpand={isRichTextElementContent && selectedLayerId
+                              ? () => openRichTextSheet(selectedLayerId)
+                              : undefined}
+                          />
+                        );
+                      })}
+                    </div>
+                  ))
+                ) : null}
+              </div>
+            )}
+
+            {!isLocalizing && selectedLayerId !== 'body' && (<>
             {/* Attributes */}
             <div className="flex flex-col gap-2 pb-5 pt-5">
               <div className="grid grid-cols-3">
@@ -2661,6 +2867,7 @@ const RightSidebar = React.memo(function RightSidebar({
               layer={selectedLayer}
               onLayerUpdate={handleLayerUpdate}
               allLayers={allLayers}
+              fieldGroups={fieldGroups}
             />
 
             <LightboxSettings
@@ -2703,7 +2910,8 @@ const RightSidebar = React.memo(function RightSidebar({
             />
             </>)}
 
-            {/* Custom Attributes Panel */}
+            {/* Custom Attributes Panel — hide while translating */}
+            {!isLocalizing && (
             <SettingsPanel
               title="Custom attributes"
               isOpen={hasCustomAttributes}
@@ -2787,6 +2995,7 @@ const RightSidebar = React.memo(function RightSidebar({
                 </div>
               )}
             </SettingsPanel>
+            )}
           </div>
         </TabsContent>
 

@@ -116,12 +116,8 @@ export function castValue(value: string | null, type: CollectionFieldType): any 
       }
 
     case 'link':
-      // Parse link settings from stored JSON
-      try {
-        return JSON.parse(value);
-      } catch {
-        return null;
-      }
+      // Keep as raw JSON string — parsed downstream by parseCollectionLinkValue
+      return value;
 
     case 'color':
       // Standard hex color string (e.g. #ff0000 or #ff0000aa with alpha)

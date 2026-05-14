@@ -13,6 +13,7 @@ import {
   cleanLayersForComponentCreation,
 } from '@/lib/layer-utils';
 import { detachStyleFromLayers, updateLayersWithStyle } from '@/lib/layer-style-utils';
+import { scheduleIdle } from '@/lib/schedule-idle';
 import { generateId } from '@/lib/utils';
 import type { Component, Layer } from '@/types';
 
@@ -73,6 +74,12 @@ interface ComponentsState {
   isLoading: boolean;
   error: string | null;
   componentDrafts: Record<string, Layer[]>;
+  /**
+   * True when a draft has been mutated since it was last loaded or persisted.
+   * Used to skip no-op saves and cross-page sync passes when leaving the
+   * component editor without making any changes.
+   */
+  componentDraftDirty: Record<string, boolean>;
   isSaving: boolean;
   saveTimeouts: Record<string, NodeJS.Timeout>;
 }
@@ -175,6 +182,7 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
     isLoading: false,
     error: null,
     componentDrafts: {},
+    componentDraftDirty: {},
     isSaving: false,
     saveTimeouts: {},
 
@@ -455,6 +463,10 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
             ...state.componentDrafts,
             [componentId]: layers,
           },
+          componentDraftDirty: {
+            ...state.componentDraftDirty,
+            [componentId]: false,
+          },
         }));
 
         // Initialize version tracking with loaded state
@@ -472,6 +484,10 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
         componentDrafts: {
           ...state.componentDrafts,
           [componentId]: layers,
+        },
+        componentDraftDirty: {
+          ...state.componentDraftDirty,
+          [componentId]: true,
         },
       }));
 
@@ -496,11 +512,17 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
 
     // Save component draft to database
     saveComponentDraft: async (componentId) => {
-      const { componentDrafts } = get();
+      const { componentDrafts, componentDraftDirty } = get();
       const draftLayers = componentDrafts[componentId];
 
       if (!draftLayers) {
         console.warn(`No draft found for component ${componentId}`);
+        return;
+      }
+
+      // Skip the round-trip entirely when the draft has not been mutated
+      // since it was loaded or last persisted.
+      if (!componentDraftDirty[componentId]) {
         return;
       }
 
@@ -536,6 +558,7 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
           // Safe to update - no changes made during save
           set((state) => ({
             components: state.components.map((c) => (c.id === componentId ? updatedComponent : c)),
+            componentDraftDirty: { ...state.componentDraftDirty, [componentId]: false },
             isSaving: false,
           }));
 
@@ -567,25 +590,29 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
           triggerThumbnailGeneration(componentId, draftLayers, get().components);
         }
 
-        // Regenerate CSS to include updated component classes
-        try {
-          const { generateAndSaveCSS } = await import('@/lib/client/cssGenerator');
-          const { usePagesStore } = await import('./usePagesStore');
+        // Regenerate CSS to include updated component classes.
+        // Run this off the critical path so navigation/UI is not blocked.
+        // Only collect layers from pages that actually contain an instance
+        // of this component (plus the component's own layers).
+        scheduleIdle(async () => {
+          try {
+            const { generateAndSaveCSS } = await import('@/lib/client/cssGenerator');
+            const { usePagesStore } = await import('./usePagesStore');
+            const { containsComponent } = await import('@/lib/component-utils');
 
-          // Collect layers from ALL pages
-          const allLayers: Layer[] = [];
-          const allDrafts = usePagesStore.getState().draftsByPageId;
-          Object.values(allDrafts).forEach((pageDraft) => {
-            if (pageDraft.layers) {
-              allLayers.push(...pageDraft.layers);
-            }
-          });
+            const allLayers: Layer[] = [...layersBeingSaved];
+            const allDrafts = usePagesStore.getState().draftsByPageId;
+            Object.values(allDrafts).forEach((pageDraft) => {
+              if (pageDraft.layers && containsComponent(pageDraft.layers, componentId)) {
+                allLayers.push(...pageDraft.layers);
+              }
+            });
 
-          await generateAndSaveCSS(allLayers);
-        } catch (cssError) {
-          console.error('Failed to generate CSS after component save:', cssError);
-          // Don't fail the save operation if CSS generation fails
-        }
+            await generateAndSaveCSS(allLayers);
+          } catch (cssError) {
+            console.error('Failed to generate CSS after component save:', cssError);
+          }
+        });
       } catch (error) {
         console.error('Failed to save component draft:', error);
         set({ isSaving: false });
@@ -598,6 +625,9 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
         const newDrafts = { ...state.componentDrafts };
         delete newDrafts[componentId];
 
+        const newDirty = { ...state.componentDraftDirty };
+        delete newDirty[componentId];
+
         const newTimeouts = { ...state.saveTimeouts };
         if (newTimeouts[componentId]) {
           clearTimeout(newTimeouts[componentId]);
@@ -606,6 +636,7 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
 
         return {
           componentDrafts: newDrafts,
+          componentDraftDirty: newDirty,
           saveTimeouts: newTimeouts,
         };
       });

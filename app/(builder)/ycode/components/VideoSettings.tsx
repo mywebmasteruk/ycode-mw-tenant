@@ -619,6 +619,7 @@ export default function VideoSettings(props: VideoSettingsProps) {
               fieldGroups={textFieldGroups}
               allFields={allFields}
               collections={collections}
+              allowedFieldTypes={VIDEO_ID_FIELD_TYPES}
             />
           </div>
         </div>

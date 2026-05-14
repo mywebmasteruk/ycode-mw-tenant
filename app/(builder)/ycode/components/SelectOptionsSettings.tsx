@@ -169,14 +169,14 @@ function buildOptionLayer(id: string, label: string, value: string): Layer {
 }
 
 /**
- * Build a placeholder option layer (disabled, selected, hidden, value="")
+ * Build a placeholder option layer (value="", selectable to clear selection)
  */
 function buildPlaceholderOption(id: string, text: string): Layer {
   return {
     id,
     name: 'option',
     classes: '',
-    attributes: { value: '', disabled: 'true', hidden: 'true' },
+    attributes: { value: '' },
     settings: { isPlaceholder: true },
     variables: {
       text: {
@@ -583,6 +583,14 @@ export default function SelectOptionsSettings({
   const handleSortOrderChange = useCallback((value: string | boolean) => {
     patchOptionsSource({ sortOrder: value as 'asc' | 'desc' });
   }, [patchOptionsSource]);
+
+  const handleSortOrderDefaultChange = useCallback((value: string) => {
+    if (!layer) return;
+    const { value: _omit, ...restAttrs } = layer.attributes || {};
+    onLayerUpdate(layer.id, {
+      attributes: value === 'none' ? restAttrs : { ...restAttrs, value },
+    });
+  }, [layer, onLayerUpdate]);
 
   // Fetch collection items for the Default picker (paged)
   const [sourceItems, setSourceItems] = useState<CollectionItemWithValues[]>([]);
@@ -1227,6 +1235,28 @@ export default function SelectOptionsSettings({
           <>
             {isSortOrderMode ? (
               <div className="flex flex-col gap-2">
+                <div className="grid grid-cols-3 items-center">
+                  <Label variant="muted">Default</Label>
+                  <div className="col-span-2">
+                    <Select
+                      value={(layer?.attributes?.value as string) || 'none'}
+                      onValueChange={handleSortOrderDefaultChange}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue placeholder="None" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">None</SelectItem>
+                        <SelectItem value="asc">
+                          {options.find((opt) => opt.value === 'asc')?.label || 'Ascending'}
+                        </SelectItem>
+                        <SelectItem value="desc">
+                          {options.find((opt) => opt.value === 'desc')?.label || 'Descending'}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
                 <div className="grid grid-cols-3 items-center">
                   <Label variant="muted">Ascending</Label>
                   <div className="col-span-2 *:w-full">

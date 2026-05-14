@@ -26,6 +26,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import Icon from '@/components/ui/icon';
+import { Spinner } from '@/components/ui/spinner';
 import { Checkbox } from '@/components/ui/checkbox';
 import { FIELD_TYPES_BY_CATEGORY, ASSET_FIELD_TYPES, supportsDefaultValue, isAssetFieldType, getFileManagerCategory, getAssetFieldLabel, type FieldType } from '@/lib/collection-field-utils';
 import { parseMultiReferenceValue } from '@/lib/collection-utils';
@@ -80,10 +81,14 @@ export default function FieldFormDialog({
   const [fieldDefault, setFieldDefault] = useState('');
   const [referenceCollectionId, setReferenceCollectionId] = useState<string | null>(null);
   const [fieldMultiple, setFieldMultiple] = useState(false);
+  const [fieldOptions, setFieldOptions] = useState<{ id: string; name: string }[]>([]);
+  const [countCollectionId, setCountCollectionId] = useState<string | null>(null);
+  const [countFieldId, setCountFieldId] = useState<string | null>(null);
   const [hasChangedType, setHasChangedType] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Stores
-  const { collections } = useCollectionsStore();
+  const { collections, fields: fieldsByCollectionId } = useCollectionsStore();
   const { openFileManager } = useEditorStore();
   const getAsset = useAssetsStore((state) => state.getAsset);
 
@@ -108,8 +113,49 @@ export default function FieldFormDialog({
   // Derived flags
   const isReferenceType = fieldType === 'reference' || fieldType === 'multi_reference';
   const isAssetType = ASSET_FIELD_TYPES.includes(fieldType);
+  const isOptionType = fieldType === 'option';
+  const isCountType = fieldType === 'count';
   const hasDefault = supportsDefaultValue(fieldType);
-  const isSubmitDisabled = !fieldName.trim() || (isReferenceType && !referenceCollectionId);
+
+  const hasInvalidOptions = isOptionType && (() => {
+    if (fieldOptions.length === 0) return true;
+    const names = fieldOptions.map(o => o.name.trim());
+    if (names.some(n => !n)) return true;
+    const lowered = names.map(n => n.toLowerCase());
+    return new Set(lowered).size !== lowered.length;
+  })();
+
+  // Collections that have at least one reference / multi_reference field
+  // pointing back at the current collection — only those make sense as a
+  // counting source.
+  const countableCollections = React.useMemo(() => {
+    if (!isCountType || !currentCollectionId) return [];
+    return collections.filter(c => {
+      if (c.id === currentCollectionId) return false;
+      const fields = fieldsByCollectionId[c.id] || [];
+      return fields.some(
+        f => (f.type === 'reference' || f.type === 'multi_reference')
+          && f.reference_collection_id === currentCollectionId,
+      );
+    });
+  }, [isCountType, currentCollectionId, collections, fieldsByCollectionId]);
+
+  // Reference fields on the picked count collection that point back at the
+  // current collection.
+  const countCandidateFields = React.useMemo(() => {
+    if (!isCountType || !countCollectionId || !currentCollectionId) return [];
+    const fields = fieldsByCollectionId[countCollectionId] || [];
+    return fields.filter(
+      f => (f.type === 'reference' || f.type === 'multi_reference')
+        && f.reference_collection_id === currentCollectionId,
+    );
+  }, [isCountType, countCollectionId, currentCollectionId, fieldsByCollectionId]);
+
+  const isSubmitDisabled =
+    !fieldName.trim() ||
+    (isReferenceType && !referenceCollectionId) ||
+    (isCountType && (!countCollectionId || !countFieldId)) ||
+    hasInvalidOptions;
 
   // Reset form when dialog opens
   useEffect(() => {
@@ -121,14 +167,25 @@ export default function FieldFormDialog({
       setFieldDefault(field.default || '');
       setReferenceCollectionId(field.reference_collection_id || null);
       setFieldMultiple(field.data?.multiple || false);
+      setFieldOptions(
+        Array.isArray(field.data?.options)
+          ? field.data.options.map(o => ({ id: o.id, name: o.name }))
+          : []
+      );
+      setCountCollectionId(field.data?.count?.collectionId ?? null);
+      setCountFieldId(field.data?.count?.fieldId ?? null);
     } else {
       setFieldName('');
       setFieldType('text');
       setFieldDefault('');
       setReferenceCollectionId(null);
       setFieldMultiple(false);
+      setFieldOptions([]);
+      setCountCollectionId(null);
+      setCountFieldId(null);
     }
     setHasChangedType(false);
+    setIsSubmitting(false);
   }, [open, field]);
 
   // Clear reference collection when switching away from reference types
@@ -144,6 +201,30 @@ export default function FieldFormDialog({
       setFieldMultiple(false);
     }
   }, [isAssetType, hasChangedType]);
+
+  // Clear options when switching away from option type
+  useEffect(() => {
+    if (hasChangedType && !isOptionType) {
+      setFieldOptions([]);
+    }
+  }, [isOptionType, hasChangedType]);
+
+  // Clear count config when switching away from count type
+  useEffect(() => {
+    if (hasChangedType && !isCountType) {
+      setCountCollectionId(null);
+      setCountFieldId(null);
+    }
+  }, [isCountType, hasChangedType]);
+
+  // When the picked count collection changes, drop a stale field selection
+  // that no longer belongs to that collection.
+  useEffect(() => {
+    if (!isCountType) return;
+    if (!countFieldId) return;
+    const stillValid = countCandidateFields.some(f => f.id === countFieldId);
+    if (!stillValid) setCountFieldId(null);
+  }, [isCountType, countFieldId, countCandidateFields]);
 
   // Clear/reset default value when switching types
   useEffect(() => {
@@ -161,18 +242,65 @@ export default function FieldFormDialog({
   const handleSubmit = async () => {
     if (!fieldName.trim()) return;
     if (isReferenceType && !referenceCollectionId) return;
+    if (isCountType && (!countCollectionId || !countFieldId)) return;
+    if (hasInvalidOptions) return;
+    if (isSubmitting) return;
 
-    await onSubmit({
-      name: fieldName.trim(),
-      type: fieldType,
-      default: fieldDefault,
-      reference_collection_id: isReferenceType ? referenceCollectionId : null,
-      data: isAssetType ? { multiple: fieldMultiple } : undefined,
+    let data: CollectionFieldData | undefined;
+    if (isAssetType) {
+      data = { multiple: fieldMultiple };
+    } else if (isOptionType) {
+      data = {
+        options: fieldOptions.map(o => ({ id: o.id, name: o.name.trim() })),
+      };
+    } else if (isCountType && countCollectionId && countFieldId) {
+      data = { count: { collectionId: countCollectionId, fieldId: countFieldId } };
+    }
+
+    try {
+      setIsSubmitting(true);
+      await onSubmit({
+        name: fieldName.trim(),
+        type: fieldType,
+        default: fieldDefault,
+        reference_collection_id: isReferenceType ? referenceCollectionId : null,
+        data,
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleAddOption = () => {
+    const id = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `opt-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setFieldOptions(prev => [...prev, { id, name: '' }]);
+  };
+
+  const handleUpdateOptionName = (id: string, name: string) => {
+    setFieldOptions(prev => {
+      const previous = prev.find(o => o.id === id);
+      if (previous && fieldDefault.trim() === previous.name.trim()) {
+        setFieldDefault(name.trim());
+      }
+      return prev.map(o => (o.id === id ? { ...o, name } : o));
     });
   };
 
+  const handleRemoveOption = (id: string) => {
+    setFieldOptions(prev => {
+      const next = prev.filter(o => o.id !== id);
+      return next;
+    });
+    const removed = fieldOptions.find(o => o.id === id);
+    if (removed && fieldDefault === removed.name.trim()) {
+      setFieldDefault('');
+    }
+  };
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(next) => { if (isSubmitting && !next) return; onOpenChange(next); }}>
       <DialogContent className="sm:max-w-md" aria-describedby={undefined}>
         <DialogHeader>
           <DialogTitle>
@@ -180,7 +308,7 @@ export default function FieldFormDialog({
           </DialogTitle>
         </DialogHeader>
 
-        <form className="flex flex-col gap-4" onSubmit={(e) => { e.preventDefault(); if (!isSubmitDisabled) handleSubmit(); }}>
+        <form className="flex flex-col gap-4" onSubmit={(e) => { e.preventDefault(); if (!isSubmitDisabled && !isSubmitting) handleSubmit(); }}>
           <div className="grid grid-cols-5 items-center gap-4">
             <Label htmlFor="field-name" className="text-right">
               Name
@@ -268,6 +396,69 @@ export default function FieldFormDialog({
             </div>
           )}
 
+          {/* Count configuration */}
+          {isCountType && (
+            <>
+              <div className="grid grid-cols-5 items-center gap-4">
+                <Label htmlFor="field-count-collection" className="text-right">
+                  Collection
+                </Label>
+                <div className="col-span-4">
+                  <Select
+                    value={countCollectionId || ''}
+                    onValueChange={(value) => setCountCollectionId(value || null)}
+                    disabled={mode === 'edit'}
+                  >
+                    <SelectTrigger id="field-count-collection" className="w-full">
+                      <SelectValue placeholder={countableCollections.length === 0 ? 'No collections reference this one' : 'Select collection...'} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {countableCollections.length > 0 ? (
+                          countableCollections.map((collection) => (
+                            <SelectItem key={collection.id} value={collection.id}>
+                              {collection.name}
+                            </SelectItem>
+                          ))
+                        ) : (
+                          <div className="px-2 py-1.5 text-sm text-muted-foreground">
+                            No collections reference this one
+                          </div>
+                        )}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-5 items-center gap-4">
+                <Label htmlFor="field-count-field" className="text-right">
+                  Field
+                </Label>
+                <div className="col-span-4">
+                  <Select
+                    value={countFieldId || ''}
+                    onValueChange={(value) => setCountFieldId(value || null)}
+                    disabled={mode === 'edit' || !countCollectionId || countCandidateFields.length === 0}
+                  >
+                    <SelectTrigger id="field-count-field" className="w-full">
+                      <SelectValue placeholder={!countCollectionId ? 'Pick a collection first' : countCandidateFields.length === 0 ? 'No reference fields' : 'Select field...'} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {countCandidateFields.map((f) => (
+                          <SelectItem key={f.id} value={f.id}>
+                            {f.name}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            </>
+          )}
+
           {/* Multiple files toggle */}
           {isAssetType && (
             <div className="grid grid-cols-5 items-center gap-4">
@@ -287,6 +478,51 @@ export default function FieldFormDialog({
                 >
                   Allows multiple files
                 </Label>
+              </div>
+            </div>
+          )}
+
+          {/* Options editor */}
+          {isOptionType && (
+            <div className="grid grid-cols-5 items-start gap-4">
+              <Label className="text-right mt-2">
+                Options
+              </Label>
+              <div className="col-span-4 flex flex-col gap-2">
+                {fieldOptions.length > 0 && (
+                  <div className="flex flex-col gap-2">
+                    {fieldOptions.map((option) => (
+                      <div key={option.id} className="flex items-center gap-1">
+                        <Input
+                          value={option.name}
+                          onChange={(e) => handleUpdateOptionName(option.id, e.target.value)}
+                          placeholder="Option name"
+                          autoComplete="off"
+                          className="flex-1"
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleRemoveOption(option.id)}
+                          aria-label="Remove option"
+                        >
+                          <Icon name="x" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  className="w-fit"
+                  onClick={handleAddOption}
+                >
+                  <Icon name="plus" className="size-3" />
+                  Add option
+                </Button>
               </div>
             </div>
           )}
@@ -332,6 +568,28 @@ export default function FieldFormDialog({
                     value={fieldDefault}
                     onChange={setFieldDefault}
                   />
+                ) : fieldType === 'option' ? (
+                  <Select
+                    value={fieldDefault || '__none__'}
+                    onValueChange={(value) => setFieldDefault(value === '__none__' ? '' : value)}
+                    disabled={fieldOptions.length === 0}
+                  >
+                    <SelectTrigger id="field-default" className="w-full">
+                      <SelectValue placeholder={fieldOptions.length === 0 ? 'Add options first' : 'Select default...'} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value="__none__">No default</SelectItem>
+                        {fieldOptions
+                          .filter((o) => o.name.trim().length > 0)
+                          .map((option) => (
+                            <SelectItem key={option.id} value={option.name.trim()}>
+                              {option.name.trim()}
+                            </SelectItem>
+                          ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
                 ) : fieldType === 'boolean' ? (
                   <div className="flex items-center gap-2 h-8">
                     <Checkbox
@@ -408,15 +666,19 @@ export default function FieldFormDialog({
               variant="secondary"
               size="sm"
               onClick={() => onOpenChange(false)}
+              disabled={isSubmitting}
             >
               Cancel
             </Button>
             <Button
               type="submit"
               size="sm"
-              disabled={isSubmitDisabled}
+              disabled={isSubmitDisabled || isSubmitting}
             >
-              {mode === 'create' ? 'Create field' : 'Update field'}
+              {isSubmitting && <Spinner className="size-3" />}
+              {mode === 'create'
+                ? (isSubmitting ? 'Creating...' : 'Create field')
+                : (isSubmitting ? 'Updating...' : 'Update field')}
             </Button>
           </div>
         </form>

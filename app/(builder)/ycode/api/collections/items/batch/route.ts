@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getTopItemsWithValuesPerCollection, enrichItemsWithStatus } from '@/lib/repositories/collectionItemRepository';
+import { enrichItemsWithCountValues } from '@/lib/repositories/collectionCountRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
 import { findStatusFieldId } from '@/lib/collection-field-utils';
 import { noCache } from '@/lib/api-response';
@@ -32,11 +33,19 @@ export async function POST(request: NextRequest) {
       ...collectionIds.map(id => getFieldsByCollectionId(id, false)),
     ]);
 
-    // Enrich each collection's items with computed status values
+    // Enrich each collection's items with computed status and count values.
+    // Count enrichment runs after status so both computed fields are present
+    // in the preloaded payload that the CMS table renders from.
     await Promise.all(
       collectionIds.map((collectionId, index) => {
         const items = result[collectionId]?.items || [];
         return enrichItemsWithStatus(items, collectionId, findStatusFieldId(fieldSets[index]));
+      })
+    );
+    await Promise.all(
+      collectionIds.map((collectionId) => {
+        const items = result[collectionId]?.items || [];
+        return enrichItemsWithCountValues(items, collectionId);
       })
     );
 

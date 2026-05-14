@@ -258,7 +258,7 @@ export default function RedirectsSettingsPage() {
           if (!open) resetForm();
         }}
       >
-        <DialogContent>
+        <DialogContent aria-describedby={undefined}>
           <DialogHeader>
             <DialogTitle>Add redirect</DialogTitle>
           </DialogHeader>
@@ -322,7 +322,7 @@ export default function RedirectsSettingsPage() {
           if (!open) resetForm();
         }}
       >
-        <DialogContent>
+        <DialogContent aria-describedby={undefined}>
           <DialogHeader>
             <DialogTitle>Edit redirect</DialogTitle>
           </DialogHeader>

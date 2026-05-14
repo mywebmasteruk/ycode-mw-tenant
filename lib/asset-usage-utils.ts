@@ -50,6 +50,33 @@ function linkHasAssetId(link: any, assetId: string): boolean {
 }
 
 /**
+ * Check if a CMS link field JSON value references an asset ID
+ */
+function collectionLinkValueHasAsset(jsonValue: string, assetId: string): boolean {
+  if (!jsonValue || !jsonValue.startsWith('{')) return false;
+  try {
+    const parsed = JSON.parse(jsonValue);
+    return parsed?.type === 'asset' && parsed?.asset?.id === assetId;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Null out asset reference in a CMS link field JSON value.
+ * Returns the updated JSON string with asset.id set to null.
+ */
+function nullifyAssetInCollectionLinkValue(jsonValue: string): string {
+  try {
+    const parsed = JSON.parse(jsonValue);
+    parsed.asset = { id: null };
+    return JSON.stringify(parsed);
+  } catch {
+    return jsonValue;
+  }
+}
+
+/**
  * Scan rich text content for asset references
  */
 function richTextContainsAsset(content: any, assetId: string): boolean {
@@ -378,6 +405,99 @@ export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> 
     }
   }
 
+  // Check CMS link field values that embed an asset reference in JSON
+  const { data: linkFields, error: linkFieldsError } = await client
+    .from('collection_fields')
+    .select('id, collection_id')
+    .eq('type', 'link')
+    .eq('is_published', false)
+    .is('deleted_at', null);
+
+  if (linkFieldsError) {
+    throw new Error(`Failed to fetch link fields: ${linkFieldsError.message}`);
+  }
+
+  if (linkFields && linkFields.length > 0) {
+    const linkFieldIds = linkFields.map((f) => f.id);
+
+    // Fetch values that contain the asset ID substring (pre-filter)
+    const { data: linkItemValues, error: linkValuesError } = await client
+      .from('collection_item_values')
+      .select('item_id, value')
+      .in('field_id', linkFieldIds)
+      .like('value', `%${assetId}%`)
+      .eq('is_published', false)
+      .is('deleted_at', null);
+
+    if (linkValuesError) {
+      throw new Error(`Failed to fetch link field values: ${linkValuesError.message}`);
+    }
+
+    // Parse JSON and verify it's actually an asset link
+    const linkItemIds = (linkItemValues || [])
+      .filter((v) => v.value && collectionLinkValueHasAsset(v.value, assetId))
+      .map((v) => v.item_id);
+
+    const uniqueLinkItemIds = [...new Set(linkItemIds)].filter(
+      (id) => !cmsItemEntries.some((e) => e.id === id)
+    );
+
+    if (uniqueLinkItemIds.length > 0) {
+      const { data: linkItems, error: linkItemsError } = await client
+        .from('collection_items')
+        .select('id, collection_id')
+        .in('id', uniqueLinkItemIds)
+        .eq('is_published', false)
+        .is('deleted_at', null);
+
+      if (linkItemsError) {
+        throw new Error(`Failed to fetch link items: ${linkItemsError.message}`);
+      }
+
+      const linkCollectionIds = [...new Set((linkItems || []).map((i) => i.collection_id))];
+
+      // Get display fields for these collections
+      const { data: linkAllFields } = await client
+        .from('collection_fields')
+        .select('id, key, type, fillable, collection_id')
+        .in('collection_id', linkCollectionIds)
+        .eq('is_published', false)
+        .is('deleted_at', null);
+
+      const linkDisplayFieldByCollection: Record<string, { id: string }> = {};
+      for (const collectionId of linkCollectionIds) {
+        const fields = (linkAllFields || []).filter((f) => f.collection_id === collectionId);
+        const displayField = findDisplayField(fields as any);
+        if (displayField) {
+          linkDisplayFieldByCollection[collectionId] = { id: displayField.id };
+        }
+      }
+
+      const linkDisplayFieldIds = Object.values(linkDisplayFieldByCollection).map((f) => f.id);
+      const { data: linkDisplayValues } = await client
+        .from('collection_item_values')
+        .select('item_id, field_id, value')
+        .in('item_id', uniqueLinkItemIds)
+        .in('field_id', linkDisplayFieldIds)
+        .eq('is_published', false)
+        .is('deleted_at', null);
+
+      const linkValueByItem: Record<string, string> = {};
+      linkDisplayValues?.forEach((row: any) => {
+        linkValueByItem[`${row.item_id}:${row.field_id}`] = row.value ?? '';
+      });
+
+      for (const item of linkItems || []) {
+        const displayField = linkDisplayFieldByCollection[item.collection_id];
+        const name =
+          displayField && linkValueByItem[`${item.id}:${displayField.id}`]
+            ? linkValueByItem[`${item.id}:${displayField.id}`]
+            : 'Untitled';
+        cmsItemEntries.push({ id: item.id, name, collectionId: item.collection_id, collectionName: '' });
+      }
+    }
+  }
+
   // Check collection field defaults that reference this asset
   const fieldDefaultEntries: FieldDefaultUsageEntry[] = [];
   const assetFieldsWithDefaults = await fetchAssetFieldsWithDefaults(client);
@@ -599,12 +719,84 @@ export async function getBulkAssetUsage(
     cmsCollectionIds = [...new Set(Object.values(itemCollectionById))];
   }
 
+  // Check CMS link field values that embed asset references in JSON
+  const { data: linkFields, error: linkFieldsError } = await client
+    .from('collection_fields')
+    .select('id')
+    .eq('type', 'link')
+    .eq('is_published', false)
+    .is('deleted_at', null);
+
+  if (linkFieldsError) {
+    throw new Error(`Failed to fetch link fields: ${linkFieldsError.message}`);
+  }
+
+  if (linkFields && linkFields.length > 0) {
+    const linkFieldIds = linkFields.map((f) => f.id);
+
+    // Fetch link values that contain any of the asset IDs (pre-filter with OR of LIKE patterns)
+    // For bulk, we check each asset individually since LIKE doesn't support IN
+    for (const assetId of assetIds) {
+      const { data: linkItemValues } = await client
+        .from('collection_item_values')
+        .select('item_id, value')
+        .in('field_id', linkFieldIds)
+        .like('value', `%${assetId}%`)
+        .eq('is_published', false)
+        .is('deleted_at', null);
+
+      for (const v of linkItemValues || []) {
+        if (v.value && collectionLinkValueHasAsset(v.value, assetId)) {
+          const alreadyTracked = results[assetId].cmsItems.some((e) => e.id === v.item_id);
+          if (!alreadyTracked) {
+            results[assetId].cmsItems.push({
+              id: v.item_id,
+              name: 'Untitled',
+              collectionId: '',
+              collectionName: '',
+            });
+          }
+        }
+      }
+    }
+
+    // Resolve collection IDs for newly added link CMS items
+    const linkItemIds = new Set<string>();
+    for (const assetId of assetIds) {
+      for (const entry of results[assetId].cmsItems) {
+        if (!entry.collectionId) linkItemIds.add(entry.id);
+      }
+    }
+
+    if (linkItemIds.size > 0) {
+      const { data: linkItems } = await client
+        .from('collection_items')
+        .select('id, collection_id')
+        .in('id', [...linkItemIds])
+        .eq('is_published', false)
+        .is('deleted_at', null);
+
+      const linkItemCollectionById: Record<string, string> = {};
+      (linkItems || []).forEach((i: any) => {
+        linkItemCollectionById[i.id] = i.collection_id;
+      });
+
+      for (const assetId of assetIds) {
+        for (const entry of results[assetId].cmsItems) {
+          if (!entry.collectionId && linkItemCollectionById[entry.id]) {
+            entry.collectionId = linkItemCollectionById[entry.id];
+            cmsCollectionIds.push(entry.collectionId);
+          }
+        }
+      }
+    }
+  }
+
   // Check collection field defaults
   const assetFieldsWithDefaults = await fetchAssetFieldsWithDefaults(client);
 
   for (const field of assetFieldsWithDefaults) {
     const defaultVal = field.default as string;
-    // Parse once per field, reuse for all asset IDs
     const parsedIds = parseDefaultAssetIds(defaultVal);
     for (const assetId of assetIds) {
       if (fieldDefaultReferencesAsset(defaultVal, assetId, parsedIds)) {
@@ -953,7 +1145,52 @@ export async function cleanupAssetReferences(assetId: string): Promise<AssetClea
     }
   }
 
-  // 5. Update collection field defaults that reference this asset
+  // 5. Update CMS link field values that embed asset references in JSON
+  const { data: linkFields, error: linkFieldsError } = await client
+    .from('collection_fields')
+    .select('id')
+    .eq('type', 'link')
+    .eq('is_published', false)
+    .is('deleted_at', null);
+
+  if (linkFieldsError) {
+    throw new Error(`Failed to fetch link fields: ${linkFieldsError.message}`);
+  }
+
+  if (linkFields && linkFields.length > 0) {
+    const linkFieldIds = linkFields.map((f) => f.id);
+
+    const { data: linkItemValues, error: linkValuesError } = await client
+      .from('collection_item_values')
+      .select('id, value')
+      .in('field_id', linkFieldIds)
+      .like('value', `%${assetId}%`)
+      .eq('is_published', false)
+      .is('deleted_at', null);
+
+    if (linkValuesError) {
+      console.error('Failed to fetch link field values:', linkValuesError);
+    } else {
+      for (const row of linkItemValues || []) {
+        if (!row.value || !collectionLinkValueHasAsset(row.value, assetId)) continue;
+
+        const cleanedValue = nullifyAssetInCollectionLinkValue(row.value);
+        const { error: updateError } = await client
+          .from('collection_item_values')
+          .update({ value: cleanedValue, updated_at: new Date().toISOString() })
+          .eq('id', row.id)
+          .eq('is_published', false);
+
+        if (updateError) {
+          console.error(`Failed to update link field value ${row.id}:`, updateError);
+        } else {
+          cmsItemsUpdated++;
+        }
+      }
+    }
+  }
+
+  // 6. Update collection field defaults that reference this asset
   let fieldDefaultsUpdated = 0;
   const assetFieldsWithDefaults = await fetchAssetFieldsWithDefaults(client, 'id, default');
 

@@ -20,6 +20,16 @@ let browserClient: SupabaseClient | null = null;
 let configPromise: Promise<{ url: string; anonKey: string } | null> | null = null;
 
 /**
+ * Reset cached client and config.
+ * Call after credentials change (e.g. during setup) so the next
+ * createBrowserClient() picks up the new config from the server.
+ */
+export function resetBrowserClient(): void {
+  browserClient = null;
+  configPromise = null;
+}
+
+/**
  * Get config from API endpoint.
  * Cached to avoid multiple requests. Returns null if not configured (404).
  */
