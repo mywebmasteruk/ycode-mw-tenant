@@ -1,3 +1,4 @@
+import { getUpdateTenantContext } from '@/lib/masjidweb/update-tenant-access';
 import YCodeLayoutClient from './YCodeLayoutClient';
 
 /**
@@ -13,6 +14,8 @@ import YCodeLayoutClient from './YCodeLayoutClient';
 // This prevents useSearchParams errors during build
 export const dynamic = 'force-dynamic';
 
-export default function YCodeLayout({ children }: { children: React.ReactNode }) {
-  return <YCodeLayoutClient>{children}</YCodeLayoutClient>;
+export default async function YCodeLayout({ children }: { children: React.ReactNode }) {
+  const { isTemplateTenant } = await getUpdateTenantContext();
+
+  return <YCodeLayoutClient isTemplateTenant={isTemplateTenant}>{children}</YCodeLayoutClient>;
 }

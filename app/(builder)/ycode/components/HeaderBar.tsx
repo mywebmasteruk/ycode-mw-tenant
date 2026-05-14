@@ -57,6 +57,7 @@ interface HeaderBarProps {
   onExitComponentEditMode?: () => void;
   onPublishSuccess: () => void;
   isSettingsRoute?: boolean;
+  isTemplateTenant: boolean;
 }
 
 export default function HeaderBar({
@@ -78,6 +79,7 @@ export default function HeaderBar({
   onExitComponentEditMode,
   onPublishSuccess,
   isSettingsRoute = false,
+  isTemplateTenant,
 }: HeaderBarProps) {
   const router = useRouter();
   const pathname = usePathname();
@@ -133,8 +135,13 @@ export default function HeaderBar({
     setBaseUrl(window.location.protocol + '//' + window.location.host);
   }, []);
 
-  // Check for updates on mount
+  // Check for updates only for template tenants.
   useEffect(() => {
+    if (!isTemplateTenant) {
+      setHasUpdate(false);
+      return;
+    }
+
     const checkForUpdates = async () => {
       try {
         const response = await fetch('/ycode/api/updates/check');
@@ -147,7 +154,7 @@ export default function HeaderBar({
       }
     };
     checkForUpdates();
-  }, []);
+  }, [isTemplateTenant]);
 
   // Get selected locale (computed from subscribed store values)
   const selectedLocale = useMemo(() => {
@@ -537,7 +544,7 @@ export default function HeaderBar({
           </a>
         </Button>
 
-        {hasUpdate && (
+        {isTemplateTenant && hasUpdate && (
           <>
             <div className="h-5">
               <Separator orientation="vertical" />

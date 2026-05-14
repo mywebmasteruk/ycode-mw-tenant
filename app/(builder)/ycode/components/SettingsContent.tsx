@@ -3,13 +3,14 @@
 import React from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { cn } from '@/lib/utils';
-import { SETTINGS_NAV_ITEMS } from '@/lib/settings-nav-items';
+import { getSettingsNavItemsForTenant } from '@/lib/settings-nav-items';
 
 interface SettingsContentProps {
   children: React.ReactNode;
+  isTemplateTenant: boolean;
 }
 
-export default function SettingsContent({ children }: SettingsContentProps) {
+export default function SettingsContent({ children, isTemplateTenant }: SettingsContentProps) {
   const pathname = usePathname();
   const router = useRouter();
 
@@ -23,7 +24,7 @@ export default function SettingsContent({ children }: SettingsContentProps) {
 
         <div className="flex-1 overflow-y-auto">
           <div className="space-y-0">
-            {SETTINGS_NAV_ITEMS.map((item) => {
+            {getSettingsNavItemsForTenant(isTemplateTenant).map((item) => {
               const isActive = pathname === item.path;
 
               return (

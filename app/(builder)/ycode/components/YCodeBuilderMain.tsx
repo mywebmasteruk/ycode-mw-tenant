@@ -93,9 +93,10 @@ import { Alert, AlertTitle } from '@/components/ui/alert';
 
 interface YCodeBuilderProps {
   children?: React.ReactNode;
+  isTemplateTenant: boolean;
 }
 
-export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCodeBuilderProps) {
+export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilderProps) {
   const router = useRouter();
   const { routeType, resourceId, sidebarTab, navigateToLayers, navigateToCollection, navigateToCollections, navigateToComponent, urlState, updateQueryParams } = useEditorUrl();
 
@@ -1875,13 +1876,14 @@ export default function YCodeBuilder({ children }: YCodeBuilderProps = {} as YCo
           useCollectionsStore.getState().reloadCurrentItems();
         }}
         isSettingsRoute={routeType === 'settings' || routeType === 'localization' || routeType === 'profile' || routeType === 'forms' || routeType === 'integrations'}
+        isTemplateTenant={isTemplateTenant}
       />
 
       {/* Main Content Area */}
       <div className="flex-1 flex overflow-hidden">
         {/* Settings Route - Render Settings Content */}
         {routeType === 'settings' ? (
-          <SettingsContent>{children}</SettingsContent>
+          <SettingsContent isTemplateTenant={isTemplateTenant}>{children}</SettingsContent>
         ) : routeType === 'localization' ? (
           <LocalizationContent>{children}</LocalizationContent>
         ) : routeType === 'profile' ? (

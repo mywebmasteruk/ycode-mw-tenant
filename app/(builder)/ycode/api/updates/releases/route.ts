@@ -1,5 +1,6 @@
 import packageJson from '../../../../../../package.json';
 import { noCache } from '@/lib/api-response';
+import { requireTemplateTenantForUpdates } from '@/lib/masjidweb/update-tenant-access';
 
 const UPSTREAM_REPO = 'ycode/ycode'; // Official Ycode repo
 const CURRENT_VERSION = packageJson.version;
@@ -34,6 +35,9 @@ interface Release {
  * Fetch all releases from the official Ycode repository
  */
 export async function GET() {
+  const forbidden = await requireTemplateTenantForUpdates();
+  if (forbidden) return forbidden;
+
   try {
     // Fetch all releases from upstream repo
     const response = await fetch(

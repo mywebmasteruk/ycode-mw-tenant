@@ -17,3 +17,7 @@ export const SETTINGS_NAV_ITEMS: SettingsNavItem[] = [
   { id: 'templates', label: 'Templates', path: '/ycode/settings/templates' },
   { id: 'updates', label: 'Updates', path: '/ycode/settings/updates' },
 ];
+
+export function getSettingsNavItemsForTenant(isTemplateTenant: boolean): SettingsNavItem[] {
+  return SETTINGS_NAV_ITEMS.filter((item) => item.id !== 'updates' || isTemplateTenant);
+}
