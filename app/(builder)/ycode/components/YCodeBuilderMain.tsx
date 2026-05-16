@@ -60,6 +60,7 @@ import { useLiveComponentUpdates } from '@/hooks/use-live-component-updates';
 import { useLiveLayerStyleUpdates } from '@/hooks/use-live-layer-style-updates';
 
 // 4. Stores
+import { isSessionInvalidError } from '@/lib/masjidweb/session-error';
 import { useAuthStore } from '@/stores/useAuthStore';
 import { useClipboardStore } from '@/stores/useClipboardStore';
 import { useEditorStore } from '@/stores/useEditorStore';
@@ -476,8 +477,8 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
           if (response.error) {
             console.error('[Editor] Error loading initial data:', response.error);
 
-            if (response.error === 'Not authenticated') {
-              toast.error('You have been disconnected, please log in again');
+            if (isSessionInvalidError(response.error)) {
+              toast.error('Please log in to this tenant to continue');
               useAuthStore.getState().signOut();
             }
 

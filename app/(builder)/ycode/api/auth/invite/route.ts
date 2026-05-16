@@ -50,10 +50,11 @@ export async function POST(request: NextRequest) {
 
     const redirect = resolveInviteRedirectUrl(request, redirectTo);
 
+    const invitedAt = new Date().toISOString();
     const { data, error } = await client.auth.admin.inviteUserByEmail(email, {
       redirectTo: redirect,
       data: {
-        invited_at: new Date().toISOString(),
+        invited_at: invitedAt,
         tenant_id: tenantId,
         ...(tenantSlug ? { tenant_slug: tenantSlug } : {}),
       },
@@ -68,7 +69,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (data.user?.id) {
-      const { error: metadataError } = await client.auth.admin.updateUserById(
+      const { error: updateError } = await client.auth.admin.updateUserById(
         data.user.id,
         {
           app_metadata: {
@@ -78,17 +79,17 @@ export async function POST(request: NextRequest) {
           },
           user_metadata: {
             ...(data.user.user_metadata || {}),
-            invited_at: data.user.user_metadata?.invited_at || new Date().toISOString(),
+            invited_at: data.user.user_metadata?.invited_at || invitedAt,
             tenant_id: tenantId,
             ...(tenantSlug ? { tenant_slug: tenantSlug } : {}),
           },
         },
       );
 
-      if (metadataError) {
-        console.error('[invite] Error assigning tenant metadata:', metadataError);
+      if (updateError) {
+        console.error('[invite] Error tagging invited user with tenant metadata:', updateError);
         return noCache(
-          { error: metadataError.message },
+          { error: updateError.message },
           500
         );
       }

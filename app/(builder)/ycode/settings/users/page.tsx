@@ -20,6 +20,7 @@ import {
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Spinner } from '@/components/ui/spinner';
 import { getUserInitials, generateUserColor } from '@/lib/collaboration-utils';
+import { isSessionInvalidError } from '@/lib/masjidweb/session-error';
 import { useAuthStore } from '@/stores/useAuthStore';
 
 interface ActiveUser {
@@ -64,6 +65,16 @@ export default function UsersSettingsPage() {
     try {
       const response = await fetch('/ycode/api/auth/users');
       const result = await response.json();
+
+      if (!response.ok || result.error) {
+        if (isSessionInvalidError(result.error)) {
+          await useAuthStore.getState().signOut();
+          return;
+        }
+        console.error('Failed to fetch users:', result.error || response.statusText);
+        return;
+      }
+
       if (result.data) {
         setActiveUsers(result.data.activeUsers || []);
         setPendingInvites(result.data.pendingInvites || []);

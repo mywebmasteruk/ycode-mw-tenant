@@ -140,7 +140,7 @@ export async function DELETE(request: NextRequest) {
     const { data: targetUser, error: getUserError } = await client.auth.admin.getUserById(userId);
 
     if (getUserError) {
-      console.error('[users] Error fetching user before delete:', getUserError);
+      console.error('[users] Error finding user:', getUserError);
       return noCache(
         { error: getUserError.message },
         400

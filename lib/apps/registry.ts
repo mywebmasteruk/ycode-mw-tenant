@@ -17,8 +17,8 @@ import mailerliteLogo from './mailerlite/logo.svg';
 import mailchimpLogo from './mailchimp/logo.svg';
 import zapierLogo from './zapier/logo.svg';
 import makeLogo from './make/logo.svg';
-import mapboxLogo from './mapbox/logo.png';
-import googleMapsEmbedLogo from './google-maps-embed/logo.png';
+import mapboxLogo from './mapbox/logo.svg';
+import googleMapsEmbedLogo from './google-maps-embed/logo.svg';
 
 // =============================================================================
 // Types
