@@ -45,6 +45,35 @@ async function requirePersistedSession(
   return null;
 }
 
+async function persistMagicLinkSessionOnServer(
+  accessToken: string,
+  refreshToken: string,
+): Promise<InviteVerificationResult> {
+  const response = await fetch('/ycode/api/auth/session', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accessToken, refreshToken }),
+  });
+
+  const payload = await response.json().catch(() => null) as {
+    data?: { user?: { email?: string | null } };
+    error?: string;
+  } | null;
+
+  if (!response.ok || !payload?.data?.user) {
+    return {
+      ok: false,
+      message: payload?.error || 'Authentication link was accepted, but the session could not be saved. Please request a new link.',
+    };
+  }
+
+  return {
+    ok: true,
+    email: payload.data.user.email ?? null,
+    next: 'open-builder',
+  };
+}
+
 async function verifyInviteFromUrl(
   supabase: NonNullable<Awaited<ReturnType<typeof createBrowserClient>>>,
 ): Promise<InviteVerificationResult> {
@@ -63,6 +92,10 @@ async function verifyInviteFromUrl(
   const accessToken = hashParams.get('access_token');
   const refreshToken = hashParams.get('refresh_token');
   if ((isInvite || isMagicLink) && accessToken && refreshToken) {
+    if (isMagicLink) {
+      return persistMagicLinkSessionOnServer(accessToken, refreshToken);
+    }
+
     const { data, error } = await supabase.auth.setSession({
       access_token: accessToken,
       refresh_token: refreshToken,
@@ -80,7 +113,7 @@ async function verifyInviteFromUrl(
     return {
       ok: true,
       email: data.user?.email ?? null,
-      next: isMagicLink ? 'open-builder' : 'set-password',
+      next: 'set-password',
     };
   }
 
