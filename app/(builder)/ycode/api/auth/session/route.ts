@@ -1,4 +1,4 @@
-import { createServerClient, type CookieOptions } from '@supabase/ssr';
+import { createServerClient, serializeCookieHeader, type CookieOptions } from '@supabase/ssr';
 import { NextRequest, NextResponse } from 'next/server';
 import { createRouteClient } from '@/lib/supabase-route-client';
 import { noCache } from '@/lib/api-response';
@@ -32,11 +32,17 @@ function authJson<T>(data: T, status = 200): NextResponse<T> {
   });
 }
 
+function appendCookie(response: NextResponse, name: string, value: string, options: CookieOptions): void {
+  response.headers.append('Set-Cookie', serializeCookieHeader(name, value, options));
+}
+
 function appendHostOnlyCookieDeletion(response: NextResponse, name: string): void {
-  response.headers.append(
-    'Set-Cookie',
-    `${name}=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; SameSite=Lax`,
-  );
+  appendCookie(response, name, '', {
+    path: '/',
+    expires: new Date(0),
+    maxAge: 0,
+    sameSite: 'lax',
+  });
 }
 
 /**
@@ -135,8 +141,10 @@ export async function POST(request: NextRequest) {
     });
 
     pendingCookies.forEach(({ name, value, options }) => {
-      response.cookies.set(name, value, options);
+      appendCookie(response, name, value, options);
+    });
 
+    pendingCookies.forEach(({ name, options }) => {
       if (options.domain) {
         appendHostOnlyCookieDeletion(response, name);
       }
