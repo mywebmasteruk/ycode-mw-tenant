@@ -78,6 +78,7 @@ async function getOrCreateClient(): Promise<SupabaseClient | null> {
       ? supabaseCookieOptionsForHost(
         window.location.hostname,
         tenantDomainSuffixFromEnv(),
+        config.url,
       )
       : undefined;
 

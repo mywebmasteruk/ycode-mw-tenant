@@ -43,7 +43,11 @@ async function verifyApiAuth(request: NextRequest): Promise<ApiAuthResult> {
 
   let response = NextResponse.next({ request });
 
-  const cookieOpts = supabaseCookieOptionsForRequestHeaders(request.headers);
+  const cookieOpts = supabaseCookieOptionsForRequestHeaders(
+    request.headers,
+    undefined,
+    config.url,
+  );
 
   const supabase = createServerClient(config.url, config.anonKey, {
     cookies: {
@@ -159,6 +163,8 @@ export async function proxy(request: NextRequest) {
       try {
         const apexCookieOpts = supabaseCookieOptionsForRequestHeaders(
           request.headers,
+          undefined,
+          sbConfig.url,
         );
         const supabase = createServerClient(sbConfig.url, sbConfig.anonKey, {
           cookies: {

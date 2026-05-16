@@ -23,7 +23,11 @@ export function createBuilderSupabaseReadOnly(
   const config = getSupabaseEnvConfig();
   if (!config) return null;
 
-  const cookieOpts = supabaseCookieOptionsForRequestHeaders(request.headers);
+  const cookieOpts = supabaseCookieOptionsForRequestHeaders(
+    request.headers,
+    undefined,
+    config.url,
+  );
 
   return createServerClient(config.url, config.anonKey, {
     cookies: {
@@ -44,7 +48,11 @@ export async function createBuilderSupabaseFromServerCookies(): Promise<Supabase
 
   const cookieStore = await cookies();
   const h = await headers();
-  const cookieOpts = supabaseCookieOptionsForRequestHeaders(h);
+  const cookieOpts = supabaseCookieOptionsForRequestHeaders(
+    h,
+    undefined,
+    config.url,
+  );
 
   return createServerClient(config.url, config.anonKey, {
     cookies: {

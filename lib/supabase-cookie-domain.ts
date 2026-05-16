@@ -29,10 +29,21 @@ export function requestHostname(headers: Headers): string {
   return host.replace(/:\d+$/, '');
 }
 
+export type SupabaseCookieOptions = {
+  domain?: string;
+  name?: string;
+};
+
+export function supabaseAuthCookieName(projectUrl: string): string {
+  const host = new URL(projectUrl).hostname;
+  return `sb-${host.split('.')[0]}-auth-token`;
+}
+
 export function supabaseCookieOptionsForHost(
   hostname: string,
   tenantDomainSuffix: string | undefined,
-): { domain: string } | undefined {
+  projectUrl?: string,
+): SupabaseCookieOptions | undefined {
   const suffix = (tenantDomainSuffix || '').trim().toLowerCase();
   if (!suffix) return undefined;
 
@@ -40,19 +51,24 @@ export function supabaseCookieOptionsForHost(
   if (!h || h === 'localhost' || h.endsWith('.localhost')) return undefined;
 
   if (h === suffix || h.endsWith(`.${suffix}`)) {
-    return { domain: `.${suffix}` };
+    return {
+      domain: `.${suffix}`,
+      ...(projectUrl ? { name: supabaseAuthCookieName(projectUrl) } : {}),
+    };
   }
 
-  return undefined;
+  return projectUrl ? { name: supabaseAuthCookieName(projectUrl) } : undefined;
 }
 
 /** Cookie options for SSR / Edge clients when tenant suffix env is set and host matches. */
 export function supabaseCookieOptionsForRequestHeaders(
   headers: Headers,
   tenantDomainSuffix: string | undefined = tenantDomainSuffixFromEnv(),
-): { domain: string } | undefined {
+  projectUrl?: string,
+): SupabaseCookieOptions | undefined {
   return supabaseCookieOptionsForHost(
     requestHostname(headers),
     tenantDomainSuffix,
+    projectUrl,
   );
 }

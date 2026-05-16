@@ -108,7 +108,11 @@ export async function POST(request: NextRequest) {
     }
 
     const parsed = parseSupabaseConfig(config);
-    const cookieOpts = supabaseCookieOptionsForRequestHeaders(request.headers);
+    const cookieOpts = supabaseCookieOptionsForRequestHeaders(
+      request.headers,
+      undefined,
+      parsed.projectUrl,
+    );
 
     const supabase = createServerClient(parsed.projectUrl, parsed.anonKey, {
       cookies: {
