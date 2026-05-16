@@ -1,7 +1,7 @@
 import { createServerClient, type CookieOptions } from '@supabase/ssr';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { NextRequest } from 'next/server';
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 import { getSupabaseEnvConfig } from '@/lib/tenant';
 import { supabaseCookieOptionsForRequestHeaders } from '@/lib/supabase-cookie-domain';
 
@@ -43,6 +43,8 @@ export async function createBuilderSupabaseFromServerCookies(): Promise<Supabase
   if (!config) return null;
 
   const cookieStore = await cookies();
+  const h = await headers();
+  const cookieOpts = supabaseCookieOptionsForRequestHeaders(h);
 
   return createServerClient(config.url, config.anonKey, {
     cookies: {
@@ -59,5 +61,6 @@ export async function createBuilderSupabaseFromServerCookies(): Promise<Supabase
         }
       },
     },
+    ...(cookieOpts ? { cookieOptions: cookieOpts } : {}),
   });
 }
