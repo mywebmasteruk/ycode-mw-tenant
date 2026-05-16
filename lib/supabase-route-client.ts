@@ -20,7 +20,11 @@ export async function createRouteClient(requestHeaders?: Headers) {
   const parsed = parseSupabaseConfig(config);
   const cookieStore = await cookies();
   const cookieOpts = requestHeaders
-    ? supabaseCookieOptionsForRequestHeaders(requestHeaders)
+    ? supabaseCookieOptionsForRequestHeaders(
+      requestHeaders,
+      undefined,
+      parsed.projectUrl,
+    )
     : null;
 
   return createServerClient(parsed.projectUrl, parsed.anonKey, {
