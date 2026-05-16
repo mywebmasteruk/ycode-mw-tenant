@@ -24,7 +24,7 @@ import {
 } from '@/components/ui/field';
 
 type InviteVerificationResult =
-  | { ok: true; email: string | null }
+  | { ok: true; email: string | null; next: 'set-password' | 'open-builder' }
   | { ok: false; message: string };
 
 async function verifyInviteFromUrl(
@@ -38,10 +38,13 @@ async function verifyInviteFromUrl(
   const typeFromHash = hashParams.get('type');
   const flowType = typeFromHash || typeFromQuery;
 
+  const isInvite = flowType === 'invite';
+  const isMagicLink = flowType === 'magiclink';
+
   // Flow A: legacy hash fragment with access + refresh tokens
   const accessToken = hashParams.get('access_token');
   const refreshToken = hashParams.get('refresh_token');
-  if (flowType === 'invite' && accessToken && refreshToken) {
+  if ((isInvite || isMagicLink) && accessToken && refreshToken) {
     const { data, error } = await supabase.auth.setSession({
       access_token: accessToken,
       refresh_token: refreshToken,
@@ -49,26 +52,34 @@ async function verifyInviteFromUrl(
     if (error) {
       return {
         ok: false,
-        message: 'Invalid or expired invitation link. Please request a new invite.',
+        message: 'Invalid or expired authentication link. Please request a new link.',
       };
     }
-    return { ok: true, email: data.user?.email ?? null };
+    return {
+      ok: true,
+      email: data.user?.email ?? null,
+      next: isMagicLink ? 'open-builder' : 'set-password',
+    };
   }
 
-  // Flow B: token_hash + type=invite (Supabase OTP verify flow)
+  // Flow B: token_hash + type=invite|magiclink (Supabase OTP verify flow)
   const tokenHash = query.get('token_hash');
-  if (flowType === 'invite' && tokenHash) {
+  if ((isInvite || isMagicLink) && tokenHash) {
     const { data, error } = await supabase.auth.verifyOtp({
-      type: 'invite',
+      type: isMagicLink ? 'magiclink' : 'invite',
       token_hash: tokenHash,
     });
     if (error) {
       return {
         ok: false,
-        message: 'Invalid or expired invitation link. Please request a new invite.',
+        message: 'Invalid or expired authentication link. Please request a new link.',
       };
     }
-    return { ok: true, email: data.user?.email ?? null };
+    return {
+      ok: true,
+      email: data.user?.email ?? null,
+      next: isMagicLink ? 'open-builder' : 'set-password',
+    };
   }
 
   // Flow C: code query param exchange (PKCE/code flow)
@@ -78,10 +89,14 @@ async function verifyInviteFromUrl(
     if (error) {
       return {
         ok: false,
-        message: 'Invalid or expired invitation link. Please request a new invite.',
+        message: 'Invalid or expired authentication link. Please request a new link.',
       };
     }
-    return { ok: true, email: data.user?.email ?? null };
+    return {
+      ok: true,
+      email: data.user?.email ?? null,
+      next: isMagicLink ? 'open-builder' : 'set-password',
+    };
   }
 
   return {
@@ -123,6 +138,10 @@ export default function AcceptInvitePage() {
 
         const verify = await verifyInviteFromUrl(supabase);
         if (verify.ok) {
+          if (verify.next === 'open-builder') {
+            router.push('/ycode');
+            return;
+          }
           setUserEmail(verify.email);
           setVerifying(false);
           return;
