@@ -32,6 +32,13 @@ function authJson<T>(data: T, status = 200): NextResponse<T> {
   });
 }
 
+function appendHostOnlyCookieDeletion(response: NextResponse, name: string): void {
+  response.headers.append(
+    'Set-Cookie',
+    `${name}=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; SameSite=Lax`,
+  );
+}
+
 /**
  * GET /ycode/api/auth/session
  *
@@ -129,6 +136,10 @@ export async function POST(request: NextRequest) {
 
     pendingCookies.forEach(({ name, value, options }) => {
       response.cookies.set(name, value, options);
+
+      if (options.domain) {
+        appendHostOnlyCookieDeletion(response, name);
+      }
     });
 
     return response;
