@@ -27,6 +27,24 @@ type InviteVerificationResult =
   | { ok: true; email: string | null; next: 'set-password' | 'open-builder' }
   | { ok: false; message: string };
 
+async function requirePersistedSession(
+  supabase: NonNullable<Awaited<ReturnType<typeof createBrowserClient>>>,
+): Promise<InviteVerificationResult | null> {
+  const {
+    data: { session },
+    error,
+  } = await supabase.auth.getSession();
+
+  if (error || !session?.user) {
+    return {
+      ok: false,
+      message: 'Authentication link was accepted, but the session could not be saved. Please request a new link.',
+    };
+  }
+
+  return null;
+}
+
 async function verifyInviteFromUrl(
   supabase: NonNullable<Awaited<ReturnType<typeof createBrowserClient>>>,
 ): Promise<InviteVerificationResult> {
@@ -55,6 +73,10 @@ async function verifyInviteFromUrl(
         message: 'Invalid or expired authentication link. Please request a new link.',
       };
     }
+
+    const persistedSessionError = await requirePersistedSession(supabase);
+    if (persistedSessionError) return persistedSessionError;
+
     return {
       ok: true,
       email: data.user?.email ?? null,
@@ -75,6 +97,10 @@ async function verifyInviteFromUrl(
         message: 'Invalid or expired authentication link. Please request a new link.',
       };
     }
+
+    const persistedSessionError = await requirePersistedSession(supabase);
+    if (persistedSessionError) return persistedSessionError;
+
     return {
       ok: true,
       email: data.user?.email ?? null,
@@ -92,6 +118,10 @@ async function verifyInviteFromUrl(
         message: 'Invalid or expired authentication link. Please request a new link.',
       };
     }
+
+    const persistedSessionError = await requirePersistedSession(supabase);
+    if (persistedSessionError) return persistedSessionError;
+
     return {
       ok: true,
       email: data.user?.email ?? null,
@@ -139,7 +169,7 @@ export default function AcceptInvitePage() {
         const verify = await verifyInviteFromUrl(supabase);
         if (verify.ok) {
           if (verify.next === 'open-builder') {
-            router.push('/ycode');
+            window.location.assign('/ycode');
             return;
           }
           setUserEmail(verify.email);
