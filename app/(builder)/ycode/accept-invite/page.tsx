@@ -74,6 +74,24 @@ async function persistMagicLinkSessionOnServer(
   };
 }
 
+async function persistMagicLinkHashBeforeSupabaseClient(): Promise<InviteVerificationResult | null> {
+  const hashParams = new URLSearchParams(window.location.hash.substring(1));
+  const flowType = hashParams.get('type');
+
+  if (flowType !== 'magiclink') {
+    return null;
+  }
+
+  const accessToken = hashParams.get('access_token');
+  const refreshToken = hashParams.get('refresh_token');
+
+  if (!accessToken || !refreshToken) {
+    return null;
+  }
+
+  return persistMagicLinkSessionOnServer(accessToken, refreshToken);
+}
+
 async function verifyInviteFromUrl(
   supabase: NonNullable<Awaited<ReturnType<typeof createBrowserClient>>>,
 ): Promise<InviteVerificationResult> {
@@ -191,6 +209,18 @@ export default function AcceptInvitePage() {
   useEffect(() => {
     const verifyInvite = async () => {
       try {
+        const magicLinkHashResult = await persistMagicLinkHashBeforeSupabaseClient();
+        if (magicLinkHashResult) {
+          if (magicLinkHashResult.ok) {
+            window.location.assign('/ycode');
+            return;
+          }
+
+          setError(magicLinkHashResult.message);
+          setVerifying(false);
+          return;
+        }
+
         const supabase = await createBrowserClient();
 
         if (!supabase) {

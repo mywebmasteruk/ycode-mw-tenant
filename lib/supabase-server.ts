@@ -6,6 +6,7 @@ import { credentials } from './credentials';
 import { parseSupabaseConfig } from './supabase-config-parser';
 import type { SupabaseConfig, SupabaseCredentials } from '@/types';
 import { withLimit } from './supabase-limiter';
+import { supabaseServerRealtimeOptions } from './supabase-server-options';
 
 /**
  * Supabase Server Client
@@ -92,6 +93,7 @@ export async function getSupabaseAdmin(): Promise<SupabaseClient | null> {
       autoRefreshToken: false,
       persistSession: false,
     },
+    realtime: supabaseServerRealtimeOptions,
     global: { fetch: limitedFetch },
   });
 
@@ -114,6 +116,7 @@ export async function testSupabaseConnection(
         autoRefreshToken: false,
         persistSession: false,
       },
+      realtime: supabaseServerRealtimeOptions,
     });
 
     const { error } = await client.auth.admin.listUsers({

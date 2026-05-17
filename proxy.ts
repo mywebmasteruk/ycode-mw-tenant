@@ -1,4 +1,4 @@
-import { createServerClient } from '@supabase/ssr';
+import { createServerClient, type CookieOptions } from '@supabase/ssr';
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import type { User } from '@supabase/supabase-js';
@@ -28,6 +28,12 @@ type ApiAuthResult =
   | { kind: 'unauthenticated'; response: NextResponse }
   | { kind: 'authenticated'; user: User };
 
+type CookieToSet = {
+  name: string;
+  value: string;
+  options: CookieOptions;
+};
+
 /**
  * Verify Supabase session for protected API / preview routes.
  */
@@ -54,7 +60,7 @@ async function verifyApiAuth(request: NextRequest): Promise<ApiAuthResult> {
       getAll() {
         return request.cookies.getAll();
       },
-      setAll(cookiesToSet) {
+      setAll(cookiesToSet: CookieToSet[]) {
         cookiesToSet.forEach(({ name, value }) => {
           request.cookies.set(name, value);
         });

@@ -6,6 +6,7 @@ import { credentials } from '@/lib/credentials';
 import { parseSupabaseConfig } from '@/lib/supabase-config-parser';
 import { supabaseCookieOptionsForRequestHeaders } from '@/lib/supabase-cookie-domain';
 import type { SupabaseConfig } from '@/types';
+import { supabaseServerRealtimeOptions } from '@/lib/supabase-server-options';
 
 type SessionPostBody = {
   accessToken?: unknown;
@@ -119,10 +120,11 @@ export async function POST(request: NextRequest) {
         getAll() {
           return request.cookies.getAll();
         },
-        setAll(cookiesToSet) {
+        setAll(cookiesToSet: CookieToSet[]) {
           pendingCookies.push(...cookiesToSet);
         },
       },
+      realtime: supabaseServerRealtimeOptions,
       ...(cookieOpts ? { cookieOptions: cookieOpts } : {}),
     });
 

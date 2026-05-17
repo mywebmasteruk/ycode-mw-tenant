@@ -35,28 +35,24 @@ interface YCodeLayoutClientProps {
   isTemplateTenant: boolean;
 }
 
+const prefixRoutes = ['/ycode/preview', '/ycode/devtools/'];
+const exactRoutes = ['/ycode/welcome', '/ycode/accept-invite'];
+
+function isStandaloneYcodeRoute(pathname: string): boolean {
+  return prefixRoutes.some(route => pathname.startsWith(route))
+    || exactRoutes.includes(pathname);
+}
+
 // Inner component that uses useSearchParams (via useEditorUrl)
-function YCodeLayoutInner({ children, isTemplateTenant }: YCodeLayoutClientProps) {
-  const pathname = usePathname();
+function YCodeEditorLayout({ children, isTemplateTenant }: YCodeLayoutClientProps) {
   const { routeType } = useEditorUrl();
   const { initialize } = useAuthStore();
 
-  // Initialize auth only within /ycode routes (not on public pages)
+  // Initialize auth only within editor routes. Auth callback pages need to handle
+  // URL tokens before any shared Supabase client touches the location hash.
   useEffect(() => {
     initialize();
   }, [initialize]);
-
-  // Exclude standalone routes from YCodeBuilder
-  // These routes should render independently without the editor UI
-  const prefixRoutes = ['/ycode/preview', '/ycode/devtools/'];
-  const exactRoutes = ['/ycode/welcome', '/ycode/accept-invite'];
-
-  if (
-    prefixRoutes.some(route => pathname?.startsWith(route))
-    || exactRoutes.includes(pathname || '')
-  ) {
-    return <>{children}</>;
-  }
 
   // For settings, localization, profile, forms, and integrations routes, pass children to YCodeBuilder so it can render them
   if (routeType === 'settings' || routeType === 'localization' || routeType === 'profile' || routeType === 'forms' || routeType === 'integrations') {
@@ -71,9 +67,20 @@ function YCodeLayoutInner({ children, isTemplateTenant }: YCodeLayoutClientProps
 // Client layout wrapped in Suspense to handle useSearchParams
 // Required by Next.js 14+ to prevent static rendering bailout
 export default function YCodeLayoutClient({ children, isTemplateTenant }: YCodeLayoutClientProps) {
+  const pathname = usePathname();
+  const resolvedPathname = pathname || (typeof window !== 'undefined' ? window.location.pathname : '');
+
+  if (!resolvedPathname) {
+    return null;
+  }
+
+  if (isStandaloneYcodeRoute(resolvedPathname)) {
+    return <>{children}</>;
+  }
+
   return (
     <Suspense fallback={null}>
-      <YCodeLayoutInner isTemplateTenant={isTemplateTenant}>{children}</YCodeLayoutInner>
+      <YCodeEditorLayout isTemplateTenant={isTemplateTenant}>{children}</YCodeEditorLayout>
     </Suspense>
   );
 }

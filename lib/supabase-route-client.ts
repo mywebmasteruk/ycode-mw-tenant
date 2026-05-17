@@ -4,6 +4,7 @@ import { credentials } from './credentials';
 import { supabaseCookieOptionsForRequestHeaders } from '@/lib/supabase-cookie-domain';
 import { parseSupabaseConfig } from './supabase-config-parser';
 import type { SupabaseConfig } from '@/types';
+import { supabaseServerRealtimeOptions } from '@/lib/supabase-server-options';
 
 /**
  * Create a Supabase server client for use in Next.js route handlers.
@@ -39,6 +40,7 @@ export async function createRouteClient(requestHeaders?: Headers) {
         cookieStore.set({ name, value: '', ...options });
       },
     },
+    realtime: supabaseServerRealtimeOptions,
     ...(cookieOpts ? { cookieOptions: cookieOpts } : {}),
   });
 }

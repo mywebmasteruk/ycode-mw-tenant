@@ -4,6 +4,7 @@ import type { NextRequest } from 'next/server';
 import { cookies, headers } from 'next/headers';
 import { getSupabaseEnvConfig } from '@/lib/tenant';
 import { supabaseCookieOptionsForRequestHeaders } from '@/lib/supabase-cookie-domain';
+import { supabaseServerRealtimeOptions } from '@/lib/supabase-server-options';
 
 /**
  * Supabase client using the **anon key + user session** (RLS applies for `authenticated`).
@@ -38,6 +39,7 @@ export function createBuilderSupabaseReadOnly(
         /* read-only: no session refresh persistence */
       },
     },
+    realtime: supabaseServerRealtimeOptions,
     ...(cookieOpts ? { cookieOptions: cookieOpts } : {}),
   });
 }
@@ -69,6 +71,7 @@ export async function createBuilderSupabaseFromServerCookies(): Promise<Supabase
         }
       },
     },
+    realtime: supabaseServerRealtimeOptions,
     ...(cookieOpts ? { cookieOptions: cookieOpts } : {}),
   });
 }

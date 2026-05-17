@@ -3,18 +3,25 @@
  * Creates a Supabase client from cookies and verifies the session.
  */
 
-import { createServerClient } from '@supabase/ssr';
+import { createServerClient, type CookieOptions } from '@supabase/ssr';
 import { cookies, headers } from 'next/headers';
 import { supabaseCookieOptionsForRequestHeaders } from '@/lib/supabase-cookie-domain';
 import { credentials } from '@/lib/credentials';
 import { parseSupabaseConfig } from '@/lib/supabase-config-parser';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
 import type { SupabaseConfig } from '@/types';
+import { supabaseServerRealtimeOptions } from '@/lib/supabase-server-options';
 
 interface AuthResult {
   user: User;
   client: SupabaseClient;
 }
+
+type CookieToSet = {
+  name: string;
+  value: string;
+  options: CookieOptions;
+};
 
 /**
  * Get the authenticated user and Supabase client from request cookies.
@@ -35,12 +42,13 @@ export async function getAuthUser(): Promise<AuthResult | null> {
         getAll() {
           return cookieStore.getAll();
         },
-        setAll(cookiesToSet) {
+        setAll(cookiesToSet: CookieToSet[]) {
           cookiesToSet.forEach(({ name, value, options }) => {
             cookieStore.set({ name, value, ...options });
           });
         },
       },
+      realtime: supabaseServerRealtimeOptions,
       ...(cookieOpts ? { cookieOptions: cookieOpts } : {}),
     });
 

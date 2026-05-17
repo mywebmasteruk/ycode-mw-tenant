@@ -83,6 +83,9 @@ async function getOrCreateClient(): Promise<SupabaseClient | null> {
       : undefined;
 
   browserClient = createSupabaseBrowserClient(config.url, config.anonKey, {
+    auth: {
+      detectSessionInUrl: false,
+    },
     ...(cookieOpts ? { cookieOptions: cookieOpts } : {}),
   });
   return browserClient;
