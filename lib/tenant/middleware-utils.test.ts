@@ -57,7 +57,9 @@ describe('isPublicApiRoute', () => {
 
   it('allows auth bootstrap routes', () => {
     expect(isPublicApiRoute('/ycode/api/auth/session', 'GET')).toBe(true);
+    expect(isPublicApiRoute('/ycode/api/auth/session', 'POST')).toBe(true);
     expect(isPublicApiRoute('/ycode/api/auth/callback', 'GET')).toBe(true);
+    expect(isPublicApiRoute('/ycode/api/auth/callback', 'POST')).toBe(true);
   });
 
   it('keeps sensitive auth management routes protected', () => {
@@ -66,8 +68,10 @@ describe('isPublicApiRoute', () => {
     expect(isPublicApiRoute('/ycode/api/auth/invite', 'POST')).toBe(false);
   });
 
-  it('allows v1 public API', () => {
+  it('allows v1 public API before route-level API key validation', () => {
     expect(isPublicApiRoute('/ycode/api/v1/pages', 'GET')).toBe(true);
+    expect(isPublicApiRoute('/ycode/api/v1/collections', 'POST')).toBe(true);
+    expect(isPublicApiRoute('/ycode/api/v1/forms/form-1/submissions', 'POST')).toBe(true);
   });
 
   it('allows revalidate', () => {

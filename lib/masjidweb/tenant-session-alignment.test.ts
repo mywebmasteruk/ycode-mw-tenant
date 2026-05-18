@@ -54,6 +54,20 @@ describe('tenantJwtHeaderMismatchReason', () => {
     expect(tenantJwtHeaderMismatchReason('legacy-tenant', u)).toBe('tenant_mismatch');
   });
 
+  it('ignores non-string tenant metadata for backward compatibility', () => {
+    const u = {
+      ...userWithTenant('legacy-tenant'),
+      app_metadata: { tenant_id: 123 },
+      user_metadata: { tenant_id: 456 },
+    } as unknown as User;
+
+    expect(tenantJwtHeaderMismatchReason('123', u)).toBeNull();
+  });
+
+  it('trims header and JWT tenant IDs before comparing', () => {
+    expect(tenantJwtHeaderMismatchReason(' app-tenant ', userWithTenant('  APP-TENANT  '))).toBeNull();
+  });
+
   it('returns null when both match (case-insensitive)', () => {
     const id = '2FFF887D-A78E-4256-9116-6E02FE38C614';
     expect(
