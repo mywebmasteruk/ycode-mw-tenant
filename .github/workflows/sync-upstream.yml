@@ -1,32 +1,157 @@
-name: Sync fork from upstream (daily)
+name: Create safe Ycode update PR
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: "0 6 * * *" # 06:00 UTC every day
-  workflow_dispatch: # allow manual trigger
+    - cron: "0 6 * * *"
 
 permissions:
   contents: write
+  pull-requests: write
+  issues: write
 
 jobs:
-  sync:
+  create-update-pr:
     runs-on: ubuntu-latest
     steps:
-      - name: Sync fork's main from ycode/ycode
+      - name: Check out MasjidWeb fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream Ycode
+        run: |
+          git remote add upstream https://github.com/ycode/ycode.git 2>/dev/null || git remote set-url upstream https://github.com/ycode/ycode.git
+          git fetch upstream --tags
+
+      - name: Prepare update branch
+        id: branch
+        run: |
+          latest_tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1)"
+          if [ -z "$latest_tag" ]; then
+            latest_tag="$(git rev-parse --short upstream/main)"
+          fi
+          safe_tag="$(echo "$latest_tag" | tr '/' '-')"
+          branch="safe-ycode-update/${safe_tag}"
+          git checkout -B "$branch" origin/main
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=$latest_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Merge upstream into update branch
+        id: merge
+        continue-on-error: true
+        run: |
+          set +e
+          git merge --no-ff --no-edit upstream/main
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          git diff --name-only --diff-filter=U > /tmp/update-conflicts.txt
+          exit 0
+
+      - name: Write conflict safety report
+        if: steps.merge.outputs.status != '0'
+        run: |
+          {
+            echo "Status: blocked"
+            echo ""
+            echo "This update has merge conflicts and must be reviewed before it can be merged."
+            echo ""
+            echo "Conflict files:"
+            sed 's/^/- /' /tmp/update-conflicts.txt
+          } > /tmp/update-safety-report.md
+
+      - name: Install dependencies for safety report
+        if: steps.merge.outputs.status == '0'
+        run: npm ci
+
+      - name: Generate safety report
+        if: steps.merge.outputs.status == '0'
+        id: safety
+        env:
+          UPDATE_BASE_REF: origin/main
+          UPDATE_SAFETY_REPORT_PATH: /tmp/update-safety-report.md
+        run: npm run updates:safety-check
+
+      - name: Check whether update branch has changes
+        id: changes
+        run: |
+          if [ "${{ steps.merge.outputs.status }}" != "0" ]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet origin/main...HEAD; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push update branch
+        if: steps.changes.outputs.has_changes == 'true'
+        run: |
+          if [ "${{ steps.merge.outputs.status }}" != "0" ]; then
+            git add -A
+            git commit -m "chore: capture conflicted Ycode update attempt" || true
+          fi
+          git push --force-with-lease origin "${{ steps.branch.outputs.branch }}"
+
+      - name: Open or update pull request
+        if: steps.changes.outputs.has_changes == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+          LATEST_TAG: ${{ steps.branch.outputs.latest_tag }}
+          MERGE_STATUS: ${{ steps.merge.outputs.status }}
         run: |
-          RESPONSE=$(gh api repos/${{ github.repository }}/merge-upstream \
-            --method POST \
-            --field branch=main \
-            2>&1) || true
+          gh label create "needs-developer-review" --color "B60205" --description "Requires developer review before merge" || true
+          gh label create "tenant-sensitive-update" --color "D93F0B" --description "Touches tenant-sensitive MasjidWeb/Ycode files" || true
+          gh label create "safe-ycode-update" --color "0E8A16" --description "Created by the safe Ycode update workflow" || true
 
-          echo "$RESPONSE"
-
-          if echo "$RESPONSE" | grep -q '"merge_type"'; then
-            echo "::notice::Fork synced successfully."
-          elif echo "$RESPONSE" | grep -q 'already in sync'; then
-            echo "::notice::Fork is already up to date."
+          report="$(cat /tmp/update-safety-report.md 2>/dev/null || echo 'Safety report was not generated.')"
+          if [ "$MERGE_STATUS" = "0" ]; then
+            title="chore: update Ycode core to ${LATEST_TAG}"
+            draft_flag=""
+            status_text="The upstream merge completed. Automated checks still need to pass before production."
           else
-            echo "::warning::Unexpected response — check output above."
+            title="chore: review Ycode core update to ${LATEST_TAG}"
+            draft_flag="--draft"
+            status_text="The upstream merge has conflicts. This PR is intentionally draft and needs developer review."
           fi
+
+          body="$(cat <<EOF
+## Summary
+${status_text}
+
+## Safety report
+
+\`\`\`
+${report}
+\`\`\`
+
+## What to do
+- If checks pass and the PR is not draft, review and merge when ready.
+- If this PR is draft or has conflicts, do not merge until a developer resolves it.
+- Production deploys only after this PR is merged into main.
+EOF
+)"
+
+          existing_pr="$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing_pr" ]; then
+            gh pr edit "$existing_pr" --title "$title" --body "$body"
+            pr_number="$existing_pr"
+          else
+            gh pr create --base main --head "$BRANCH" --title "$title" --body "$body" $draft_flag
+            pr_number="$(gh pr list --head "$BRANCH" --json number --jq '.[0].number')"
+          fi
+
+          gh pr edit "$pr_number" --add-label "safe-ycode-update"
+          if [ "$MERGE_STATUS" != "0" ] || grep -q "Status: high" /tmp/update-safety-report.md; then
+            gh pr edit "$pr_number" --add-label "needs-developer-review,tenant-sensitive-update"
+          fi
+
+      - name: No upstream changes found
+        if: steps.changes.outputs.has_changes == 'false'
+        run: echo "No upstream changes found. No pull request was created."

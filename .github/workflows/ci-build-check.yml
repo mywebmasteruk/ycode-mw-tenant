@@ -1,4 +1,4 @@
-name: Build check
+name: Build and safety checks
 
 on:
   pull_request:
@@ -7,8 +7,15 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder
+      SUPABASE_SERVICE_ROLE_KEY: placeholder
+      SITE_URL: https://placeholder.example.com
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -18,8 +25,29 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Fetch base branch for update safety check
+        run: git fetch origin main
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Update safety check
+        env:
+          UPDATE_BASE_REF: origin/main
+        run: npm run updates:safety-check
+
+      - name: Tenant safety tests
+        run: |
+          npx vitest run \
+            lib/masjidweb/update-safety-check.test.ts \
+            lib/masjidweb/tenant-or-legacy-scope.test.ts \
+            lib/masjidweb/tenant-session-alignment.test.ts \
+            lib/repositories/apiKeyRepository.test.ts \
+            lib/repositories/formSubmissionRepository.test.ts \
+            lib/repositories/mcpTokenRepository.test.ts \
+            lib/mcp-token-route-tenant-context.test.ts \
+            lib/useAuthStore.test.ts \
+            lib/asset-proxy-response.test.ts
+
       - name: Build
         run: npm run build
-        env:
-          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder

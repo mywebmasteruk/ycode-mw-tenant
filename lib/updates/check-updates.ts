@@ -113,41 +113,22 @@ export async function checkForUpdates(currentVersion: string): Promise<CheckUpda
       vercelGitRepoOwner &&
       vercelGitRepoSlug
     ) {
-      if (isFork) {
-        updateMethod = 'github-sync';
-        autoSyncUrl = `https://github.com/${vercelGitRepoOwner}/${vercelGitRepoSlug}`;
-        steps = [
-          `Go to <a href="https://github.com/${vercelGitRepoOwner}/${vercelGitRepoSlug}" target="_blank" class="underline font-semibold">your GitHub repository</a>`,
-          'Click the <strong class="text-white">"Sync fork"</strong> button (above the file list)',
-          'Click <strong class="text-white">"Update branch"</strong>',
-          'Vercel will automatically redeploy with the latest changes',
-          '⚠️ Please reload this page (Ycode builder) after deployment to apply the latest migrations',
-        ];
-      } else {
-        updateMethod = 'git-pull';
-        autoSyncUrl = `https://github.com/${vercelGitRepoOwner}/${vercelGitRepoSlug}`;
-        steps = [
-          '⚠️ <strong class="text-yellow-300">Your repo is not a fork.</strong> For easier one-click updates in the future, consider forking the official repo first.',
-          '',
-          '<strong class="text-white">To update now:</strong>',
-          'Open terminal in your project directory',
-          `Add upstream remote (first time only):<br/><code class="bg-blue-800 px-2 py-1 rounded text-xs font-mono">git remote add upstream https://github.com/${UPSTREAM_REPO}.git</code>`,
-          `Fetch latest changes:<br/><code class="bg-blue-800 px-2 py-1 rounded text-xs font-mono">git fetch upstream</code>`,
-          `Merge updates:<br/><code class="bg-blue-800 px-2 py-1 rounded text-xs font-mono">git merge upstream/main</code>`,
-          `Push to your repo:<br/><code class="bg-blue-800 px-2 py-1 rounded text-xs font-mono">git push origin main</code>`,
-          'Vercel will automatically redeploy',
-          '⚠️ Please reload this page (Ycode builder) after deployment to apply the latest migrations',
-        ];
-      }
+      updateMethod = 'github-sync';
+      autoSyncUrl = `https://github.com/${vercelGitRepoOwner}/${vercelGitRepoSlug}/actions/workflows/sync-upstream.yml`;
+      steps = [
+        `Open the <a href="${autoSyncUrl}" target="_blank" class="underline font-semibold">MasjidWeb safe update workflow</a> in GitHub Actions`,
+        'Click <strong class="text-white">"Run workflow"</strong> to create a safe Ycode update pull request',
+        'Wait for GitHub checks to finish. If the PR is draft or says developer review is needed, do not merge it yet.',
+        'Merge the pull request only after checks pass and the PR says it is safe to review',
+        'Production deploys from main after the PR is merged. Reload the builder after deployment to apply the latest migrations.',
+      ];
     } else {
       updateMethod = 'github-sync';
-      autoSyncUrl = `https://github.com/${UPSTREAM_REPO}`;
+      autoSyncUrl = 'https://github.com/actions';
       steps = [
-        'Go to your forked GitHub repository',
-        'Click the <span class="!font-semibold">"Sync fork"</span> button',
-        'Click <span class="!font-semibold">"Update branch"</span>',
-        'Your deployment will automatically redeploy with the latest changes',
-        'Please reload builder after deployment to apply the latest migrations',
+        'Use the MasjidWeb safe update workflow in GitHub Actions for this fork.',
+        'Do not use GitHub Sync fork or manual direct merges into main.',
+        'The workflow creates a pull request first, runs safety checks, and protects production until the PR is merged.',
       ];
     }
 
