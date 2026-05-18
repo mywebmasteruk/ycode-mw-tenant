@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { getTokenById, deleteToken } from '@/lib/repositories/mcpTokenRepository';
 import { noCache } from '@/lib/api-response';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -15,7 +16,8 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const token = await getTokenById(id);
+    const tenantId = await resolveEffectiveTenantId();
+    const token = await getTokenById(id, tenantId);
 
     if (!token) {
       return noCache({ error: 'MCP token not found' }, 404);
@@ -41,13 +43,14 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
+    const tenantId = await resolveEffectiveTenantId();
 
-    const existing = await getTokenById(id);
+    const existing = await getTokenById(id, tenantId);
     if (!existing) {
       return noCache({ error: 'MCP token not found' }, 404);
     }
 
-    await deleteToken(id);
+    await deleteToken(id, tenantId);
 
     return noCache({ data: { deleted: true, id } });
   } catch (error) {

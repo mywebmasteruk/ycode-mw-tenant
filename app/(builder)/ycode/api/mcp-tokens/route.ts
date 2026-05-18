@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { getAllTokens, createToken } from '@/lib/repositories/mcpTokenRepository';
 import { noCache } from '@/lib/api-response';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -11,7 +12,8 @@ export const revalidate = 0;
  */
 export async function GET() {
   try {
-    const tokens = await getAllTokens();
+    const tenantId = await resolveEffectiveTenantId();
+    const tokens = await getAllTokens(tenantId);
 
     return noCache({ data: tokens });
   } catch (error) {
@@ -36,7 +38,8 @@ export async function POST(request: NextRequest) {
       return noCache({ error: 'Name is required' }, 400);
     }
 
-    const token = await createToken(name.trim());
+    const tenantId = await resolveEffectiveTenantId();
+    const token = await createToken(name.trim(), tenantId);
 
     const host = request.headers.get('host') || 'localhost:3000';
     const protocol = request.headers.get('x-forwarded-proto') || 'http';

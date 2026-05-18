@@ -2,8 +2,9 @@ import { NextRequest } from 'next/server';
 import { randomUUID } from 'crypto';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { validateToken } from '@/lib/repositories/mcpTokenRepository';
+import { validateToken, type McpToken } from '@/lib/repositories/mcpTokenRepository';
 import { createMcpServer } from '@/lib/mcp/server';
+import { runWithEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -28,12 +29,11 @@ function cleanupStaleSessions() {
   }
 }
 
-async function authenticateToken(token: string): Promise<boolean> {
+async function authenticateToken(token: string): Promise<McpToken | null> {
   try {
-    const result = await validateToken(token);
-    return result !== null;
+    return await validateToken(token);
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -193,8 +193,8 @@ export async function POST(
   const { token } = await params;
 
   try {
-    const isValid = await authenticateToken(token);
-    if (!isValid) {
+    const mcpToken = await authenticateToken(token);
+    if (!mcpToken) {
       return new Response(JSON.stringify({ error: 'Invalid MCP token' }), {
         status: 401,
         headers: { 'Content-Type': 'application/json' },
@@ -202,7 +202,9 @@ export async function POST(
     }
 
     cleanupStaleSessions();
-    const response = await handleMcpRequest(request);
+    const response = mcpToken.tenant_id
+      ? await runWithEffectiveTenantId(mcpToken.tenant_id, () => handleMcpRequest(request))
+      : await handleMcpRequest(request);
     return addCorsHeaders(response);
   } catch (error) {
     console.error('[MCP POST] Error:', error);
@@ -224,8 +226,8 @@ export async function GET(
   const { token } = await params;
 
   try {
-    const isValid = await authenticateToken(token);
-    if (!isValid) {
+    const mcpToken = await authenticateToken(token);
+    if (!mcpToken) {
       return new Response(JSON.stringify({ error: 'Invalid MCP token' }), {
         status: 401,
         headers: { 'Content-Type': 'application/json' },
@@ -246,7 +248,9 @@ export async function GET(
 
     const session = sessions.get(sessionId)!;
     session.lastActivity = Date.now();
-    const response = await session.transport.handleRequest(request);
+    const response = mcpToken.tenant_id
+      ? await runWithEffectiveTenantId(mcpToken.tenant_id, () => session.transport.handleRequest(request))
+      : await session.transport.handleRequest(request);
     return addCorsHeaders(response);
   } catch (error) {
     console.error('[MCP GET] Error:', error);
@@ -268,8 +272,8 @@ export async function DELETE(
   const { token } = await params;
 
   try {
-    const isValid = await authenticateToken(token);
-    if (!isValid) {
+    const mcpToken = await authenticateToken(token);
+    if (!mcpToken) {
       return new Response(JSON.stringify({ error: 'Invalid MCP token' }), {
         status: 401,
         headers: { 'Content-Type': 'application/json' },
@@ -278,10 +282,15 @@ export async function DELETE(
 
     const sessionId = request.headers.get('mcp-session-id');
     if (sessionId && sessions.has(sessionId)) {
-      const session = sessions.get(sessionId)!;
-      await session.transport.close();
-      sessions.delete(sessionId);
-      return addCorsHeaders(new Response(null, { status: 204 }));
+      const closeSession = async () => {
+        const session = sessions.get(sessionId)!;
+        await session.transport.close();
+        sessions.delete(sessionId);
+        return addCorsHeaders(new Response(null, { status: 204 }));
+      };
+      return mcpToken.tenant_id
+        ? await runWithEffectiveTenantId(mcpToken.tenant_id, closeSession)
+        : await closeSession();
     }
 
     return addCorsHeaders(new Response(null, { status: 204 }));
