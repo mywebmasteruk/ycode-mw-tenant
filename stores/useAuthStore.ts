@@ -6,6 +6,7 @@
 
 import { create } from 'zustand';
 import { createBrowserClient } from '../lib/supabase-browser';
+import { isStaleSupabaseRefreshTokenError } from '../lib/supabase-auth-error';
 import type { User, Session } from '@supabase/supabase-js';
 
 interface AuthState {
@@ -71,6 +72,18 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         });
       });
     } catch (error) {
+      if (isStaleSupabaseRefreshTokenError(error)) {
+        const supabase = await createBrowserClient();
+        await supabase?.auth.signOut();
+        set({
+          user: null,
+          session: null,
+          error: null,
+          initialized: true,
+        });
+        return;
+      }
+
       console.error('Failed to initialize auth:', error);
       set({
         error: error instanceof Error ? error.message : 'Failed to initialize auth',
