@@ -1,0 +1,22 @@
+---
+description: Preserve MasjidWeb tenant-hardening when updating upstream Ycode
+alwaysApply: true
+---
+
+# Ycode Upstream Fork Safety
+
+This repository is a MasjidWeb production fork of Ycode. It contains tenant isolation, auth, Netlify, and security hardening changes inside core Ycode paths.
+
+## Rules
+
+- Never apply upstream Ycode updates directly to `main`.
+- Never use one-click GitHub "Sync fork" as a production update path without an isolated review branch.
+- Treat upstream merges as high-risk even if git reports no conflicts.
+- Preserve MasjidWeb-specific behavior in `proxy.ts`, auth/session/magic-link files, `lib/masjidweb/**`, repository tenant filters, API routes, MCP routes, migrations, and Netlify config.
+- Any new or changed `getSupabaseAdmin()` query must be reviewed for explicit tenant scope; service-role clients bypass RLS.
+- Before production deploy after upstream/core updates, run tenant-safety tests, `npm run type-check`, `npm run build`, and live tenant smoke checks.
+- Follow `docs/core-update-process.md` for the required workflow.
+
+## Safe workflow
+
+Create an isolated branch/worktree, fetch upstream, merge/rebase there, manually review high-risk files, test tenant isolation, deploy preview/staging, then merge to `main` only after verification.
