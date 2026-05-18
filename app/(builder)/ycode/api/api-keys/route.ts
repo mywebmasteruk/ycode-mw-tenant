@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { getAllApiKeys, createApiKey } from '@/lib/repositories/apiKeyRepository';
 import { noCache } from '@/lib/api-response';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 // Disable caching for this route
 export const dynamic = 'force-dynamic';
@@ -12,7 +13,7 @@ export const revalidate = 0;
  */
 export async function GET() {
   try {
-    const keys = await getAllApiKeys();
+    const keys = await getAllApiKeys(await resolveEffectiveTenantId());
 
     return noCache({
       data: keys,
@@ -58,7 +59,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const key = await createApiKey(name.trim());
+    const key = await createApiKey(name.trim(), await resolveEffectiveTenantId());
 
     return noCache({
       data: key,

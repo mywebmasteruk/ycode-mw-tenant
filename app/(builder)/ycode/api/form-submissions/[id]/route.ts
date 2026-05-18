@@ -5,6 +5,7 @@ import {
   deleteFormSubmission,
 } from '@/lib/repositories/formSubmissionRepository';
 import { noCache } from '@/lib/api-response';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 // Disable caching for this route
 export const dynamic = 'force-dynamic';
@@ -21,7 +22,7 @@ interface RouteParams {
 export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
     const { id } = await params;
-    const submission = await getFormSubmissionById(id);
+    const submission = await getFormSubmissionById(id, await resolveEffectiveTenantId());
 
     if (!submission) {
       return noCache({ error: 'Form submission not found' }, 404);
@@ -56,7 +57,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
 
     const submission = await updateFormSubmission(id, {
       status: body.status,
-    });
+    }, await resolveEffectiveTenantId());
 
     return noCache({ data: submission });
   } catch (error) {
@@ -75,7 +76,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
 export async function DELETE(request: NextRequest, { params }: RouteParams) {
   try {
     const { id } = await params;
-    await deleteFormSubmission(id);
+    await deleteFormSubmission(id, await resolveEffectiveTenantId());
 
     return noCache({ message: 'Form submission deleted successfully' });
   } catch (error) {

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateApiKey as validateApiKeyFromRepo } from '@/lib/repositories/apiKeyRepository';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 export interface ApiKeyValidation {
   valid: boolean;
@@ -32,7 +33,7 @@ export async function validateApiKey(request: NextRequest): Promise<ApiKeyValida
 
   try {
     // Validate against api_keys table
-    const key = await validateApiKeyFromRepo(apiKey);
+    const key = await validateApiKeyFromRepo(apiKey, await resolveEffectiveTenantId());
 
     if (!key) {
       return { valid: false, error: 'Invalid API key' };

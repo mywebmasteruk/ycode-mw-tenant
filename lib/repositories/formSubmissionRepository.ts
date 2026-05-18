@@ -1,4 +1,8 @@
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+import {
+  applyTenantOrLegacyScope,
+  isMissingTenantScopeColumnError,
+} from '@/lib/masjidweb/tenant-or-legacy-scope';
 import type {
   FormSubmission,
   FormSummary,
@@ -19,7 +23,8 @@ import type {
  */
 export async function getAllFormSubmissions(
   formId?: string,
-  status?: FormSubmissionStatus
+  status?: FormSubmissionStatus,
+  tenantId?: string | null,
 ): Promise<FormSubmission[]> {
   const client = await getSupabaseAdmin();
 
@@ -40,9 +45,28 @@ export async function getAllFormSubmissions(
     query = query.eq('status', status);
   }
 
+  query = applyTenantOrLegacyScope(query, tenantId);
+
   const { data, error } = await query;
 
   if (error) {
+    if (tenantId && isMissingTenantScopeColumnError(error)) {
+      let legacyQuery = client
+        .from('form_submissions')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (formId) {
+        legacyQuery = legacyQuery.eq('form_id', formId);
+      }
+      if (status) {
+        legacyQuery = legacyQuery.eq('status', status);
+      }
+
+      const { data: legacyData, error: legacyError } = await legacyQuery;
+      if (!legacyError) return legacyData || [];
+    }
+
     throw new Error(`Failed to fetch form submissions: ${error.message}`);
   }
 
@@ -52,18 +76,24 @@ export async function getAllFormSubmissions(
 /**
  * Get form submission by ID
  */
-export async function getFormSubmissionById(id: string): Promise<FormSubmission | null> {
+export async function getFormSubmissionById(
+  id: string,
+  tenantId?: string | null,
+): Promise<FormSubmission | null> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { data, error } = await client
+  let query = client
     .from('form_submissions')
     .select('*')
-    .eq('id', id)
-    .single();
+    .eq('id', id);
+
+  query = applyTenantOrLegacyScope(query, tenantId);
+
+  const { data, error } = await query.single();
 
   if (error && error.code !== 'PGRST116') {
     throw new Error(`Failed to fetch form submission: ${error.message}`);
@@ -75,7 +105,7 @@ export async function getFormSubmissionById(id: string): Promise<FormSubmission 
 /**
  * Get all unique forms with submission counts
  */
-export async function getFormSummaries(): Promise<FormSummary[]> {
+export async function getFormSummaries(tenantId?: string | null): Promise<FormSummary[]> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -83,10 +113,14 @@ export async function getFormSummaries(): Promise<FormSummary[]> {
   }
 
   // Get all submissions grouped by form_id
-  const { data, error } = await client
+  let query = client
     .from('form_submissions')
     .select('form_id, status, created_at')
     .order('created_at', { ascending: false });
+
+  query = applyTenantOrLegacyScope(query, tenantId);
+
+  const { data, error } = await query;
 
   if (error) {
     throw new Error(`Failed to fetch form summaries: ${error.message}`);
@@ -124,7 +158,8 @@ export async function getFormSummaries(): Promise<FormSummary[]> {
  * Create a new form submission
  */
 export async function createFormSubmission(
-  submissionData: CreateFormSubmissionData
+  submissionData: CreateFormSubmissionData,
+  tenantId?: string | null,
 ): Promise<FormSubmission> {
   const client = await getSupabaseAdmin();
 
@@ -132,15 +167,18 @@ export async function createFormSubmission(
     throw new Error('Supabase client not configured');
   }
 
+  const insertData = {
+    form_id: submissionData.form_id,
+    payload: submissionData.payload,
+    metadata: submissionData.metadata || null,
+    status: 'new',
+    created_at: new Date().toISOString(),
+    ...(tenantId ? { tenant_id: tenantId } : {}),
+  };
+
   const { data, error } = await client
     .from('form_submissions')
-    .insert({
-      form_id: submissionData.form_id,
-      payload: submissionData.payload,
-      metadata: submissionData.metadata || null,
-      status: 'new',
-      created_at: new Date().toISOString(),
-    })
+    .insert(insertData)
     .select()
     .single();
 
@@ -156,7 +194,8 @@ export async function createFormSubmission(
  */
 export async function updateFormSubmission(
   id: string,
-  submissionData: UpdateFormSubmissionData
+  submissionData: UpdateFormSubmissionData,
+  tenantId?: string | null,
 ): Promise<FormSubmission> {
   const client = await getSupabaseAdmin();
 
@@ -164,10 +203,14 @@ export async function updateFormSubmission(
     throw new Error('Supabase client not configured');
   }
 
-  const { data, error } = await client
+  let query = client
     .from('form_submissions')
     .update(submissionData)
-    .eq('id', id)
+    .eq('id', id);
+
+  query = applyTenantOrLegacyScope(query, tenantId);
+
+  const { data, error } = await query
     .select()
     .single();
 
@@ -181,17 +224,21 @@ export async function updateFormSubmission(
 /**
  * Delete a form submission
  */
-export async function deleteFormSubmission(id: string): Promise<void> {
+export async function deleteFormSubmission(id: string, tenantId?: string | null): Promise<void> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { error } = await client
+  let query = client
     .from('form_submissions')
     .delete()
     .eq('id', id);
+
+  query = applyTenantOrLegacyScope(query, tenantId);
+
+  const { error } = await query;
 
   if (error) {
     throw new Error(`Failed to delete form submission: ${error.message}`);
@@ -201,7 +248,7 @@ export async function deleteFormSubmission(id: string): Promise<void> {
 /**
  * Bulk delete form submissions by IDs
  */
-export async function bulkDeleteFormSubmissions(ids: string[]): Promise<void> {
+export async function bulkDeleteFormSubmissions(ids: string[], tenantId?: string | null): Promise<void> {
   if (ids.length === 0) return;
 
   const client = await getSupabaseAdmin();
@@ -210,10 +257,14 @@ export async function bulkDeleteFormSubmissions(ids: string[]): Promise<void> {
     throw new Error('Supabase client not configured');
   }
 
-  const { error } = await client
+  let query = client
     .from('form_submissions')
     .delete()
     .in('id', ids);
+
+  query = applyTenantOrLegacyScope(query, tenantId);
+
+  const { error } = await query;
 
   if (error) {
     throw new Error(`Failed to bulk delete form submissions: ${error.message}`);
@@ -223,17 +274,24 @@ export async function bulkDeleteFormSubmissions(ids: string[]): Promise<void> {
 /**
  * Delete all submissions for a form
  */
-export async function deleteFormSubmissionsByFormId(formId: string): Promise<void> {
+export async function deleteFormSubmissionsByFormId(
+  formId: string,
+  tenantId?: string | null,
+): Promise<void> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { error } = await client
+  let query = client
     .from('form_submissions')
     .delete()
     .eq('form_id', formId);
+
+  query = applyTenantOrLegacyScope(query, tenantId);
+
+  const { error } = await query;
 
   if (error) {
     throw new Error(`Failed to delete form submissions: ${error.message}`);
@@ -243,18 +301,22 @@ export async function deleteFormSubmissionsByFormId(formId: string): Promise<voi
 /**
  * Mark all submissions for a form as read
  */
-export async function markAllAsRead(formId: string): Promise<void> {
+export async function markAllAsRead(formId: string, tenantId?: string | null): Promise<void> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { error } = await client
+  let query = client
     .from('form_submissions')
     .update({ status: 'read' })
     .eq('form_id', formId)
     .eq('status', 'new');
+
+  query = applyTenantOrLegacyScope(query, tenantId);
+
+  const { error } = await query;
 
   if (error) {
     throw new Error(`Failed to mark submissions as read: ${error.message}`);

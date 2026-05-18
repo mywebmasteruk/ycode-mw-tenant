@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateApiKey, unauthorizedResponse } from '../../auth';
 import { getAllFormSubmissions } from '@/lib/repositories/formSubmissionRepository';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 // Disable caching for this route
 export const dynamic = 'force-dynamic';
@@ -37,7 +38,7 @@ export async function GET(
     const { form_id } = await params;
 
     // Get all submissions for this form
-    const submissions = await getAllFormSubmissions(form_id);
+    const submissions = await getAllFormSubmissions(form_id, undefined, await resolveEffectiveTenantId());
 
     if (submissions.length === 0) {
       return NextResponse.json(

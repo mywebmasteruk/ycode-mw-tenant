@@ -1,4 +1,8 @@
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+import {
+  applyTenantOrLegacyScope,
+  isMissingTenantScopeColumnError,
+} from '@/lib/masjidweb/tenant-or-legacy-scope';
 import { createHash, randomBytes } from 'crypto';
 
 /**
@@ -39,19 +43,32 @@ function generateApiKey(): string {
 /**
  * Get all API keys (without hashes)
  */
-export async function getAllApiKeys(): Promise<ApiKey[]> {
+export async function getAllApiKeys(tenantId?: string | null): Promise<ApiKey[]> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { data, error } = await client
+  let query = client
     .from('api_keys')
     .select('id, name, key_prefix, last_used_at, created_at, updated_at')
     .order('created_at', { ascending: false });
 
+  query = applyTenantOrLegacyScope(query, tenantId);
+
+  const { data, error } = await query;
+
   if (error) {
+    if (tenantId && isMissingTenantScopeColumnError(error)) {
+      const { data: legacyData, error: legacyError } = await client
+        .from('api_keys')
+        .select('id, name, key_prefix, last_used_at, created_at, updated_at')
+        .order('created_at', { ascending: false });
+
+      if (!legacyError) return legacyData || [];
+    }
+
     throw new Error(`Failed to fetch API keys: ${error.message}`);
   }
 
@@ -62,7 +79,7 @@ export async function getAllApiKeys(): Promise<ApiKey[]> {
  * Create a new API key
  * Returns the key info including the plain key (shown only once)
  */
-export async function createApiKey(name: string): Promise<ApiKeyWithPlainKey> {
+export async function createApiKey(name: string, tenantId?: string | null): Promise<ApiKeyWithPlainKey> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -73,16 +90,19 @@ export async function createApiKey(name: string): Promise<ApiKeyWithPlainKey> {
   const apiKey = generateApiKey();
   const keyHash = hashApiKey(apiKey);
   const keyPrefix = apiKey.substring(0, 8); // First 8 chars for identification
+  const now = new Date().toISOString();
+  const insertData = {
+    name,
+    key_hash: keyHash,
+    key_prefix: keyPrefix,
+    created_at: now,
+    updated_at: now,
+    ...(tenantId ? { tenant_id: tenantId } : {}),
+  };
 
   const { data, error } = await client
     .from('api_keys')
-    .insert({
-      name,
-      key_hash: keyHash,
-      key_prefix: keyPrefix,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    })
+    .insert(insertData)
     .select('id, name, key_prefix, last_used_at, created_at, updated_at')
     .single();
 
@@ -99,17 +119,21 @@ export async function createApiKey(name: string): Promise<ApiKeyWithPlainKey> {
 /**
  * Delete an API key
  */
-export async function deleteApiKey(id: string): Promise<void> {
+export async function deleteApiKey(id: string, tenantId?: string | null): Promise<void> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { error } = await client
+  let query = client
     .from('api_keys')
     .delete()
     .eq('id', id);
+
+  query = applyTenantOrLegacyScope(query, tenantId);
+
+  const { error } = await query;
 
   if (error) {
     throw new Error(`Failed to delete API key: ${error.message}`);
@@ -121,7 +145,7 @@ export async function deleteApiKey(id: string): Promise<void> {
  * Returns the key record if valid, null otherwise
  * Also updates last_used_at timestamp
  */
-export async function validateApiKey(apiKey: string): Promise<ApiKey | null> {
+export async function validateApiKey(apiKey: string, tenantId?: string | null): Promise<ApiKey | null> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -131,11 +155,14 @@ export async function validateApiKey(apiKey: string): Promise<ApiKey | null> {
   const keyHash = hashApiKey(apiKey);
 
   // Find the key by hash
-  const { data, error } = await client
+  let query = client
     .from('api_keys')
     .select('id, name, key_prefix, last_used_at, created_at, updated_at')
-    .eq('key_hash', keyHash)
-    .single();
+    .eq('key_hash', keyHash);
+
+  query = applyTenantOrLegacyScope(query, tenantId);
+
+  const { data, error } = await query.single();
 
   if (error || !data) {
     return null;
@@ -144,10 +171,12 @@ export async function validateApiKey(apiKey: string): Promise<ApiKey | null> {
   // Update last_used_at (fire and forget - don't wait for it)
   (async () => {
     try {
-      await client
+      let updateQuery = client
         .from('api_keys')
         .update({ last_used_at: new Date().toISOString() })
         .eq('id', data.id);
+      updateQuery = applyTenantOrLegacyScope(updateQuery, tenantId);
+      await updateQuery;
     } catch (err) {
       console.error('Failed to update last_used_at:', err);
     }
@@ -159,18 +188,21 @@ export async function validateApiKey(apiKey: string): Promise<ApiKey | null> {
 /**
  * Get an API key by ID (without hash)
  */
-export async function getApiKeyById(id: string): Promise<ApiKey | null> {
+export async function getApiKeyById(id: string, tenantId?: string | null): Promise<ApiKey | null> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { data, error } = await client
+  let query = client
     .from('api_keys')
     .select('id, name, key_prefix, last_used_at, created_at, updated_at')
-    .eq('id', id)
-    .single();
+    .eq('id', id);
+
+  query = applyTenantOrLegacyScope(query, tenantId);
+
+  const { data, error } = await query.single();
 
   if (error && error.code !== 'PGRST116') {
     throw new Error(`Failed to fetch API key: ${error.message}`);

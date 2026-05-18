@@ -6,6 +6,7 @@ import {
   deleteFormSubmission,
 } from '@/lib/repositories/formSubmissionRepository';
 import type { FormSubmissionStatus } from '@/types';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 // Disable caching for this route
 export const dynamic = 'force-dynamic';
@@ -38,7 +39,7 @@ export async function GET(
   try {
     const { form_id, submission_id } = await params;
 
-    const submission = await getFormSubmissionById(submission_id);
+    const submission = await getFormSubmissionById(submission_id, await resolveEffectiveTenantId());
 
     if (!submission) {
       return NextResponse.json(
@@ -98,7 +99,7 @@ export async function PATCH(
     const body = await request.json();
 
     // Check if submission exists and belongs to the form
-    const existingSubmission = await getFormSubmissionById(submission_id);
+    const existingSubmission = await getFormSubmissionById(submission_id, await resolveEffectiveTenantId());
 
     if (!existingSubmission) {
       return NextResponse.json(
@@ -126,7 +127,7 @@ export async function PATCH(
     // Update the submission
     const updatedSubmission = await updateFormSubmission(submission_id, {
       status: body.status,
-    });
+    }, await resolveEffectiveTenantId());
 
     return NextResponse.json({
       id: updatedSubmission.id,
@@ -165,7 +166,7 @@ export async function DELETE(
     const { form_id, submission_id } = await params;
 
     // Check if submission exists and belongs to the form
-    const existingSubmission = await getFormSubmissionById(submission_id);
+    const existingSubmission = await getFormSubmissionById(submission_id, await resolveEffectiveTenantId());
 
     if (!existingSubmission) {
       return NextResponse.json(
@@ -181,7 +182,7 @@ export async function DELETE(
       );
     }
 
-    await deleteFormSubmission(submission_id);
+    await deleteFormSubmission(submission_id, await resolveEffectiveTenantId());
 
     return new NextResponse(null, { status: 204 });
   } catch (error) {

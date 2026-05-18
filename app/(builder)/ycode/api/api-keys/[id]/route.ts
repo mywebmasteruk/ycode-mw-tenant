@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { getApiKeyById, deleteApiKey } from '@/lib/repositories/apiKeyRepository';
 import { noCache } from '@/lib/api-response';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 // Disable caching for this route
 export const dynamic = 'force-dynamic';
@@ -16,7 +17,8 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const key = await getApiKeyById(id);
+    const tenantId = await resolveEffectiveTenantId();
+    const key = await getApiKeyById(id, tenantId);
 
     if (!key) {
       return noCache(
@@ -47,9 +49,10 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
+    const tenantId = await resolveEffectiveTenantId();
 
     // Verify the key exists first
-    const existing = await getApiKeyById(id);
+    const existing = await getApiKeyById(id, tenantId);
     if (!existing) {
       return noCache(
         { error: 'API key not found' },
@@ -57,7 +60,7 @@ export async function DELETE(
       );
     }
 
-    await deleteApiKey(id);
+    await deleteApiKey(id, tenantId);
 
     return noCache({
       data: { deleted: true, id },

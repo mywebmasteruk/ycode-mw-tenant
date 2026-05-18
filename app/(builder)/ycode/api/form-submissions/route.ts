@@ -10,6 +10,7 @@ import { dispatchFormSubmittedEvent } from '@/lib/services/webhookService';
 import { sendFormSubmissionEmail, extractReplyToEmail } from '@/lib/services/emailService';
 import { processAppIntegrations } from '@/lib/apps/integration-service';
 import { noCache } from '@/lib/api-response';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 // Disable caching for this route
 export const dynamic = 'force-dynamic';
@@ -30,13 +31,14 @@ export async function GET(request: NextRequest) {
     const formId = searchParams.get('form_id') || undefined;
     const status = searchParams.get('status') as 'new' | 'read' | 'archived' | 'spam' | undefined;
     const summary = searchParams.get('summary') === 'true';
+    const tenantId = await resolveEffectiveTenantId();
 
     if (summary) {
-      const summaries = await getFormSummaries();
+      const summaries = await getFormSummaries(tenantId);
       return noCache({ data: summaries });
     }
 
-    const submissions = await getAllFormSubmissions(formId, status);
+    const submissions = await getAllFormSubmissions(formId, status, tenantId);
     return noCache({ data: submissions });
   } catch (error) {
     console.error('Error fetching form submissions:', error);
@@ -59,6 +61,7 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
+    const tenantId = await resolveEffectiveTenantId();
 
     // Validate required fields
     if (!body.form_id) {
@@ -86,7 +89,7 @@ export async function POST(request: NextRequest) {
       form_id: body.form_id,
       payload: body.payload,
       metadata,
-    });
+    }, tenantId);
 
     // Dispatch webhook event (fire and forget)
     dispatchFormSubmittedEvent({
@@ -147,10 +150,11 @@ export async function DELETE(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const formId = searchParams.get('form_id');
+    const tenantId = await resolveEffectiveTenantId();
 
     // If form_id is provided, delete all submissions for that form
     if (formId) {
-      await deleteFormSubmissionsByFormId(formId);
+      await deleteFormSubmissionsByFormId(formId, tenantId);
       return noCache({ message: 'All submissions for form deleted successfully' });
     }
 
@@ -159,7 +163,7 @@ export async function DELETE(request: NextRequest) {
     const ids = body.ids;
 
     if (Array.isArray(ids) && ids.length > 0) {
-      await bulkDeleteFormSubmissions(ids);
+      await bulkDeleteFormSubmissions(ids, tenantId);
       return noCache({ message: `${ids.length} submissions deleted successfully` });
     }
 

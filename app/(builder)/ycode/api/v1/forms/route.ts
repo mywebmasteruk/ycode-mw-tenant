@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateApiKey, unauthorizedResponse } from '../auth';
 import { getFormSummaries } from '@/lib/repositories/formSubmissionRepository';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 // Disable caching for this route
 export const dynamic = 'force-dynamic';
@@ -30,7 +31,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const summaries = await getFormSummaries();
+    const summaries = await getFormSummaries(await resolveEffectiveTenantId());
 
     // Transform to public API format
     const forms = summaries.map(summary => ({

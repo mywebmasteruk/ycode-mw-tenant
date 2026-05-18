@@ -5,6 +5,7 @@ import {
   createFormSubmission,
 } from '@/lib/repositories/formSubmissionRepository';
 import type { FormSubmissionStatus } from '@/types';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 // Disable caching for this route
 export const dynamic = 'force-dynamic';
@@ -67,7 +68,7 @@ export async function GET(
     const status = statusParam && validStatuses.includes(statusParam) ? statusParam : undefined;
 
     // Get all submissions for this form (with optional status filter)
-    const allSubmissions = await getAllFormSubmissions(form_id, status);
+    const allSubmissions = await getAllFormSubmissions(form_id, status, await resolveEffectiveTenantId());
     const total = allSubmissions.length;
 
     // Apply pagination
@@ -154,7 +155,7 @@ export async function POST(
       form_id,
       payload: body.payload,
       metadata,
-    });
+    }, await resolveEffectiveTenantId());
 
     return NextResponse.json(
       {
