@@ -15,6 +15,10 @@ export async function up(knex: Knex): Promise<void> {
   await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can view form submissions" ON form_submissions');
   await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can update form submissions" ON form_submissions');
   await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can delete form submissions" ON form_submissions');
+  await knex.schema.raw('DROP POLICY IF EXISTS tenant_insert ON form_submissions');
+  await knex.schema.raw('DROP POLICY IF EXISTS tenant_select ON form_submissions');
+  await knex.schema.raw('DROP POLICY IF EXISTS tenant_update ON form_submissions');
+  await knex.schema.raw('DROP POLICY IF EXISTS tenant_delete ON form_submissions');
 
   await knex.schema.raw(`
     CREATE POLICY "Tenant users can view api_keys"

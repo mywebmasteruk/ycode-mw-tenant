@@ -26,6 +26,10 @@ describe('api keys and form submissions RLS migration', () => {
 
     expect(sql).toContain('DROP POLICY IF EXISTS "Authenticated users can manage api_keys" ON api_keys');
     expect(sql).toContain('DROP POLICY IF EXISTS "Authenticated users can view form submissions" ON form_submissions');
+    expect(sql).toContain('DROP POLICY IF EXISTS tenant_insert ON form_submissions');
+    expect(sql).toContain('DROP POLICY IF EXISTS tenant_select ON form_submissions');
+    expect(sql).toContain('DROP POLICY IF EXISTS tenant_update ON form_submissions');
+    expect(sql).toContain('DROP POLICY IF EXISTS tenant_delete ON form_submissions');
     expect(sql).toContain('CREATE POLICY "Tenant users can view api_keys"');
     expect(sql).toContain('CREATE POLICY "Tenant users can view form submissions"');
     expect(sql).toContain("auth.jwt() -> 'app_metadata' ->> 'tenant_id'");
