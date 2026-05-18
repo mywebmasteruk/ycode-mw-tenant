@@ -12,31 +12,16 @@
  * Responses are cached with immutable headers so sharp only runs once per unique URL.
  */
 
-import { NextRequest, NextResponse } from 'next/server';
-import sharp from 'sharp';
+import { NextRequest } from 'next/server';
 import { base62ToUuid } from '@/lib/convertion-utils';
 import { getAssetProxyUrl, isAssetOfType, ASSET_CATEGORIES } from '@/lib/asset-utils';
+import { buildAssetProxyResponse } from '@/lib/asset-proxy-response';
 import { getAssetForProxy } from '@/lib/repositories/assetRepository';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { STORAGE_BUCKET } from '@/lib/asset-constants';
 
 // Cache headers set at infrastructure level via next.config.ts headers()
 // to prevent Next.js proxy from overriding them
-
-function parseTransformParams(searchParams: URLSearchParams) {
-  const width = parseInt(searchParams.get('width') || '');
-  const height = parseInt(searchParams.get('height') || '');
-  const quality = parseInt(searchParams.get('quality') || '');
-
-  const hasParams = width > 0 || height > 0 || quality > 0;
-  if (!hasParams) return null;
-
-  return {
-    width: width > 0 ? width : undefined,
-    height: height > 0 ? height : undefined,
-    quality: quality > 0 ? Math.min(quality, 100) : 80,
-  };
-}
 
 export async function GET(
   request: NextRequest,
@@ -84,38 +69,11 @@ export async function GET(
       return new Response('Not found', { status: 404 });
     }
 
-    const transform = parseTransformParams(url.searchParams);
-    const canResize = transform && isAssetOfType(asset.mime_type, ASSET_CATEGORIES.IMAGES);
-
-    if (canResize) {
-      const buffer = Buffer.from(await response.arrayBuffer());
-      let pipeline = sharp(buffer);
-
-      if (transform.width || transform.height) {
-        pipeline = pipeline.resize(transform.width, transform.height, {
-          fit: 'cover',
-          withoutEnlargement: true,
-        });
-      }
-
-      pipeline = pipeline.webp({ quality: transform.quality });
-
-      const resized = await pipeline.toBuffer();
-
-      return new Response(new Uint8Array(resized), {
-        status: 200,
-        headers: {
-          'Content-Type': 'image/webp',
-          'Content-Length': resized.length.toString(),
-        },
-      });
-    }
-
-    return new Response(response.body, {
-      status: 200,
-      headers: {
-        'Content-Type': asset.mime_type || 'application/octet-stream',
-      },
+    return buildAssetProxyResponse({
+      storageResponse: response,
+      mimeType: asset.mime_type,
+      searchParams: url.searchParams,
+      canTransformMimeType: isAssetOfType(asset.mime_type, ASSET_CATEGORIES.IMAGES),
     });
   } catch {
     return new Response('Internal server error', { status: 500 });
