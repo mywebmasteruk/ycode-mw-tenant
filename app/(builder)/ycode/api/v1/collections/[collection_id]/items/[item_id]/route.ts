@@ -5,6 +5,8 @@ import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepos
 import { getItemWithValues, deleteItem } from '@/lib/repositories/collectionItemRepository';
 import { setValues } from '@/lib/repositories/collectionItemValueRepository';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { scopeCollectionItemTimestampUpdate } from '@/lib/masjidweb/collection-item-timestamp-scope';
 import { transformItemToPublicWithRefs, parseFieldProjections } from '../../../../reference-resolver';
 
 // Disable caching for this route
@@ -171,11 +173,12 @@ export async function PUT(
     // Update the item's updated_at timestamp for both draft and published
     const client = await getSupabaseAdmin();
     if (client) {
-      await client
+      const tenantId = await resolveEffectiveTenantId();
+      const timestampUpdate = client
         .from('collection_items')
-        .update({ updated_at: new Date().toISOString() })
-        .eq('id', item_id)
-        .in('is_published', [true, false]);
+        .update({ updated_at: new Date().toISOString() });
+
+      await scopeCollectionItemTimestampUpdate(timestampUpdate, item_id, tenantId);
     }
 
     // Set the values for both published and draft
@@ -290,11 +293,12 @@ export async function PATCH(
     // Update the item's updated_at timestamp for both draft and published
     const client = await getSupabaseAdmin();
     if (client) {
-      await client
+      const tenantId = await resolveEffectiveTenantId();
+      const timestampUpdate = client
         .from('collection_items')
-        .update({ updated_at: new Date().toISOString() })
-        .eq('id', item_id)
-        .in('is_published', [true, false]);
+        .update({ updated_at: new Date().toISOString() });
+
+      await scopeCollectionItemTimestampUpdate(timestampUpdate, item_id, tenantId);
     }
 
     // Set the values for both published and draft
