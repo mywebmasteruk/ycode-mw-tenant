@@ -6,6 +6,22 @@ import type { Layer, Breakpoint, Asset, AssetCategoryFilter } from '../types';
 import { useCanvasTextEditorStore } from './useCanvasTextEditorStore';
 import { updateUrlQueryParam } from '@/hooks/use-editor-url';
 
+// Debounce window for the `?layer=…` URL mirror. Long enough to coalesce
+// rapid clicks (which would otherwise each trigger a Router-wide re-render
+// through Next.js's patched `history.replaceState`), short enough that the
+// URL is up-to-date by the time anyone copies it.
+const LAYER_URL_DEBOUNCE_MS = 250;
+let pendingLayerUrlTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingLayerUrlValue: string | null = null;
+
+function scheduleLayerUrlUpdate(id: string | null): void {
+  pendingLayerUrlValue = id;
+  if (pendingLayerUrlTimer !== null) return;
+  pendingLayerUrlTimer = setTimeout(() => {
+    pendingLayerUrlTimer = null;
+    updateUrlQueryParam('layer', pendingLayerUrlValue);
+  }, LAYER_URL_DEBOUNCE_MS);
+}
 interface HistoryEntry {
   pageId: string;
   layers: Layer[];
@@ -20,6 +36,7 @@ export interface ComponentNavigationEntry {
   id: string; // pageId or componentId
   name: string; // Display name for breadcrumb
   layerId?: string | null; // Layer to restore when returning
+  variantId?: string | null; // Variant to restore when returning to a component
 }
 
 export type EditorSidebarTab = 'layers' | 'pages' | 'cms';
@@ -61,6 +78,7 @@ interface EditorActions {
   setActiveUIState: (state: UIState) => void;
   setActiveTextStyleKey: (key: string | null) => void;
   setEditingComponentId: (id: string | null, returnPageId?: string | null, returnToLayerId?: string | null) => void;
+  setEditingComponentVariantId: (id: string | null) => void;
   pushComponentNavigation: (entry: ComponentNavigationEntry) => void;
   getReturnDestination: () => ComponentNavigationEntry | null;
   setBuilderDataPreloaded: (preloaded: boolean) => void;
@@ -111,6 +129,10 @@ interface EditorStoreWithHistory extends EditorState {
   historyIndex: number;
   maxHistorySize: number;
   editingComponentId: string | null;
+  // Currently selected variant id while editing a component. `null` means
+  // "use the first variant" (also the default for components with a single
+  // variant). Cleared whenever `editingComponentId` is cleared.
+  editingComponentVariantId: string | null;
   returnToPageId: string | null;
   returnToLayerId: string | null; // Layer to restore when exiting component edit mode
   componentNavigationStack: ComponentNavigationEntry[]; // Breadcrumb stack for nested component editing
@@ -209,6 +231,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   historyIndex: -1,
   maxHistorySize: 50,
   editingComponentId: null,
+  editingComponentVariantId: null,
   returnToPageId: null,
   returnToLayerId: null,
   componentNavigationStack: [],
@@ -255,9 +278,14 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   isCanvasContextMenuOpen: false,
   setCanvasContextMenuOpen: (value) => set({ isCanvasContextMenuOpen: value }),
   sliderSnapCounts: {},
-  setSliderSnapCount: (sliderId, count) => set((state) => ({
-    sliderSnapCounts: { ...state.sliderSnapCounts, [sliderId]: count },
-  })),
+  setSliderSnapCount: (sliderId, count) => set((state) => {
+    // Swiper fires `update` on every DOM mutation inside its wrapper, which
+    // happens constantly in the iframe (Tailwind class injections, child
+    // re-renders). Bail out when the count hasn't changed so subscribers
+    // — notably slideBullets `LayerItem`s — don't re-render.
+    if (state.sliderSnapCounts[sliderId] === count) return state;
+    return { sliderSnapCounts: { ...state.sliderSnapCounts, [sliderId]: count } };
+  }),
   // Canvas sibling reorder initial state
   isDraggingLayerOnCanvas: false,
   draggedLayerId: null,
@@ -284,8 +312,6 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   },
 
   setSelectedLayerId: (id) => {
-    // Legacy support - also update selectedLayerIds
-    // Clear active text style and sublayer when changing layers
     set({
       selectedLayerId: id,
       selectedLayerIds: id ? [id] : [],
@@ -295,14 +321,17 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       activeListItemIndex: null,
     });
 
-    // Update URL query param if we're in a route that supports layer selection
-    // Check if we're in /ycode/layers, /ycode/pages, or /ycode/components route
     if (typeof window !== 'undefined') {
       const pathname = window.location.pathname;
       const isLayerRoute = /^\/ycode\/(layers|pages|components)\//.test(pathname);
-      
+
       if (isLayerRoute) {
-        updateUrlQueryParam('layer', id || null);
+        // Debounce the URL update: Next.js's App Router patches
+        // history.replaceState, so every direct call triggers a Router-wide
+        // re-render (`useSearchParams` consumers, etc.). Coalescing rapid
+        // selections keeps the `?layer=…` deep link accurate without paying
+        // the cascade cost on every click.
+        scheduleLayerUrlUpdate(id || null);
       }
     }
   },
@@ -423,11 +452,16 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
 
     set({
       editingComponentId: id,
+      // Clear the active variant when leaving component edit mode; callers
+      // entering edit mode are expected to set the variant explicitly
+      // (`use-edit-component` does this once the draft has loaded).
+      editingComponentVariantId: id === null ? null : get().editingComponentVariantId,
       returnToPageId: returnPageId,
       returnToLayerId: layerToReturn,
       componentNavigationStack: newStack,
     });
   },
+  setEditingComponentVariantId: (id: string | null) => set({ editingComponentVariantId: id }),
   setBuilderDataPreloaded: (preloaded) => set({ builderDataPreloaded: preloaded }),
 
   /**

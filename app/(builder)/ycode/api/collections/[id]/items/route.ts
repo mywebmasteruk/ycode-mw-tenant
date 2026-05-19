@@ -1,5 +1,5 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { getItemsWithValues, createItem, getItemWithValues, getMaxIdValue, enrichItemsWithStatus, enrichSingleItemWithStatus, publishSingleItem, unpublishSingleItem } from '@/lib/repositories/collectionItemRepository';
+import { NextRequest } from 'next/server';
+import { getItemsWithValues, getItemsSortedByField, createItem, getItemWithValues, getMaxIdValue, enrichItemsWithStatus, enrichSingleItemWithStatus, publishSingleItem, unpublishSingleItem } from '@/lib/repositories/collectionItemRepository';
 import { enrichItemsWithCountValues } from '@/lib/repositories/collectionCountRepository';
 import { getCollectionById } from '@/lib/repositories/collectionRepository';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
@@ -59,98 +59,66 @@ export async function GET(
       }
     }
 
-    // When sorting by a field value, we must fetch ALL items first to sort globally,
-    // then paginate the sorted result. Otherwise DB pagination order won't match.
-    const needsGlobalSort = sortBy && sortBy !== 'none' && sortBy !== 'manual';
+    // When sorting by a specific field value, push the sort + pagination down
+    // to the DB via a LEFT JOIN. Avoids materializing every item for the
+    // collection just to slice the first page in JS.
+    const needsFieldSort = sortBy && sortBy !== 'none' && sortBy !== 'manual' && sortBy !== 'random';
 
-    // Build filters object
-    const filters = {
-      ...(search ? { search } : {}),
-      // Only apply DB pagination when we don't need global sorting
-      ...(!needsGlobalSort ? { limit, offset } : {}),
-    };
-
-    // Always get draft items in the builder
-    let { items, total } = await getItemsWithValues(id, false, filters);
-
-    // Find status field ID for enrichment
     const allFields = await getFieldsByCollectionId(id, false);
     const statusFieldId = findStatusFieldId(allFields);
 
-    // Enrich items with computed status values before sorting
+    // Build a field-type lookup and ID lookup once: every downstream call
+    // (value loading, count enrichment) can use these instead of issuing
+    // its own `collection_fields` query.
+    const knownFieldTypes: Record<string, string> = {};
+    const fieldsById = new Map<string, CollectionField>();
+    for (const field of allFields) {
+      knownFieldTypes[field.id] = field.type;
+      fieldsById.set(field.id, field);
+    }
+
+    let items: CollectionItemWithValues[];
+    let total: number;
+
+    if (needsFieldSort) {
+      ({ items, total } = await getItemsSortedByField(
+        id,
+        sortBy,
+        sortOrder,
+        false,
+        limit,
+        offset,
+        search,
+        knownFieldTypes,
+      ));
+    } else {
+      const filters = {
+        ...(search ? { search } : {}),
+        limit,
+        offset,
+      };
+      ({ items, total } = await getItemsWithValues(id, false, filters, knownFieldTypes));
+
+      if (sortBy === 'random') {
+        items = [...items].sort(() => Math.random() - 0.5);
+      }
+    }
+
+    // Enrich items with computed status and count values for the current page.
+    // Counts run after status so both are present in the response payload.
     await enrichItemsWithStatus(items, id, statusFieldId);
+    await enrichItemsWithCountValues(items, id, false, allFields, fieldsById);
 
-    // Enrich items with computed count values (always against published children)
-    await enrichItemsWithCountValues(items, id);
-
-    // Apply dynamic filters from filter layer conditions
+    // Apply dynamic filters (from filter layer conditions). Filters run after
+    // pagination, so they only narrow down the current page.
     if (dynamicFilters.length > 0) {
       items = items.filter(item => {
         return dynamicFilters.every(filter => {
           const fieldValue = String(item.values[filter.fieldId] ?? '').toLowerCase();
           const filterValue = String(filter.value).toLowerCase();
-
-          switch (filter.operator) {
-            case 'contains':
-              return fieldValue.includes(filterValue);
-            case 'does_not_contain':
-              return !fieldValue.includes(filterValue);
-            case 'is':
-              return fieldValue === filterValue;
-            case 'is_not':
-              return fieldValue !== filterValue;
-            case 'starts_with':
-              return fieldValue.startsWith(filterValue);
-            case 'ends_with':
-              return fieldValue.endsWith(filterValue);
-            case 'is_empty':
-              return fieldValue === '';
-            case 'is_not_empty':
-              return fieldValue !== '';
-            case 'gt':
-              return parseFloat(fieldValue) > parseFloat(filterValue);
-            case 'gte':
-              return parseFloat(fieldValue) >= parseFloat(filterValue);
-            case 'lt':
-              return parseFloat(fieldValue) < parseFloat(filterValue);
-            case 'lte':
-              return parseFloat(fieldValue) <= parseFloat(filterValue);
-            default:
-              return fieldValue.includes(filterValue);
-          }
+          return applyDynamicFilter(fieldValue, filterValue, filter.operator);
         });
       });
-    }
-
-    // Apply sorting
-    if (sortBy && sortBy !== 'none') {
-      if (sortBy === 'manual') {
-        // manual_order is already the DB default sort — no extra work needed
-      } else if (sortBy === 'random') {
-        items = [...items].sort(() => Math.random() - 0.5);
-      } else {
-        // Sort by field value (globally, before pagination)
-        items = [...items].sort((a, b) => {
-          const aStr = String(a.values[sortBy] || '');
-          const bStr = String(b.values[sortBy] || '');
-
-          const aNum = aStr.trim() !== '' ? Number(aStr) : NaN;
-          const bNum = bStr.trim() !== '' ? Number(bStr) : NaN;
-
-          if (!isNaN(aNum) && !isNaN(bNum)) {
-            return sortOrder === 'asc' ? aNum - bNum : bNum - aNum;
-          }
-
-          const comparison = aStr.localeCompare(bStr);
-          return sortOrder === 'asc' ? comparison : -comparison;
-        });
-      }
-    }
-
-    // Apply pagination after global sorting (if we fetched all items)
-    if (needsGlobalSort) {
-      total = items.length;
-      items = items.slice(offset, offset + limit);
     }
 
     // Optionally resolve referenced assets for the returned items
@@ -171,6 +139,25 @@ export async function GET(
       { error: error instanceof Error ? error.message : 'Failed to fetch items' },
       500
     );
+  }
+}
+
+/** Evaluate a single dynamic filter operator against pre-lowercased values. */
+function applyDynamicFilter(fieldValue: string, filterValue: string, operator: string): boolean {
+  switch (operator) {
+    case 'contains': return fieldValue.includes(filterValue);
+    case 'does_not_contain': return !fieldValue.includes(filterValue);
+    case 'is': return fieldValue === filterValue;
+    case 'is_not': return fieldValue !== filterValue;
+    case 'starts_with': return fieldValue.startsWith(filterValue);
+    case 'ends_with': return fieldValue.endsWith(filterValue);
+    case 'is_empty': return fieldValue === '';
+    case 'is_not_empty': return fieldValue !== '';
+    case 'gt': return parseFloat(fieldValue) > parseFloat(filterValue);
+    case 'gte': return parseFloat(fieldValue) >= parseFloat(filterValue);
+    case 'lt': return parseFloat(fieldValue) < parseFloat(filterValue);
+    case 'lte': return parseFloat(fieldValue) <= parseFloat(filterValue);
+    default: return fieldValue.includes(filterValue);
   }
 }
 

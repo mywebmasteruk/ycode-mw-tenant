@@ -7,7 +7,9 @@
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import type { LayerStyle, Layer } from '@/types';
-import { generateLayerStyleContentHash } from '../hash-utils';
+import { generateComponentContentHash, generateLayerStyleContentHash, generatePageLayersHash } from '../hash-utils';
+import { updateLayersWithStyle } from '@/lib/layer-style-utils';
+import type { ComponentVariant } from '@/types';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
@@ -293,9 +295,9 @@ export async function publishLayerStyle(draftStyleId: string): Promise<LayerStyl
  * Publish multiple layer styles in batch
  * Uses batch upsert for efficiency
  */
-export async function publishLayerStyles(styleIds: string[]): Promise<{ count: number }> {
+export async function publishLayerStyles(styleIds: string[]): Promise<{ count: number; changedStyleIds: string[] }> {
   if (styleIds.length === 0) {
-    return { count: 0 };
+    return { count: 0, changedStyleIds: [] };
   }
 
   const client = await getSupabaseAdmin();
@@ -319,21 +321,38 @@ export async function publishLayerStyles(styleIds: string[]): Promise<{ count: n
   }
 
   if (!draftStyles || draftStyles.length === 0) {
-    return { count: 0 };
+    return { count: 0, changedStyleIds: [] };
   }
 
-  // Prepare styles for batch upsert
-  const stylesToUpsert = draftStyles.map(draft => ({
-    id: draft.id,
-    name: draft.name,
-    classes: draft.classes,
-    design: draft.design,
-    group: draft.group,
-    content_hash: draft.content_hash,
-    is_published: true,
-    updated_at: new Date().toISOString(),
-    ...(tenantId ? { tenant_id: tenantId } : {}),
-  }));
+  let publishedQuery = client
+    .from('layer_styles')
+    .select('id, content_hash')
+    .in('id', draftStyles.map((s) => s.id))
+    .eq('is_published', true);
+  publishedQuery = applyTenantEq(publishedQuery, tenantId);
+  const { data: publishedStyles } = await publishedQuery;
+
+  const publishedHashById = new Map<string, string>();
+  for (const pub of publishedStyles || []) {
+    if (pub.content_hash) publishedHashById.set(pub.id, pub.content_hash);
+  }
+
+  const stylesToUpsert = draftStyles
+    .filter((draft) => {
+      const pubHash = publishedHashById.get(draft.id);
+      return !pubHash || pubHash !== draft.content_hash;
+    })
+    .map(draft => ({
+      id: draft.id,
+      name: draft.name,
+      classes: draft.classes,
+      design: draft.design,
+      group: draft.group,
+      content_hash: draft.content_hash,
+      is_published: true,
+      updated_at: new Date().toISOString(),
+      ...(tenantId ? { tenant_id: tenantId } : {}),
+    }));
 
   // Batch upsert all styles
   const { error: upsertError } = await client
@@ -346,7 +365,10 @@ export async function publishLayerStyles(styleIds: string[]): Promise<{ count: n
     throw new Error(`Failed to publish layer styles: ${upsertError.message}`);
   }
 
-  return { count: stylesToUpsert.length };
+  return {
+    count: stylesToUpsert.length,
+    changedStyleIds: stylesToUpsert.map((s) => s.id),
+  };
 }
 
 /**
@@ -742,4 +764,128 @@ export async function deleteStyle(id: string): Promise<void> {
   if (error) {
     throw new Error(`Failed to delete layer style: ${error.message}`);
   }
+}
+
+/**
+ * Propagate published layer style values into draft page_layers and components.
+ * Tenant-scoped when effective tenant context is available.
+ */
+export async function syncLayerStyleChangesToDrafts(
+  styleIds: string[],
+): Promise<{ affectedPageIds: string[]; affectedComponentIds: string[] }> {
+  if (styleIds.length === 0) {
+    return { affectedPageIds: [], affectedComponentIds: [] };
+  }
+
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    return { affectedPageIds: [], affectedComponentIds: [] };
+  }
+
+  const tenantId = await resolveEffectiveTenantId();
+
+  let stylesQuery = client
+    .from('layer_styles')
+    .select('id, classes, design')
+    .in('id', styleIds)
+    .eq('is_published', true)
+    .is('deleted_at', null);
+  stylesQuery = applyTenantEq(stylesQuery, tenantId);
+  const { data: styles } = await stylesQuery;
+
+  if (!styles || styles.length === 0) {
+    return { affectedPageIds: [], affectedComponentIds: [] };
+  }
+
+  let pageLayersQuery = client
+    .from('page_layers')
+    .select('id, page_id, layers, generated_css, content_hash')
+    .eq('is_published', false)
+    .is('deleted_at', null);
+  pageLayersQuery = applyTenantEq(pageLayersQuery, tenantId);
+  const { data: pageLayersRecords } = await pageLayersQuery;
+
+  const affectedPageIds: string[] = [];
+  const now = new Date().toISOString();
+
+  for (const record of pageLayersRecords || []) {
+    if (!Array.isArray(record.layers)) continue;
+
+    let layers = record.layers as Layer[];
+    for (const style of styles) {
+      layers = updateLayersWithStyle(layers, style.id, style.classes, style.design);
+    }
+
+    const newHash = generatePageLayersHash({
+      layers,
+      generated_css: record.generated_css || null,
+    });
+
+    if (newHash !== record.content_hash) {
+      affectedPageIds.push(record.page_id);
+      let updateQuery = client
+        .from('page_layers')
+        .update({ layers, content_hash: newHash, updated_at: now })
+        .eq('id', record.id)
+        .eq('is_published', false);
+      updateQuery = applyTenantEq(updateQuery, tenantId);
+      await updateQuery;
+    }
+  }
+
+  let componentsQuery = client
+    .from('components')
+    .select('id, name, layers, variants, variables, content_hash')
+    .eq('is_published', false)
+    .is('deleted_at', null);
+  componentsQuery = applyTenantEq(componentsQuery, tenantId);
+  const { data: componentRecords } = await componentsQuery;
+
+  const affectedComponentIds: string[] = [];
+
+  for (const record of componentRecords || []) {
+    if (!Array.isArray(record.layers)) continue;
+
+    let layers = record.layers as Layer[];
+    for (const style of styles) {
+      layers = updateLayersWithStyle(layers, style.id, style.classes, style.design);
+    }
+
+    let variants: ComponentVariant[] | undefined = record.variants as ComponentVariant[] | undefined;
+    if (Array.isArray(variants) && variants.length > 0) {
+      variants = variants.map((v, i) => {
+        if (i === 0) return { ...v, layers };
+        let variantLayers = v.layers as Layer[] ?? [];
+        for (const style of styles) {
+          variantLayers = updateLayersWithStyle(variantLayers, style.id, style.classes, style.design);
+        }
+        return { ...v, layers: variantLayers };
+      });
+    }
+
+    const newHash = generateComponentContentHash({
+      name: record.name,
+      layers,
+      variables: record.variables,
+      variants,
+    });
+
+    if (newHash !== record.content_hash) {
+      affectedComponentIds.push(record.id);
+      let updateQuery = client
+        .from('components')
+        .update({
+          layers,
+          ...(variants ? { variants } : {}),
+          content_hash: newHash,
+          updated_at: now,
+        })
+        .eq('id', record.id)
+        .eq('is_published', false);
+      updateQuery = applyTenantEq(updateQuery, tenantId);
+      await updateQuery;
+    }
+  }
+
+  return { affectedPageIds, affectedComponentIds };
 }

@@ -5,7 +5,19 @@
  */
 
 import { create } from 'zustand';
+import { getEditorImageUrl } from '@/lib/asset-utils';
 import type { Asset, AssetFolder } from '@/types';
+
+/**
+ * Rewrite bitmap image `public_url`s to the proxy URL with a `?width=` cap
+ * so the canvas iframe doesn't decode multi-hundred-megabyte bitmaps. SVGs,
+ * videos, documents, and any asset without a storage_path pass through.
+ */
+function normalizeAssetForEditor(asset: Asset): Asset {
+  const rewritten = getEditorImageUrl(asset);
+  if (rewritten === asset.public_url) return asset;
+  return { ...asset, public_url: rewritten };
+}
 
 interface AssetsState {
   assets: Asset[];
@@ -70,14 +82,14 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
    * Set assets directly (used during initial load)
    */
   setAssets: (assets: Asset[]) => {
-    // Create lookup map
+    const normalized = assets.map(normalizeAssetForEditor);
     const assetsById: Record<string, Asset> = {};
-    assets.forEach((asset) => {
+    normalized.forEach((asset) => {
       assetsById[asset.id] = asset;
     });
 
     set({
-      assets,
+      assets: normalized,
       assetsById,
       isLoaded: true,
     });
@@ -156,20 +168,22 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
     
     const result = await response.json();
     
+    const normalizedAssets: Asset[] = (result.data || []).map(normalizeAssetForEditor);
+
     // Add fetched assets to the global cache
-    if (result.data && result.data.length > 0) {
+    if (normalizedAssets.length > 0) {
       const state = get();
       const newAssetsById = { ...state.assetsById };
-      
-      result.data.forEach((asset: Asset) => {
+
+      normalizedAssets.forEach((asset: Asset) => {
         newAssetsById[asset.id] = asset;
       });
-      
+
       set({ assetsById: newAssetsById });
     }
-    
+
     return {
-      assets: result.data || [],
+      assets: normalizedAssets,
       total: result.total || 0,
       page: result.page || page,
       limit: result.limit || limit,
@@ -184,7 +198,7 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
     set((state) => {
       const newAssetsById = { ...state.assetsById };
       assets.forEach((asset) => {
-        newAssetsById[asset.id] = asset;
+        newAssetsById[asset.id] = normalizeAssetForEditor(asset);
       });
       return { assetsById: newAssetsById };
     });
@@ -227,7 +241,7 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
       .then(res => res.ok ? res.json() : null)
       .then(result => {
         if (result?.data) {
-          const asset = result.data;
+          const asset = normalizeAssetForEditor(result.data);
           pendingFetches.delete(id);
           set((state) => ({
             assetsById: {
@@ -248,11 +262,12 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
    * Add new asset to store (after upload)
    */
   addAsset: (asset: Asset) => {
+    const normalized = normalizeAssetForEditor(asset);
     set((state) => ({
-      assets: [asset, ...state.assets],
+      assets: [normalized, ...state.assets],
       assetsById: {
         ...state.assetsById,
-        [asset.id]: asset,
+        [normalized.id]: normalized,
       },
     }));
   },
@@ -262,9 +277,10 @@ export const useAssetsStore = create<AssetsStore>((set, get) => ({
    */
   updateAsset: (assetId: string, updates: Partial<Asset>) => {
     set((state) => {
-      const updatedAsset = { ...state.assetsById[assetId], ...updates };
+      const merged = { ...state.assetsById[assetId], ...updates } as Asset;
+      const updatedAsset = normalizeAssetForEditor(merged);
       return {
-        assets: state.assets.map(a => 
+        assets: state.assets.map(a =>
           a.id === assetId ? updatedAsset : a
         ),
         assetsById: {

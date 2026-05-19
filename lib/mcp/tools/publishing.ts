@@ -155,7 +155,8 @@ export function registerPublishingTools(server: McpServer) {
         await publishCSS();
       } catch (e) { failed.push('css'); console.error('[publish] CSS failed:', e); }
 
-      // Clear cache (tenant-scoped when request/session supplies x-tenant-id)
+      // Clear cache (tenant-scoped). No warming here: MCP is invoked over JSON-RPC,
+      // not HTTP, so there's no Request/host header to build absolute URLs from.
       try {
         await clearAllCache(await resolveEffectiveTenantId());
       } catch (e) { failed.push('cache'); console.error('[publish] cache clear failed:', e); }

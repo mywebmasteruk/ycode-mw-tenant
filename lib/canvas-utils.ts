@@ -16,25 +16,109 @@ export const CANVAS_PADDING = CANVAS_BORDER * 2;
 
 const VIEWPORT_HEIGHT_UNITS = ['vh', 'svh', 'dvh', 'lvh'] as const;
 
-const VIEWPORT_HEIGHT_PATTERN = new RegExp(
-  `^(min-h|max-h|h)-\\[(\\d+(?:\\.\\d+)?)(${VIEWPORT_HEIGHT_UNITS.join('|')})\\]$`
+/**
+ * Maps a Tailwind utility prefix to the CSS properties it sets.
+ * Multi-axis utilities (e.g. `mx`, `py`, `inset-y`) map to multiple properties.
+ */
+const PREFIX_TO_CSS_PROPS: Record<string, string[]> = {
+  // Sizing
+  h: ['height'],
+  'min-h': ['min-height'],
+  'max-h': ['max-height'],
+  w: ['width'],
+  'min-w': ['min-width'],
+  'max-w': ['max-width'],
+  size: ['width', 'height'],
+
+  // Margin
+  m: ['margin'],
+  mx: ['margin-left', 'margin-right'],
+  my: ['margin-top', 'margin-bottom'],
+  mt: ['margin-top'],
+  mr: ['margin-right'],
+  mb: ['margin-bottom'],
+  ml: ['margin-left'],
+  ms: ['margin-inline-start'],
+  me: ['margin-inline-end'],
+
+  // Padding
+  p: ['padding'],
+  px: ['padding-left', 'padding-right'],
+  py: ['padding-top', 'padding-bottom'],
+  pt: ['padding-top'],
+  pr: ['padding-right'],
+  pb: ['padding-bottom'],
+  pl: ['padding-left'],
+  ps: ['padding-inline-start'],
+  pe: ['padding-inline-end'],
+
+  // Position
+  top: ['top'],
+  right: ['right'],
+  bottom: ['bottom'],
+  left: ['left'],
+  start: ['inset-inline-start'],
+  end: ['inset-inline-end'],
+  inset: ['top', 'right', 'bottom', 'left'],
+  'inset-x': ['left', 'right'],
+  'inset-y': ['top', 'bottom'],
+
+  // Gap
+  gap: ['gap'],
+  'gap-x': ['column-gap'],
+  'gap-y': ['row-gap'],
+
+  // Translate (uses CSS variables; we emit the resolved transform directly)
+  'translate-x': ['translate-x'],
+  'translate-y': ['translate-y'],
+  translate: ['translate-x', 'translate-y'],
+};
+
+const PREFIXES_PATTERN = Object.keys(PREFIX_TO_CSS_PROPS)
+  .map(p => p.replace(/-/g, '\\-'))
+  .sort((a, b) => b.length - a.length) // Longest first so e.g. `min-h` matches before `m`
+  .join('|');
+
+const VIEWPORT_LENGTH_PATTERN = new RegExp(
+  `^(${PREFIXES_PATTERN})-\\[(-?\\d+(?:\\.\\d+)?)(${VIEWPORT_HEIGHT_UNITS.join('|')})\\]$`
 );
 
-const NAMED_VIEWPORT_UTILITIES = new Set([
-  'h-screen', 'min-h-screen', 'max-h-screen',
-  'h-dvh', 'min-h-dvh', 'max-h-dvh',
-  'h-svh', 'min-h-svh', 'max-h-svh',
-  'h-lvh', 'min-h-lvh', 'max-h-lvh',
-]);
-
-function getCssProp(prefix: string): string {
-  if (prefix === 'min-h') return 'min-height';
-  if (prefix === 'max-h') return 'max-height';
-  return 'height';
-}
+/**
+ * Static utilities that resolve to 100vh equivalents (h-screen, min-h-dvh, etc.).
+ * All become the reference height in pixels.
+ */
+const NAMED_VIEWPORT_UTILITIES: Record<string, string> = {
+  'h-screen': 'height',
+  'min-h-screen': 'min-height',
+  'max-h-screen': 'max-height',
+  'h-dvh': 'height',
+  'min-h-dvh': 'min-height',
+  'max-h-dvh': 'max-height',
+  'h-svh': 'height',
+  'min-h-svh': 'min-height',
+  'max-h-svh': 'max-height',
+  'h-lvh': 'height',
+  'min-h-lvh': 'min-height',
+  'max-h-lvh': 'max-height',
+};
 
 function escapeSelector(cls: string): string {
   return cls.replace(/([[\](){}.:!#%^&*+?<>~=|@/\\])/g, '\\$1');
+}
+
+/** Builds the CSS declarations for a class given its CSS properties and a pixel value. */
+function buildDeclarations(props: string[], pixels: number): string {
+  const declarations: string[] = [];
+  for (const prop of props) {
+    if (prop === 'translate-x') {
+      declarations.push(`--tw-translate-x:${pixels}px`);
+    } else if (prop === 'translate-y') {
+      declarations.push(`--tw-translate-y:${pixels}px`);
+    } else {
+      declarations.push(`${prop}:${pixels}px !important`);
+    }
+  }
+  return declarations.join(';');
 }
 
 /**
@@ -42,6 +126,10 @@ function escapeSelector(cls: string): string {
  * fixed pixel values based on a reference viewport height. This prevents a
  * feedback loop where the iframe expands to fit content, viewport-unit layers
  * grow with it, and the measured height keeps increasing.
+ *
+ * Covers all Tailwind length utilities (sizing, margin, padding, position,
+ * gap, translate), not just height ones — otherwise classes like
+ * `mt-[10vh]` keep recalculating against the iframe's growing height.
  */
 export function updateViewportOverrides(doc: Document, referenceHeight: number): void {
   if (referenceHeight <= 0) return;
@@ -65,20 +153,22 @@ export function updateViewportOverrides(doc: Document, referenceHeight: number):
       // would apply the override at ALL breakpoints, which is incorrect
       if (cls.includes(':')) continue;
 
-      if (NAMED_VIEWPORT_UTILITIES.has(cls)) {
+      const namedProp = NAMED_VIEWPORT_UTILITIES[cls];
+      if (namedProp) {
         seen.add(cls);
-        const prop = getCssProp(cls.split('-')[0] === 'min' ? 'min-h' : cls.split('-')[0] === 'max' ? 'max-h' : 'h');
-        rules.push(`.${escapeSelector(cls)}{${prop}:${referenceHeight}px !important}`);
+        rules.push(`.${escapeSelector(cls)}{${namedProp}:${referenceHeight}px !important}`);
         continue;
       }
 
-      const match = cls.match(VIEWPORT_HEIGHT_PATTERN);
+      const match = cls.match(VIEWPORT_LENGTH_PATTERN);
       if (match) {
         seen.add(cls);
         const [, prefix, value] = match;
         const pixels = (parseFloat(value) / 100) * referenceHeight;
-        const prop = getCssProp(prefix);
-        rules.push(`.${escapeSelector(cls)}{${prop}:${pixels}px !important}`);
+        const props = PREFIX_TO_CSS_PROPS[prefix];
+        if (props) {
+          rules.push(`.${escapeSelector(cls)}{${buildDeclarations(props, pixels)}}`);
+        }
       }
     }
   });
@@ -93,6 +183,14 @@ export function updateViewportOverrides(doc: Document, referenceHeight: number):
  * Measures the actual content extent (bottom of last visible child) rather than
  * scrollHeight, which includes viewport-filling styles like h-full / min-h-screen
  * on html/body that inflate the measured height beyond actual content.
+ *
+ * Only iterates direct children of <body> (with display:contents recursion).
+ * Deep recursion is intentionally avoided: descendants positioned absolutely
+ * relative to the iframe viewport (e.g. `position: absolute; bottom: -6rem`
+ * with no positioned ancestor) would extend past iframe bottom and create a
+ * feedback loop — each measurement would grow the iframe, pushing the absolute
+ * further down, growing the iframe again. In-flow content is already captured
+ * by the body container's height.
  */
 export function measureContentExtent(doc: Document): number {
   const body = doc.body;
@@ -104,7 +202,7 @@ export function measureContentExtent(doc: Document): number {
 
   const measure = (parent: Element) => {
     for (let i = 0; i < parent.children.length; i++) {
-      const el = parent.children[i] as HTMLElement;
+      const el = parent.children[i];
       if (el.tagName === 'SCRIPT' || el.tagName === 'STYLE' || el.tagName === 'LINK') continue;
 
       // display:contents elements have no box — recurse into their children
@@ -120,6 +218,7 @@ export function measureContentExtent(doc: Document): number {
   };
 
   measure(body);
+
   return Math.max(maxBottom, 0);
 }
 

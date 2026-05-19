@@ -31,6 +31,7 @@ import { hasComponentOrVariable } from '@/lib/tiptap-utils';
 import LayerContextMenu from '@/app/(builder)/ycode/components/LayerContextMenu';
 import CanvasTextEditor from '@/app/(builder)/ycode/components/CanvasTextEditor';
 import { useComponentsStore } from '@/stores/useComponentsStore';
+import { getComponentVariantLayers } from '@/lib/component-variant-utils';
 import { useCollectionLayerStore } from '@/stores/useCollectionLayerStore';
 import { useFilterStore } from '@/stores/useFilterStore';
 import { useCollectionsStore } from '@/stores/useCollectionsStore';
@@ -349,7 +350,7 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
 };
 
 // Separate LayerItem component to handle drag-and-drop per layer
-const LayerItem: React.FC<{
+const LayerItemImpl: React.FC<{
   layer: Layer;
   isEditMode: boolean;
   isPublished: boolean;
@@ -1175,9 +1176,27 @@ const LayerItem: React.FC<{
   // injectTranslatedText pass on the serialized page layers. Without injecting
   // here, component content would always render in the default language even
   // when the user previews a non-default locale on a page.
+  // If this nested-component instance has its variant choice driven by a
+  // parent component variable, resolve the effective variant id from the
+  // parent's override (or the variable's default). Mirrors the SSR branch in
+  // `applyComponentOverrides`; without this the canvas keeps using the
+  // baked-in `componentVariantId` and ignores instance-level overrides.
+  const effectiveVariantId = useMemo(() => {
+    const linkedId = layer.componentVariantVariableId;
+    if (!linkedId) return layer.componentVariantId;
+    const variableDef = parentComponentVariables?.find(v => v.id === linkedId);
+    const overrideValue = parentComponentOverrides?.variant?.[linkedId];
+    const value = (overrideValue ?? variableDef?.default_value) as { variant_id?: string } | undefined;
+    return value?.variant_id ?? layer.componentVariantId;
+  }, [layer.componentVariantVariableId, layer.componentVariantId, parentComponentVariables, parentComponentOverrides]);
+
   const transformedComponentLayers = useMemo(() => {
-    if (!isEditMode || !component?.layers?.length) return null;
-    const transformed = transformLayerIdsForInstance(component.layers, layer.id);
+    if (!isEditMode || !component) return null;
+    // Pick the variant the instance is bound to (silently falls back to the
+    // first variant when the requested one was deleted).
+    const variantLayers = getComponentVariantLayers(component, effectiveVariantId);
+    if (!variantLayers.length) return null;
+    const transformed = transformLayerIdsForInstance(variantLayers, layer.id);
     if (!currentLocale || currentLocale.is_default || !translations) {
       return transformed;
     }
@@ -1185,7 +1204,7 @@ const LayerItem: React.FC<{
       includeIncomplete: true,
       defaultMasterComponentId: component.id,
     });
-  }, [isEditMode, component, layer.id, currentLocale, translations, pageId]);
+  }, [isEditMode, component, layer.id, effectiveVariantId, currentLocale, translations, pageId]);
 
   // Collect hidden layer IDs from the component's transformed layers
   // Needed because Canvas computes editorHiddenLayerIds from serializeLayers (different ID transform)
@@ -1329,26 +1348,28 @@ const LayerItem: React.FC<{
   // attribute so the canvas re-fetches when the user changes the default in the
   // SelectOptionsSettings panel. On the canvas there is no live `<select>`
   // value, so the layer attribute drives the effective sort.
+  //
+  // The lookup is scoped to the current page's draft (via the `pageId` prop)
+  // because the input layer always lives on the same page as the collection
+  // layer that references it. Walking every draft on every store update would
+  // cause every collection layer on the canvas to do an O(tree) search per
+  // keystroke for unrelated pages.
   const sortByInputDefaultValue = usePagesStore((state) => {
     const inputLayerId = collectionVariable?.sort_by_inputLayerId;
-    if (!inputLayerId) return undefined;
-    for (const draft of Object.values(state.draftsByPageId)) {
-      if (!draft) continue;
-      const found = findLayerById(draft.layers, inputLayerId);
-      if (found) return found.attributes?.value;
-    }
-    return undefined;
+    if (!inputLayerId || !pageId) return undefined;
+    const draft = state.draftsByPageId[pageId];
+    if (!draft) return undefined;
+    const found = findLayerById(draft.layers, inputLayerId);
+    return found?.attributes?.value;
   });
 
   const sortOrderInputDefaultValue = usePagesStore((state) => {
     const inputLayerId = collectionVariable?.sort_order_inputLayerId;
-    if (!inputLayerId) return undefined;
-    for (const draft of Object.values(state.draftsByPageId)) {
-      if (!draft) continue;
-      const found = findLayerById(draft.layers, inputLayerId);
-      if (found) return found.attributes?.value;
-    }
-    return undefined;
+    if (!inputLayerId || !pageId) return undefined;
+    const draft = state.draftsByPageId[pageId];
+    if (!draft) return undefined;
+    const found = findLayerById(draft.layers, inputLayerId);
+    return found?.attributes?.value;
   });
 
   useEffect(() => {
@@ -1408,23 +1429,33 @@ const LayerItem: React.FC<{
 
   // Replicate the single bullet template for each slide on canvas.
   // The count comes from Swiper's snap grid (set by useCanvasSlider).
-  const sliderSnapCounts = useEditorStore((s) => s.sliderSnapCounts);
+  //
+  // Only `slideBullets` layers actually consume `sliderSnapCounts`. Subscribing
+  // unconditionally would force every layer on the canvas (700+ on heavy pages)
+  // to re-render whenever any slider's snap count changed — and worse, the map
+  // reference is recreated on every set, so all subscribers fire even when their
+  // specific slider is untouched. We pin non-bullet layers to `null` so Zustand
+  // bails out via `Object.is` and only true subscribers re-render.
+  const isSlideBulletsLayer = layer.name === 'slideBullets';
+  const sliderSnapCounts = useEditorStore(
+    (s) => isSlideBulletsLayer ? s.sliderSnapCounts : null
+  );
   const children = useMemo(() => {
-    if (!isEditMode || layer.name !== 'slideBullets' || !baseChildren?.length) return baseChildren;
+    if (!isEditMode || !isSlideBulletsLayer || !baseChildren?.length) return baseChildren;
     const currentPageId = useEditorStore.getState().currentPageId;
     if (!currentPageId) return baseChildren;
     const allLayers = usePagesStore.getState().draftsByPageId[currentPageId]?.layers;
     if (!allLayers) return baseChildren;
     const slider = findAncestorByName(allLayers, layer.id, 'slider');
     if (!slider) return baseChildren;
-    const bulletCount = sliderSnapCounts[slider.id] || slider.children?.find(c => c.name === 'slides')?.children?.length || 1;
+    const bulletCount = (sliderSnapCounts?.[slider.id]) || slider.children?.find(c => c.name === 'slides')?.children?.length || 1;
     const bulletTemplate = baseChildren[0];
     return Array.from({ length: bulletCount }, (_, i) => ({
       ...bulletTemplate,
       id: bulletTemplate.id,
       _bulletKey: `${bulletTemplate.id}-${i}`,
     }));
-  }, [isEditMode, layer.name, layer.id, baseChildren, sliderSnapCounts]);
+  }, [isEditMode, isSlideBulletsLayer, layer.id, baseChildren, sliderSnapCounts]);
 
   // For slider layers, strip inactive pagination/navigation children entirely
   const effectiveChildren = useMemo(() => {
@@ -3276,7 +3307,6 @@ const LayerItem: React.FC<{
         pageId={pageId}
         isLocked={isLocked}
         onLayerSelect={onLayerClick}
-        selectedLayerId={selectedLayerId}
         liveLayerUpdates={liveLayerUpdates}
         liveComponentUpdates={liveComponentUpdates}
       >
@@ -3287,5 +3317,33 @@ const LayerItem: React.FC<{
 
   return content;
 };
+
+/**
+ * Bail out on prop drift that doesn't affect this specific LayerItem's render:
+ * - `selectedLayerId` / `hoveredLayerId`: each LayerItem subscribes to the
+ *   editor store directly for its own selection state, so a global selection
+ *   change should only re-render the two affected rows (old + new), not the
+ *   entire tree.
+ * - everything else falls back to shallow equality, which catches genuine
+ *   layer/data changes via stable refs from the stores.
+ */
+const layerItemPropsAreEqual = (
+  prev: Readonly<React.ComponentProps<typeof LayerItemImpl>>,
+  next: Readonly<React.ComponentProps<typeof LayerItemImpl>>
+): boolean => {
+  const prevRec = prev as unknown as Record<string, unknown>;
+  const nextRec = next as unknown as Record<string, unknown>;
+  for (const key in nextRec) {
+    if (key === 'selectedLayerId' || key === 'hoveredLayerId') continue;
+    if (prevRec[key] !== nextRec[key]) return false;
+  }
+  for (const key in prevRec) {
+    if (key === 'selectedLayerId' || key === 'hoveredLayerId') continue;
+    if (!(key in nextRec)) return false;
+  }
+  return true;
+};
+
+const LayerItem = React.memo(LayerItemImpl, layerItemPropsAreEqual);
 
 export default LayerRenderer;

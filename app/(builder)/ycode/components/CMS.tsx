@@ -375,9 +375,12 @@ const CMS = React.memo(function CMS() {
     channelName: selectedCollectionId ? `collection:${selectedCollectionId}:item_locks` : '',
   });
 
-  // Subscribe to resource locks to trigger re-renders when locks change
+  // Subscribe to resource locks only — re-render the CMS table when locks
+  // change, but NOT every time a collaborator's `last_active` heartbeat
+  // refreshes the `users` slice (that fires several times per minute and
+  // causes a ~600ms commit since CMS re-renders the entire collection table).
+  // Owner email/color is read lazily inside getItemLockInfo.
   const resourceLocks = useCollaborationPresenceStore((state) => state.resourceLocks);
-  const collaborationUsers = useCollaborationPresenceStore((state) => state.users);
   const getAsset = useAssetsStore((state) => state.getAsset);
   const pages = usePagesStore((state) => state.pages);
   const folders = usePagesStore((state) => state.folders);
@@ -822,13 +825,15 @@ const CMS = React.memo(function CMS() {
       return { isLocked: false };
     }
 
-    // Check if locked by current user
-    const currentUserId = useCollaborationPresenceStore.getState().currentUserId;
-    if (lock.user_id === currentUserId) {
+    // Read currentUserId + owner lazily so the CMS doesn't subscribe to
+    // the entire `users` slice (which churns on every `last_active`
+    // heartbeat and forces this 600ms+ subtree to re-render).
+    const presenceState = useCollaborationPresenceStore.getState();
+    if (lock.user_id === presenceState.currentUserId) {
       return { isLocked: false }; // Not locked by "other" - current user can edit
     }
 
-    const owner = collaborationUsers[lock.user_id];
+    const owner = presenceState.users[lock.user_id];
     return {
       isLocked: true,
       ownerUserId: lock.user_id,

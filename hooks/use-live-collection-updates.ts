@@ -11,6 +11,7 @@ import { useAuthStore } from '../stores/useAuthStore';
 import { useCollectionsStore } from '../stores/useCollectionsStore';
 import { useCollaborationPresenceStore } from '../stores/useCollaborationPresenceStore';
 import { createClient } from '@/lib/supabase-browser';
+import { createChannelLifecycle } from '@/lib/realtime-channel';
 import type { Collection, CollectionItemWithValues } from '../types';
 
 // Types for collection updates
@@ -43,7 +44,7 @@ export interface UseLiveCollectionUpdatesReturn {
 }
 
 export function useLiveCollectionUpdates(): UseLiveCollectionUpdatesReturn {
-  const { user } = useAuthStore();
+  const user = useAuthStore((state) => state.user);
   const updateUser = useCollaborationPresenceStore((state) => state.updateUser);
   const currentUserId = useCollaborationPresenceStore((state) => state.currentUserId);
 
@@ -56,12 +57,14 @@ export function useLiveCollectionUpdates(): UseLiveCollectionUpdatesReturn {
       return;
     }
 
+    const lifecycle = createChannelLifecycle();
+
     const initializeChannel = async () => {
       try {
         const supabase = await createClient();
         const channel = supabase.channel('collections:updates');
+        if (!lifecycle.track(channel, supabase)) return;
 
-        // Listen for collection events
         channel.on('broadcast', { event: 'collection_created' }, (payload) => {
           handleIncomingCollectionCreate(payload.payload);
         });
@@ -74,7 +77,6 @@ export function useLiveCollectionUpdates(): UseLiveCollectionUpdatesReturn {
           handleIncomingCollectionDelete(payload.payload);
         });
 
-        // Listen for item events
         channel.on('broadcast', { event: 'item_created' }, (payload) => {
           handleIncomingItemCreate(payload.payload);
         });
@@ -95,6 +97,7 @@ export function useLiveCollectionUpdates(): UseLiveCollectionUpdatesReturn {
           }
         });
 
+        if (lifecycle.cancelled) return;
         channelRef.current = channel;
       } catch (error) {
         console.error('[LIVE-COLLECTION] Failed to initialize:', error);
@@ -104,10 +107,8 @@ export function useLiveCollectionUpdates(): UseLiveCollectionUpdatesReturn {
     initializeChannel();
 
     return () => {
-      if (channelRef.current) {
-        channelRef.current.unsubscribe();
-        channelRef.current = null;
-      }
+      lifecycle.teardown();
+      channelRef.current = null;
       isConnectedRef.current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- handlers are stable refs, adding would cause reconnect loops

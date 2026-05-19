@@ -11,7 +11,6 @@ import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
 
 // 2. External libraries
 import debounce from 'lodash.debounce';
-
 // 3. ShadCN UI
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -118,7 +117,6 @@ import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 interface RightSidebarProps {
-  selectedLayerId: string | null;
   onLayerUpdate: (layerId: string, updates: Partial<Layer>) => void;
 }
 
@@ -135,9 +133,10 @@ function pruneTextDescendants(children: Layer[] | undefined): Layer[] {
 }
 
 const RightSidebar = React.memo(function RightSidebar({
-  selectedLayerId,
   onLayerUpdate,
 }: RightSidebarProps) {
+  const selectedLayerId = useEditorStore((state) => state.selectedLayerId);
+
   const { openComponent, urlState, updateQueryParams } = useEditorActions();
   const { routeType } = useEditorUrl();
   const { isLocalizing, currentLocale, defaultLocale } = useLocalizationMode();
@@ -224,6 +223,7 @@ const RightSidebar = React.memo(function RightSidebar({
   const currentPageId = useEditorStore((state) => state.currentPageId);
   const activeBreakpoint = useEditorStore((state) => state.activeBreakpoint);
   const editingComponentId = useEditorStore((state) => state.editingComponentId);
+  const editingComponentVariantId = useEditorStore((state) => state.editingComponentVariantId);
   const setSelectedLayerId = useEditorStore((state) => state.setSelectedLayerId);
   const setInteractionHighlights = useEditorStore((state) => state.setInteractionHighlights);
   const setActiveInteraction = useEditorStore((state) => state.setActiveInteraction);
@@ -259,18 +259,29 @@ const RightSidebar = React.memo(function RightSidebar({
   const fields = useCollectionsStore((state) => state.fields);
   const loadFields = useCollectionsStore((state) => state.loadFields);
 
+  // Resolve the active variant id while editing a component, falling back to
+  // the first variant if state references a stale id.
+  const activeComponentVariantId = useMemo(() => {
+    if (!editingComponentId) return null;
+    const drafts = componentDrafts[editingComponentId];
+    if (!drafts) return editingComponentVariantId || null;
+    if (editingComponentVariantId && drafts[editingComponentVariantId]) return editingComponentVariantId;
+    return Object.keys(drafts)[0] || null;
+  }, [editingComponentId, editingComponentVariantId, componentDrafts]);
+
   // Get all layers (for interactions target selection)
   const allLayers: Layer[] = useMemo(() => {
-    if (editingComponentId) {
-      return componentDrafts[editingComponentId] || [];
+    if (editingComponentId && activeComponentVariantId) {
+      return componentDrafts[editingComponentId]?.[activeComponentVariantId] || [];
     } else if (currentPageId) {
       return currentDraft ? currentDraft.layers : [];
     }
     return [];
-  }, [editingComponentId, componentDrafts, currentPageId, currentDraft]);
+  }, [editingComponentId, activeComponentVariantId, componentDrafts, currentPageId, currentDraft]);
 
-  // Cached layer index for O(1) lookups
-  const layerIndexes = useMemo(() => getLayerIndexes(allLayers), [allLayers]);
+  const layerIndexes = useMemo(() => {
+    return getLayerIndexes(allLayers);
+  }, [allLayers]);
 
   const selectedLayer: Layer | null = useMemo(() => {
     if (!selectedLayerId) return null;
@@ -1000,8 +1011,8 @@ const RightSidebar = React.memo(function RightSidebar({
   /** Reset CMS bindings on child layers after the collection source changes */
   const resetChildBindings = useCallback((layerId: string) => {
     setTimeout(() => {
-      const currentLayers = editingComponentId
-        ? useComponentsStore.getState().componentDrafts[editingComponentId]
+      const currentLayers = editingComponentId && activeComponentVariantId
+        ? useComponentsStore.getState().componentDrafts[editingComponentId]?.[activeComponentVariantId]
         : currentPageId
           ? usePagesStore.getState().draftsByPageId[currentPageId]?.layers
           : null;
@@ -1010,14 +1021,14 @@ const RightSidebar = React.memo(function RightSidebar({
 
       const cleanedLayers = resetBindingsOnCollectionSourceChange(currentLayers, layerId);
       if (cleanedLayers !== currentLayers) {
-        if (editingComponentId) {
-          useComponentsStore.getState().updateComponentDraft(editingComponentId, cleanedLayers);
+        if (editingComponentId && activeComponentVariantId) {
+          useComponentsStore.getState().updateComponentDraft(editingComponentId, activeComponentVariantId, cleanedLayers);
         } else if (currentPageId) {
           setDraftLayers(currentPageId, cleanedLayers);
         }
       }
     }, 0);
-  }, [editingComponentId, currentPageId, setDraftLayers]);
+  }, [editingComponentId, activeComponentVariantId, currentPageId, setDraftLayers]);
 
   // Handle collection binding change (also resets child bindings when source changes)
   const handleCollectionChange = (collectionId: string) => {
@@ -1496,8 +1507,8 @@ const RightSidebar = React.memo(function RightSidebar({
 
   // Helper: Get current layers from the appropriate store
   const getCurrentLayersFromStore = (): Layer[] => {
-    if (editingComponentId) {
-      return useComponentsStore.getState().componentDrafts[editingComponentId] || [];
+    if (editingComponentId && activeComponentVariantId) {
+      return useComponentsStore.getState().componentDrafts[editingComponentId]?.[activeComponentVariantId] || [];
     } else if (currentPageId) {
       const draft = usePagesStore.getState().draftsByPageId[currentPageId];
       return draft ? draft.layers : [];

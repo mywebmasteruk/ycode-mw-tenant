@@ -737,7 +737,8 @@ export const useCollectionsStore = create<CollectionsStore>((set, get) => ({
     const previousItem = previousItems.find(item => item.id === itemId);
 
     // Optimistically set status to "Published · Edited" if the item is currently published
-    const statusFieldId = findStatusFieldId(get().fields[collectionId] || []);
+    const collectionFields = get().fields[collectionId] || [];
+    const statusFieldId = findStatusFieldId(collectionFields);
     const optimisticStatus: Record<string, string> = {};
     if (statusFieldId && previousItem) {
       try {
@@ -748,12 +749,25 @@ export const useCollectionsStore = create<CollectionsStore>((set, get) => ({
       } catch { /* non-JSON status value, skip */ }
     }
 
+    // Optimistically bump the virtual `updated_at` field to mirror the
+    // server-side auto-bump in setValuesByFieldName.
+    const now = new Date().toISOString();
+    const updatedAtFieldId = collectionFields.find(f => f.key === 'updated_at')?.id;
+    const optimisticTimestamps: Record<string, string> = {};
+    if (updatedAtFieldId && !(updatedAtFieldId in values)) {
+      optimisticTimestamps[updatedAtFieldId] = now;
+    }
+
     set(state => ({
       items: {
         ...state.items,
         [collectionId]: (state.items[collectionId] || []).map(item =>
           item.id === itemId
-            ? { ...item, values: { ...item.values, ...values, ...optimisticStatus }, updated_at: new Date().toISOString() }
+            ? {
+              ...item,
+              values: { ...item.values, ...values, ...optimisticStatus, ...optimisticTimestamps },
+              updated_at: now,
+            }
             : item
         ),
       },

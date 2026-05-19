@@ -37,7 +37,8 @@ interface TypographyControlsProps {
 }
 
 const TypographyControls = memo(function TypographyControls({ layer, onLayerUpdate, activeTextStyleKey, fieldGroups, allFields, collections }: TypographyControlsProps) {
-  const { activeBreakpoint, activeUIState } = useEditorStore();
+  const activeBreakpoint = useEditorStore((s) => s.activeBreakpoint);
+  const activeUIState = useEditorStore((s) => s.activeUIState);
   const showTextStyleControls = useEditorStore((state) => state.showTextStyleControls());
   const { updateDesignProperty, updateDesignProperties, debouncedUpdateDesignProperty, getDesignProperty } = useDesignSync({
     layer,
@@ -47,7 +48,7 @@ const TypographyControls = memo(function TypographyControls({ layer, onLayerUpda
     activeTextStyleKey,
   });
 
-  const { getFontByFamily } = useFontsStore();
+  const getFontByFamily = useFontsStore((s) => s.getFontByFamily);
 
   // Get current values from layer (with inheritance)
   const fontFamily = getDesignProperty('typography', 'fontFamily') || '';

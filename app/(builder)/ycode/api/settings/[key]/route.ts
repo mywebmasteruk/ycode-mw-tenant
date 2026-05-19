@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSettingByKey, setSetting } from '@/lib/repositories/settingsRepository';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
-import { clearAllCache } from '@/lib/services/cacheService';
+import { clearAllCache, getAllPublishedRoutes, warmRoutes } from '@/lib/services/cacheService';
+
+/**
+ * Setting keys that don't affect public-page rendering and therefore should
+ * NOT trigger a cache nuke when updated.
+ */
+const DRAFT_ONLY_SETTING_KEYS = new Set(['draft_css', 'email']);
 
 /**
  * GET /ycode/api/settings/[key]
@@ -56,7 +62,21 @@ export async function PUT(
 
     await setSetting(key, value);
 
-    await clearAllCache(await resolveEffectiveTenantId());
+    if (!DRAFT_ONLY_SETTING_KEYS.has(key)) {
+      await clearAllCache(await resolveEffectiveTenantId());
+
+      try {
+        const routes = await getAllPublishedRoutes();
+        const warmResult = await warmRoutes(routes, request);
+        if (warmResult) {
+          console.log(
+            `[Cache] settings (${key}): warming ${warmResult.warmed}${warmResult.total > warmResult.warmed ? ` of ${warmResult.total}` : ''} route(s) in background`,
+          );
+        }
+      } catch {
+        // Non-fatal: warming is an optimization
+      }
+    }
 
     return NextResponse.json({
       data: { key, value },

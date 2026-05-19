@@ -35,14 +35,14 @@ describe('update API tenant gates', () => {
 
   it('allows update checks for template tenants', async () => {
     mocks.requireTemplateTenantForUpdates.mockResolvedValue(null);
-    mocks.checkForUpdates.mockResolvedValue({ available: false, currentVersion: '0.13.0' });
+    mocks.checkForUpdates.mockResolvedValue({ available: false, currentVersion: '1.10.0' });
 
     const response = await getCheck();
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body).toEqual({ available: false, currentVersion: '0.13.0' });
-    expect(mocks.checkForUpdates).toHaveBeenCalledWith('0.13.0');
+    expect(body).toEqual({ available: false, currentVersion: '1.10.0' });
+    expect(mocks.checkForUpdates).toHaveBeenCalledWith('1.10.0');
   });
 
   it('blocks release history before fetching GitHub releases when tenant is not template', async () => {
@@ -61,11 +61,11 @@ describe('update API tenant gates', () => {
       ok: true,
       json: async () => [
         {
-          tag_name: 'v0.13.0',
-          name: 'Version 0.13.0',
+          tag_name: 'v1.10.0',
+          name: 'Version 1.10.0',
           body: 'Release notes',
           published_at: '2026-01-01T00:00:00.000Z',
-          html_url: 'https://github.com/ycode/ycode/releases/tag/v0.13.0',
+          html_url: 'https://github.com/ycode/ycode/releases/tag/v1.10.0',
           prerelease: false,
           draft: false,
         },
@@ -76,7 +76,7 @@ describe('update API tenant gates', () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body.currentVersion).toBe('0.13.0');
+    expect(body.currentVersion).toBe('1.10.0');
     expect(body.releases).toHaveLength(1);
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
   });

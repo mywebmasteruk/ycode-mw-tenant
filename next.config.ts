@@ -80,6 +80,7 @@ const nextConfig: NextConfig = {
         ],
       },
       {
+        // Public pages only (exclude /ycode/*, /_next/*, /a/*)
         source: '/:path((?!ycode|_next|a/).*)*',
         headers: [
           {

@@ -13,6 +13,8 @@ import { batchPublishPageLayers } from '@/lib/repositories/pageLayersRepository'
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
+import { buildSlugPath } from '@/lib/page-utils';
+import type { Page, PageFolder } from '@/types';
 
 /**
  * Helper: Generate a unique slug from a page name
@@ -159,6 +161,10 @@ export async function fixOrphanedPageSlugs(
 /** Result of page publishing with timing */
 export interface PublishPagesResult {
   count: number;
+  /** Page IDs that were actually upserted (content changed, new, or folder moved) */
+  changedPageIds: string[];
+  /** Route paths that no longer exist because a page's slug or folder changed */
+  renamedPageOldRoutes: string[];
   timing: {
     pagesDurationMs: number;
     layersDurationMs: number;
@@ -175,7 +181,7 @@ export interface PublishPagesResult {
  */
 export async function publishPages(pageIds: string[]): Promise<PublishPagesResult> {
   if (pageIds.length === 0) {
-    return { count: 0, timing: { pagesDurationMs: 0, layersDurationMs: 0, layersCount: 0 } };
+    return { count: 0, changedPageIds: [], renamedPageOldRoutes: [], timing: { pagesDurationMs: 0, layersDurationMs: 0, layersCount: 0 } };
   }
 
   // Import folder functions
@@ -189,17 +195,13 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
     throw new Error('Supabase not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
-
   // Step 1: Batch fetch all draft pages in a single query
-  let draftPagesQuery = client
+  const { data: draftPagesData, error: pagesError } = await client
     .from('pages')
     .select('*')
     .in('id', pageIds)
     .eq('is_published', false)
     .is('deleted_at', null);
-  draftPagesQuery = applyTenantEq(draftPagesQuery, tenantId);
-  const { data: draftPagesData, error: pagesError } = await draftPagesQuery;
 
   if (pagesError) {
     throw new Error(`Failed to fetch draft pages: ${pagesError.message}`);
@@ -211,7 +213,7 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
   );
 
   if (validDraftPages.length === 0) {
-    return { count: 0, timing: { pagesDurationMs: 0, layersDurationMs: 0, layersCount: 0 } };
+    return { count: 0, changedPageIds: [], renamedPageOldRoutes: [], timing: { pagesDurationMs: 0, layersDurationMs: 0, layersCount: 0 } };
   }
 
   // Step 2: Collect all unique folder IDs from pages
@@ -300,11 +302,6 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
     
     foldersBeingPublished.add(draftFolder.id);
 
-    const folderTid =
-      tenantId ??
-      (draftFolder as { tenant_id?: string | null }).tenant_id ??
-      null;
-
     foldersToUpsert.push({
       id: draftFolder.id,
       name: draftFolder.name,
@@ -315,7 +312,6 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
       settings: draftFolder.settings,
       is_published: true,
       updated_at: new Date().toISOString(),
-      ...(folderTid ? { tenant_id: folderTid } : {}),
     });
   }
 
@@ -355,11 +351,6 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
     const folderChanged = existingPublished?.page_folder_id !== publishedParentId;
     
     if (!existingPublished || contentChanged || folderChanged) {
-      const pageTid =
-        tenantId ??
-        (draftPage as { tenant_id?: string | null }).tenant_id ??
-        null;
-
       pagesToUpsert.push({
         id: draftPage.id,
         name: draftPage.name,
@@ -374,8 +365,35 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
         content_hash: draftPage.content_hash,
         is_published: true,
         updated_at: new Date().toISOString(),
-        ...(pageTid ? { tenant_id: pageTid } : {}),
       });
+    }
+  }
+
+  // Capture old route paths for pages whose slug or folder changed so the
+  // old URLs can be invalidated (prevents stale caches at the previous URL)
+  const renamedPageOldRoutes: string[] = [];
+  const publishedFoldersArray = publishedFolders as PageFolder[];
+
+  for (const upsertPage of pagesToUpsert) {
+    const oldPublished = publishedPagesById.get(upsertPage.id);
+    if (!oldPublished) continue; // new page, no old route
+
+    const slugChanged = oldPublished.slug !== upsertPage.slug;
+    const folderChanged = oldPublished.page_folder_id !== upsertPage.page_folder_id;
+
+    if (slugChanged || folderChanged) {
+      const oldPath = buildSlugPath(
+        oldPublished as Page,
+        publishedFoldersArray,
+        'page',
+      );
+      const trimmed = oldPath.slice(1); // remove leading "/"
+
+      if (oldPublished.is_index && oldPublished.page_folder_id === null) {
+        renamedPageOldRoutes.push('');
+      } else if (trimmed) {
+        renamedPageOldRoutes.push(trimmed);
+      }
     }
   }
 
@@ -398,15 +416,13 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
     }
 
     const slugsToCheck = [...new Set(nonDynamicPagesToUpsert.map((p) => p.slug))];
-    let conflictQuery = client
+    const { data: conflictingPublished } = await client
       .from('pages')
       .select('id, slug, page_folder_id, error_page')
       .eq('is_published', true)
       .eq('is_dynamic', false)
       .is('deleted_at', null)
       .in('slug', slugsToCheck);
-    conflictQuery = applyTenantEq(conflictQuery, tenantId);
-    const { data: conflictingPublished } = await conflictQuery;
 
     // Delete if a different page will occupy this slug/folder/error_page slot
     const idsToDelete = (conflictingPublished || [])
@@ -492,8 +508,15 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
   const layersCount = await batchPublishPageLayers(pageIdsForLayerPublish);
   const layersDurationMs = Math.round(performance.now() - layersStart);
 
+  const allChangedIds = [...new Set([
+    ...pagesToUpsert.map((p) => p.id),
+    ...pageIdsForLayerPublish,
+  ])];
+
   return {
     count: pagesToUpsert.length,
+    changedPageIds: allChangedIds,
+    renamedPageOldRoutes,
     timing: {
       pagesDurationMs,
       layersDurationMs,

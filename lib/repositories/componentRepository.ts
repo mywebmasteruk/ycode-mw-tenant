@@ -312,9 +312,9 @@ export async function publishComponent(draftComponentId: string): Promise<Compon
  * Publish multiple components in batch
  * Uses batch upsert for efficiency
  */
-export async function publishComponents(componentIds: string[]): Promise<{ count: number }> {
+export async function publishComponents(componentIds: string[]): Promise<{ count: number; changedComponentIds: string[] }> {
   if (componentIds.length === 0) {
-    return { count: 0 };
+    return { count: 0, changedComponentIds: [] };
   }
 
   const client = await getSupabaseAdmin();
@@ -339,19 +339,37 @@ export async function publishComponents(componentIds: string[]): Promise<{ count
   }
 
   if (!draftComponents || draftComponents.length === 0) {
-    return { count: 0 };
+    return { count: 0, changedComponentIds: [] };
   }
 
-  const componentsToUpsert = draftComponents.map(draft => ({
-    id: draft.id,
-    name: draft.name,
-    layers: draft.layers,
-    variables: draft.variables,
-    content_hash: draft.content_hash,
-    is_published: true,
-    updated_at: new Date().toISOString(),
-    ...(tenantId ? { tenant_id: tenantId } : {}),
-  }));
+  let publishedQuery = client
+    .from('components')
+    .select('id, content_hash')
+    .in('id', draftComponents.map((d) => d.id))
+    .eq('is_published', true);
+  publishedQuery = applyTenantEq(publishedQuery, tenantId);
+  const { data: publishedComponents } = await publishedQuery;
+
+  const publishedHashById = new Map<string, string>();
+  for (const pub of publishedComponents || []) {
+    if (pub.content_hash) publishedHashById.set(pub.id, pub.content_hash);
+  }
+
+  const componentsToUpsert = draftComponents
+    .filter((draft) => {
+      const pubHash = publishedHashById.get(draft.id);
+      return !pubHash || pubHash !== draft.content_hash;
+    })
+    .map(draft => ({
+      id: draft.id,
+      name: draft.name,
+      layers: draft.layers,
+      variables: draft.variables,
+      content_hash: draft.content_hash,
+      is_published: true,
+      updated_at: new Date().toISOString(),
+      ...(tenantId ? { tenant_id: tenantId } : {}),
+    }));
 
   const { error: upsertError } = await client
     .from('components')
@@ -363,7 +381,10 @@ export async function publishComponents(componentIds: string[]): Promise<{ count
     throw new Error(`Failed to publish components: ${upsertError.message}`);
   }
 
-  return { count: componentsToUpsert.length };
+  return {
+    count: componentsToUpsert.length,
+    changedComponentIds: componentsToUpsert.map((c) => c.id),
+  };
 }
 
 /**

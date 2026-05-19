@@ -1,5 +1,6 @@
 import { notFound, redirect, permanentRedirect } from 'next/navigation';
 import { unstable_cache } from 'next/cache';
+import { addCacheTag } from '@vercel/functions';
 import type { Metadata } from 'next';
 import { cache } from 'react';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
@@ -323,6 +324,11 @@ export default async function Page({ params }: PageProps) {
   // Handle catch-all slug (join array into path)
   const slugPath = Array.isArray(slug) ? slug.join('/') : slug;
 
+  // Tag this response for Vercel CDN cache invalidation. The publish endpoint
+  // purges this exact tag (route-/<slug>) so only this URL's cache entry is
+  // invalidated. No-ops outside Vercel.
+  await addCacheTag([`route-/${slugPath}`, 'all-pages']);
+
   // Check for redirects before processing the page
   const currentPath = `/${slugPath}`;
   const redirects = await fetchCachedRedirects();
@@ -368,7 +374,10 @@ export default async function Page({ params }: PageProps) {
     notFound();
   }
 
-  const { page, pageLayers, components, collectionItem, collectionFields, pageCollectionSortedItemIds, pageCollectionSortedItemSlugs, locale, availableLocales, translations } = data;
+  const { page, pageLayers, components, collectionItem, collectionFields, pageCollectionSortedItemIds, pageCollectionSortedItemSlugs, locale, availableLocales, translations, generatedCss } = data;
+
+  // Per-page CSS with fallback to global published_css
+  const cssForPage = generatedCss || globalSettings.publishedCss || undefined;
 
   // Check password protection for this page.
   // First evaluate without cookies() so non-protected pages stay cacheable.
@@ -431,7 +440,7 @@ export default async function Page({ params }: PageProps) {
       page={page}
       layers={pageLayers.layers || []}
       components={components}
-      generatedCss={globalSettings.publishedCss || undefined}
+      generatedCss={cssForPage}
       colorVariablesCss={globalSettings.colorVariablesCss || undefined}
       collectionItem={collectionItem}
       collectionFields={collectionFields}

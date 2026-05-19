@@ -1,3 +1,4 @@
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import type { PageLayers, Layer } from '../../types';
@@ -626,4 +627,169 @@ export async function getPageLayers(pageId: string): Promise<PageLayers[]> {
   }
 
   return data || [];
+}
+
+export interface AffectedPagesByResource {
+  componentPageIds: string[];
+  stylePageIds: string[];
+  collectionPageIds: string[];
+}
+
+async function expandThroughComponents(
+  client: NonNullable<Awaited<ReturnType<typeof getSupabaseAdmin>>>,
+  tenantId: string | null,
+  componentIds: string[],
+  styleIds: string[],
+): Promise<string[]> {
+  if (componentIds.length === 0 && styleIds.length === 0) return [];
+
+  let componentsQuery = client
+    .from('components')
+    .select('id, layers')
+    .eq('is_published', false)
+    .is('deleted_at', null);
+  componentsQuery = applyTenantEq(componentsQuery, tenantId);
+  const { data: allComponents } = await componentsQuery;
+
+  if (!allComponents || allComponents.length === 0) return [];
+
+  const componentTexts = allComponents.map(c => ({
+    id: c.id as string,
+    text: c.layers ? JSON.stringify(c.layers) : '',
+  }));
+
+  const expanded = new Set<string>();
+
+  for (const sid of styleIds) {
+    for (const comp of componentTexts) {
+      if (comp.text.includes(sid)) {
+        expanded.add(comp.id);
+      }
+    }
+  }
+
+  const frontier = new Set([...componentIds, ...expanded]);
+  const visited = new Set(frontier);
+
+  while (frontier.size > 0) {
+    const nextFrontier = new Set<string>();
+
+    for (const cid of frontier) {
+      for (const comp of componentTexts) {
+        if (comp.id === cid) continue;
+        if (expanded.has(comp.id) && visited.has(comp.id)) continue;
+        if (comp.text.includes(cid)) {
+          expanded.add(comp.id);
+          if (!visited.has(comp.id)) {
+            visited.add(comp.id);
+            nextFrontier.add(comp.id);
+          }
+        }
+      }
+    }
+
+    frontier.clear();
+    for (const id of nextFrontier) frontier.add(id);
+  }
+
+  return Array.from(expanded);
+}
+
+/**
+ * Find pages affected by changed components, layer styles, and collections.
+ * Scoped to the effective tenant when tenant context is available.
+ */
+export async function findAffectedPages(
+  componentIds: string[],
+  styleIds: string[],
+  collectionIds: string[],
+): Promise<AffectedPagesByResource> {
+  const result: AffectedPagesByResource = {
+    componentPageIds: [],
+    stylePageIds: [],
+    collectionPageIds: [],
+  };
+
+  const hasComponents = componentIds.length > 0;
+  const hasStyles = styleIds.length > 0;
+  const hasCollections = collectionIds.length > 0;
+
+  if (!hasComponents && !hasStyles && !hasCollections) return result;
+
+  const client = await getSupabaseAdmin();
+  if (!client) throw new Error('Supabase client not available for dependency scan');
+
+  const tenantId = await resolveEffectiveTenantId();
+
+  const expandedComponentIds = (hasComponents || hasStyles)
+    ? await expandThroughComponents(client, tenantId, componentIds, styleIds)
+    : [];
+  const allComponentIds = [...new Set([...componentIds, ...expandedComponentIds])];
+  const hasExpandedComponents = allComponentIds.length > 0;
+
+  let layersQuery = client
+    .from('page_layers')
+    .select('page_id, layers')
+    .eq('is_published', false)
+    .is('deleted_at', null);
+  layersQuery = applyTenantEq(layersQuery, tenantId);
+  const { data: allLayers } = await layersQuery;
+
+  if (allLayers) {
+    const componentSet = new Set(allComponentIds);
+    const styleSet = new Set(styleIds);
+    const collectionSet = new Set(collectionIds);
+    const componentPages = new Set<string>();
+    const stylePages = new Set<string>();
+    const collectionPages = new Set<string>();
+
+    for (const row of allLayers) {
+      if (!row.layers) continue;
+      const text = JSON.stringify(row.layers);
+
+      if (hasExpandedComponents && !componentPages.has(row.page_id)) {
+        for (const id of componentSet) {
+          if (text.includes(id)) { componentPages.add(row.page_id); break; }
+        }
+      }
+      if (hasStyles && !stylePages.has(row.page_id)) {
+        for (const id of styleSet) {
+          if (text.includes(id)) { stylePages.add(row.page_id); break; }
+        }
+      }
+      if (hasCollections && !collectionPages.has(row.page_id)) {
+        for (const id of collectionSet) {
+          if (text.includes(id)) { collectionPages.add(row.page_id); break; }
+        }
+      }
+    }
+
+    result.componentPageIds = Array.from(componentPages);
+    result.stylePageIds = Array.from(stylePages);
+    result.collectionPageIds = Array.from(collectionPages);
+  }
+
+  if (hasCollections) {
+    let pagesQuery = client
+      .from('pages')
+      .select('id, settings')
+      .eq('is_published', false)
+      .is('deleted_at', null);
+    pagesQuery = applyTenantEq(pagesQuery, tenantId);
+    const { data: allPages } = await pagesQuery;
+
+    if (allPages) {
+      const collectionPageSet = new Set(result.collectionPageIds);
+      for (const page of allPages) {
+        if (!page.settings || collectionPageSet.has(page.id)) continue;
+        const text = JSON.stringify(page.settings);
+        for (const id of collectionIds) {
+          if (text.includes(id)) { collectionPageSet.add(page.id); break; }
+        }
+      }
+      result.collectionPageIds = Array.from(collectionPageSet);
+    }
+  }
+
+  return result;
 }

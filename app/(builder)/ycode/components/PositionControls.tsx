@@ -21,7 +21,8 @@ interface PositionControlsProps {
 }
 
 const PositionControls = memo(function PositionControls({ layer, onLayerUpdate }: PositionControlsProps) {
-  const { activeBreakpoint, activeUIState } = useEditorStore();
+  const activeBreakpoint = useEditorStore((s) => s.activeBreakpoint);
+  const activeUIState = useEditorStore((s) => s.activeUIState);
   const { updateDesignProperty, debouncedUpdateDesignProperty, getDesignProperty } = useDesignSync({
     layer,
     onLayerUpdate,
