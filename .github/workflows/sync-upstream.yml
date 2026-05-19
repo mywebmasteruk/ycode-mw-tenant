@@ -106,9 +106,9 @@ jobs:
           LATEST_TAG: ${{ steps.branch.outputs.latest_tag }}
           MERGE_STATUS: ${{ steps.merge.outputs.status }}
         run: |
-          gh label create "needs-developer-review" --color "B60205" --description "Requires developer review before merge" || true
-          gh label create "tenant-sensitive-update" --color "D93F0B" --description "Touches tenant-sensitive MasjidWeb/Ycode files" || true
-          gh label create "safe-ycode-update" --color "0E8A16" --description "Created by the safe Ycode update workflow" || true
+          gh label create "needs-developer-review" --repo "$GITHUB_REPOSITORY" --color "B60205" --description "Requires developer review before merge" || true
+          gh label create "tenant-sensitive-update" --repo "$GITHUB_REPOSITORY" --color "D93F0B" --description "Touches tenant-sensitive MasjidWeb/Ycode files" || true
+          gh label create "safe-ycode-update" --repo "$GITHUB_REPOSITORY" --color "0E8A16" --description "Created by the safe Ycode update workflow" || true
 
           report="$(cat /tmp/update-safety-report.md 2>/dev/null || echo 'Safety report was not generated.')"
           if [ "$MERGE_STATUS" = "0" ]; then
@@ -138,18 +138,18 @@ jobs:
           EOF
           )"
 
-          existing_pr="$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // empty')"
+          existing_pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --json number --jq '.[0].number // empty')"
           if [ -n "$existing_pr" ]; then
-            gh pr edit "$existing_pr" --title "$title" --body "$body"
+            gh pr edit "$existing_pr" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
             pr_number="$existing_pr"
           else
-            gh pr create --base main --head "$BRANCH" --title "$title" --body "$body" $draft_flag
-            pr_number="$(gh pr list --head "$BRANCH" --json number --jq '.[0].number')"
+            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" --title "$title" --body "$body" $draft_flag
+            pr_number="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --json number --jq '.[0].number')"
           fi
 
-          gh pr edit "$pr_number" --add-label "safe-ycode-update"
+          gh pr edit "$pr_number" --repo "$GITHUB_REPOSITORY" --add-label "safe-ycode-update"
           if [ "$MERGE_STATUS" != "0" ] || grep -q "Status: high" /tmp/update-safety-report.md; then
-            gh pr edit "$pr_number" --add-label "needs-developer-review,tenant-sensitive-update"
+            gh pr edit "$pr_number" --repo "$GITHUB_REPOSITORY" --add-label "needs-developer-review,tenant-sensitive-update"
           fi
 
       - name: No upstream changes found
