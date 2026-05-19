@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { marked } from 'marked';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -14,20 +14,31 @@ import Icon from '@/components/ui/icon';
 import { Label } from '@/components/ui/label';
 import { Empty, EmptyTitle } from '@/components/ui/empty';
 
-interface UpdateInfo {
-  available: boolean;
+type AdminUpdateStatus =
+  | 'up_to_date'
+  | 'update_available'
+  | 'preparing'
+  | 'checks_running'
+  | 'safe_to_review'
+  | 'needs_safety_review'
+  | 'blocked'
+  | 'failed_checks'
+  | 'setup_required'
+  | 'unknown_error';
+
+interface AdminUpdateCenterStatus {
+  ok: boolean;
+  status: AdminUpdateStatus;
+  title: string;
+  description: string;
   currentVersion: string;
   latestVersion?: string;
-  releaseUrl?: string;
-  releaseNotes?: string;
-  publishedAt?: string;
-  message?: string;
-  error?: string;
-  updateInstructions?: {
-    method: 'github-sync' | 'git-pull' | 'manual';
-    steps: string[];
-    autoSyncUrl?: string;
-  };
+  canPrepare: boolean;
+  primaryActionLabel?: string;
+  reviewUrl?: string;
+  workflowUrl?: string;
+  productionProtected: boolean;
+  technicalDetails?: string;
 }
 
 interface Release {
@@ -46,11 +57,23 @@ interface ReleasesResponse {
   error?: string;
 }
 
-// Configure marked for safe rendering
 marked.setOptions({
   gfm: true,
   breaks: true,
 });
+
+const STATUS_BADGE: Record<AdminUpdateStatus, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'outline' | 'green' }> = {
+  up_to_date: { label: 'Up to date', variant: 'green' },
+  update_available: { label: 'Update available', variant: 'default' },
+  preparing: { label: 'Preparing', variant: 'secondary' },
+  checks_running: { label: 'Checks running', variant: 'secondary' },
+  safe_to_review: { label: 'Checks passed', variant: 'green' },
+  needs_safety_review: { label: 'Needs review', variant: 'destructive' },
+  blocked: { label: 'Blocked', variant: 'destructive' },
+  failed_checks: { label: 'Failed checks', variant: 'destructive' },
+  setup_required: { label: 'Setup needed', variant: 'outline' },
+  unknown_error: { label: 'Status unavailable', variant: 'outline' },
+};
 
 function formatDate(dateString: string): string {
   const date = new Date(dateString);
@@ -61,45 +84,63 @@ function formatDate(dateString: string): string {
   });
 }
 
+function statusIcon(status: AdminUpdateStatus) {
+  if (status === 'up_to_date' || status === 'safe_to_review') return 'check';
+  if (status === 'preparing' || status === 'checks_running') return 'refresh';
+  return 'info';
+}
+
+function shouldPollStatus(status?: AdminUpdateStatus) {
+  return status === 'preparing' || status === 'checks_running';
+}
+
 export default function UpdatesSettingsClient() {
-  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<AdminUpdateCenterStatus | null>(null);
   const [releases, setReleases] = useState<Release[]>([]);
   const [loading, setLoading] = useState(true);
+  const [preparing, setPreparing] = useState(false);
+  const [prepareMessage, setPrepareMessage] = useState<string | null>(null);
   const [releasesLoading, setReleasesLoading] = useState(true);
   const [releasesError, setReleasesError] = useState<string | null>(null);
 
-  useEffect(() => {
-    checkForUpdates();
-    fetchReleases();
-  }, []);
-
-  const checkForUpdates = async () => {
+  const fetchUpdateStatus = useCallback(async () => {
     setLoading(true);
     try {
-      const response = await fetch('/ycode/api/updates/check');
+      const response = await fetch('/ycode/api/updates/status');
+      const data = await response.json();
       if (response.ok) {
-        const data = await response.json();
-        setUpdateInfo(data);
+        setUpdateStatus(data);
       } else {
-        setUpdateInfo({
-          available: false,
-          currentVersion: 'Unknown',
-          error: 'Failed to check for updates',
+        setUpdateStatus({
+          ok: false,
+          status: 'unknown_error',
+          title: data?.title || 'Unable to read update status',
+          description: data?.description || 'MasjidWeb could not read the safe update status. Production has not changed.',
+          currentVersion: data?.currentVersion || 'Unknown',
+          latestVersion: data?.latestVersion,
+          canPrepare: false,
+          productionProtected: true,
+          technicalDetails: data?.technicalDetails || data?.error,
         });
       }
     } catch (error) {
-      console.error('Failed to check for updates:', error);
-      setUpdateInfo({
-        available: false,
+      console.error('Failed to check update status:', error);
+      setUpdateStatus({
+        ok: false,
+        status: 'unknown_error',
+        title: 'Unable to read update status',
+        description: 'MasjidWeb could not read the safe update status. Production has not changed.',
         currentVersion: 'Unknown',
-        error: 'Failed to check for updates',
+        canPrepare: false,
+        productionProtected: true,
+        technicalDetails: error instanceof Error ? error.message : String(error),
       });
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const fetchReleases = async () => {
+  const fetchReleases = useCallback(async () => {
     setReleasesLoading(true);
     setReleasesError(null);
     try {
@@ -119,6 +160,44 @@ export default function UpdatesSettingsClient() {
     } finally {
       setReleasesLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    fetchUpdateStatus();
+    fetchReleases();
+  }, [fetchUpdateStatus, fetchReleases]);
+
+  useEffect(() => {
+    if (!shouldPollStatus(updateStatus?.status)) return;
+
+    const interval = window.setInterval(fetchUpdateStatus, 10000);
+    return () => window.clearInterval(interval);
+  }, [fetchUpdateStatus, updateStatus?.status]);
+
+  const currentBadge = useMemo(() => {
+    return STATUS_BADGE[updateStatus?.status || 'unknown_error'];
+  }, [updateStatus?.status]);
+
+  const prepareSafeUpdate = async () => {
+    setPreparing(true);
+    setPrepareMessage(null);
+    try {
+      const response = await fetch('/ycode/api/updates/prepare', { method: 'POST' });
+      const data = await response.json();
+
+      if (!response.ok) {
+        setPrepareMessage(data?.message || data?.error || 'Unable to start safe update preparation. Production has not changed.');
+        return;
+      }
+
+      setPrepareMessage(data.message || 'Safe update preparation has started. Production has not changed.');
+      await fetchUpdateStatus();
+    } catch (error) {
+      console.error('Failed to prepare safe update:', error);
+      setPrepareMessage('Unable to start safe update preparation. Production has not changed.');
+    } finally {
+      setPreparing(false);
+    }
   };
 
   return (
@@ -126,154 +205,142 @@ export default function UpdatesSettingsClient() {
       <div className="max-w-3xl mx-auto">
 
         <header className="pt-8 pb-3">
-          <span className="text-base font-medium">Updates</span>
+          <span className="text-base font-medium">Core updates</span>
         </header>
 
-        {/* Version Status Block */}
         <div className="grid grid-cols-3 gap-10 bg-secondary/20 p-8 rounded-lg">
 
           <div>
-            <FieldLegend>Version status</FieldLegend>
+            <FieldLegend>MasjidWeb update center</FieldLegend>
             <FieldDescription>
-              Check if the platform builder core is up to date with the latest release.
+              Prepare Ycode core updates safely from inside admin. This does not change production directly.
             </FieldDescription>
           </div>
 
           <div className="col-span-2">
-            {loading ? (
+            {loading && !updateStatus ? (
               <Empty className="bg-input">
                 <Spinner />
               </Empty>
-            ) : updateInfo?.error ? (
-              <div className="py-4">
-                <div className="flex items-center gap-2 text-destructive">
-                  <Icon name="info" className="size-5" />
-                  <span className="text-sm">{updateInfo.error}</span>
-                </div>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  className="mt-4"
-                  onClick={checkForUpdates}
-                >
-                  Try again
-                </Button>
-              </div>
-            ) : updateInfo?.available ? (
-              // Update available state
-              <div className="flex flex-col gap-4">
-
-                <div className="flex items-center gap-4">
-                  <div className="size-12 rounded-full bg-secondary flex items-center justify-center font-medium text-[11px] text-current/60">
-                    {updateInfo.latestVersion}
+            ) : updateStatus ? (
+              <div className="flex flex-col gap-5">
+                <div className="flex items-start gap-4">
+                  <div className="size-12 rounded-full bg-secondary flex items-center justify-center shrink-0">
+                    {shouldPollStatus(updateStatus.status) ? (
+                      <Spinner />
+                    ) : (
+                      <Icon name={statusIcon(updateStatus.status)} className="size-6" />
+                    )}
                   </div>
-                  <div>
-                    <Label>Update available</Label>
-                    <Label variant="muted">Current version {updateInfo?.currentVersion}</Label>
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Label>{updateStatus.title}</Label>
+                      <Badge variant={currentBadge.variant}>{currentBadge.label}</Badge>
+                    </div>
+                    <p className="text-sm text-muted-foreground leading-6">
+                      {updateStatus.description}
+                    </p>
                   </div>
                 </div>
 
                 <FieldSeparator />
 
-                {updateInfo.updateInstructions && (
-                  <div className="space-y-4">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium">How to update</span>
-                    </div>
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div className="rounded-lg bg-input p-3">
+                    <div className="text-muted-foreground">Current core version</div>
+                    <div className="font-medium mt-1">{updateStatus.currentVersion}</div>
+                  </div>
+                  <div className="rounded-lg bg-input p-3">
+                    <div className="text-muted-foreground">Latest available version</div>
+                    <div className="font-medium mt-1">{updateStatus.latestVersion || 'Unknown'}</div>
+                  </div>
+                </div>
 
-                    <ol className="flex flex-col gap-3 text-sm text-muted-foreground">
-                      {updateInfo.updateInstructions.steps
-                        .filter(step => step.trim() !== '')
-                        .map((step, index) => (
-                          <li key={index} className="flex gap-2">
-                            <span className="font-medium text-foreground/50 size-6 shrink-0 bg-input rounded-md flex items-center justify-center">{index + 1}</span>
-                            <span className="mt-0.5" dangerouslySetInnerHTML={{ __html: step }} />
-                          </li>
-                        ))}
-                    </ol>
-
-                    <div className="flex gap-3 pt-2">
-                      {updateInfo.updateInstructions.autoSyncUrl && (
-                        <Button size="sm" asChild>
-                          <a
-                            href={updateInfo.updateInstructions.autoSyncUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            <svg
-                              className="size-4" fill="currentColor"
-                              viewBox="0 0 24 24"
-                            >
-                              <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
-                            </svg>
-                            {updateInfo.updateInstructions.method === 'github-sync'
-                              ? 'Run Safe Update Workflow'
-                              : 'View on GitHub'}
-                          </a>
-                        </Button>
-                      )}
+                <div className="rounded-lg border border-border p-4 bg-background/40">
+                  <div className="flex items-start gap-3">
+                    <Icon name="info" className="size-5 mt-0.5" />
+                    <div>
+                      <div className="text-sm font-medium">Production is protected</div>
+                      <div className="text-sm text-muted-foreground mt-1">
+                        The button only prepares a safe update and safety report. The live site changes only after the protected review path is approved.
+                      </div>
                     </div>
+                  </div>
+                </div>
+
+                {prepareMessage && (
+                  <div className="rounded-lg bg-input p-3 text-sm text-muted-foreground">
+                    {prepareMessage}
                   </div>
                 )}
-              </div>
 
-            ) : (
-              // Up to date state
-              <div className="flex flex-col gap-4">
-
-                <div className="flex items-center gap-4">
-                  <div className="size-12 rounded-full bg-green-400/10 flex items-center justify-center">
-                    <Icon name="check" className="size-6 text-green-400" />
+                {updateStatus.technicalDetails && (
+                  <div className="rounded-lg bg-input p-3 text-sm text-muted-foreground">
+                    {updateStatus.technicalDetails}
                   </div>
-                  <div>
-                    <Label>You&apos;re up to date</Label>
-                    <Label variant="muted">Version {updateInfo?.currentVersion}</Label>
-                  </div>
-                </div>
+                )}
 
-                <FieldSeparator />
-
-                <div className="flex gap-1">
-                  <Button
-                    size="sm" variant="secondary"
-                    asChild
-                  >
-                    <a
-                      href={updateInfo?.updateInstructions?.autoSyncUrl || 'https://github.com/ycode/ycode'}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      <svg
-                        className="size-4" fill="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
-                      </svg>
-                      View on GitHub
-                    </a>
-                  </Button>
+                <div className="flex flex-wrap gap-3">
                   <Button
                     size="sm"
-                    variant="ghost"
-                    onClick={checkForUpdates}
+                    disabled={!updateStatus.canPrepare || preparing}
+                    onClick={prepareSafeUpdate}
                   >
-                    Check again
+                    {preparing ? <Spinner /> : null}
+                    {updateStatus.primaryActionLabel || 'Prepare safe update'}
                   </Button>
-                </div>
 
+                  <Button
+                    size="sm" variant="secondary"
+                    onClick={fetchUpdateStatus} disabled={loading || preparing}
+                  >
+                    Check status again
+                  </Button>
+
+                  {updateStatus.reviewUrl && (
+                    <Button
+                      size="sm" variant="outline"
+                      asChild
+                    >
+                      <a
+                        href={updateStatus.reviewUrl} target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        View prepared update
+                      </a>
+                    </Button>
+                  )}
+
+                  {updateStatus.workflowUrl && (
+                    <Button
+                      size="sm" variant="outline"
+                      asChild
+                    >
+                      <a
+                        href={updateStatus.workflowUrl} target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        View preparation run
+                      </a>
+                    </Button>
+                  )}
+                </div>
               </div>
+            ) : (
+              <Empty className="bg-input">
+                <EmptyTitle>Unable to read update status</EmptyTitle>
+              </Empty>
             )}
           </div>
 
         </div>
 
-        {/* Release History Block */}
         <div className="grid grid-cols-3 gap-10 bg-secondary/20 p-8 rounded-lg mt-6">
 
           <div>
             <FieldLegend>Release history</FieldLegend>
             <FieldDescription>
-              View all releases and their changelogs.
+              View Ycode releases and changelogs. Use the update center above to prepare updates safely.
             </FieldDescription>
           </div>
 
@@ -293,32 +360,28 @@ export default function UpdatesSettingsClient() {
             ) : (
               <ul className="divide-y divide-border">
                 {(() => {
-                  // Find the index of the current version to determine which releases are newer
                   const currentIndex = releases.findIndex((r) => r.isCurrent);
                   return releases.map((release, index) => {
-                    // A release is newer if it appears before the current version in the list
-                    const isNewerThanCurrent = currentIndex !== -1 && index < currentIndex;
                     return (
                       <li key={release.version}>
-                        {index > 0 }
-
                         <div className="relative flex gap-x-4 py-5">
-
                           <div className="absolute top-0 bottom-0 left-0 flex w-6 justify-center">
                             <div className="w-px bg-secondary"></div>
                           </div>
                           <div className="relative flex size-6 flex-none items-center justify-center bg-[#1c1c1c]">
-                            {release.isCurrent && !updateInfo?.available ? (
+                            {release.isCurrent && updateStatus?.status === 'up_to_date' ? (
                               <div className="size-1.5 rounded-full bg-green-400 ring ring-green-400" />
-                            ) : release.isCurrent && updateInfo?.available ? (
+                            ) : release.isCurrent ? (
                               <div className="size-1.5 rounded-full bg-white/50 ring ring-white/50" />
+                            ) : currentIndex !== -1 && index < currentIndex ? (
+                              <div className="size-1.5 rounded-full bg-primary ring ring-primary" />
                             ) : (
                               <div className="size-1.5 rounded-full bg-[#1c1c1c] ring ring-secondary" />
                             )}
                           </div>
 
                           <div className="flex-auto py-0.5">
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
                               <Badge
                                 variant={
                                   index === 0 && release.isCurrent ? 'green' :
@@ -346,7 +409,7 @@ export default function UpdatesSettingsClient() {
                               )}
                             </div>
                             {release.isPrerelease && (
-                              <Badge variant="outline" className="text-xs">Pre-release</Badge>
+                              <Badge variant="outline" className="text-xs mt-2">Pre-release</Badge>
                             )}
                             {release.body && (
                               <div
@@ -357,7 +420,6 @@ export default function UpdatesSettingsClient() {
                           </div>
 
                         </div>
-
                       </li>
                     );
                   });
