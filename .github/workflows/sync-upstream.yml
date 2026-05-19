@@ -122,21 +122,21 @@ jobs:
           fi
 
           body="$(cat <<EOF
-## Summary
-${status_text}
+          ## Summary
+          ${status_text}
 
-## Safety report
+          ## Safety report
 
-\`\`\`
-${report}
-\`\`\`
+          \`\`\`
+          ${report}
+          \`\`\`
 
-## What to do
-- If checks pass and the PR is not draft, review and merge when ready.
-- If this PR is draft or has conflicts, do not merge until a developer resolves it.
-- Production deploys only after this PR is merged into main.
-EOF
-)"
+          ## What to do
+          - If checks pass and the PR is not draft, review and merge when ready.
+          - If this PR is draft or has conflicts, do not merge until a developer resolves it.
+          - Production deploys only after this PR is merged into main.
+          EOF
+          )"
 
           existing_pr="$(gh pr list --head "$BRANCH" --json number --jq '.[0].number // empty')"
           if [ -n "$existing_pr" ]; then
