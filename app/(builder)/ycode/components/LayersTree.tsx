@@ -30,6 +30,7 @@ import { useLayerStylesStore } from '@/stores/useLayerStylesStore';
 import { useComponentsStore } from '@/stores/useComponentsStore';
 import { useCollectionsStore } from '@/stores/useCollectionsStore';
 import { useLocalisationStore } from '@/stores/useLocalisationStore';
+
 import { usePagesStore } from '@/stores/usePagesStore';
 import { useCollaborationPresenceStore, getResourceLockKey, RESOURCE_TYPES } from '@/stores/useCollaborationPresenceStore';
 import { useAuthStore } from '@/stores/useAuthStore';
@@ -134,15 +135,105 @@ function getLayerDisplayLabel(
   return getLayerName(layer, context, breakpoint);
 }
 
+interface LayerTreeStoreValues {
+  getComponentById: ReturnType<typeof useComponentsStore.getState>['getComponentById'];
+  collections: ReturnType<typeof useCollectionsStore.getState>['collections'];
+  fieldsByCollectionId: ReturnType<typeof useCollectionsStore.getState>['fields'];
+  selectLayerWithSublayer: ReturnType<typeof useEditorStore.getState>['selectLayerWithSublayer'];
+  editingComponentId: string | null;
+  interactionTriggerLayerIds: string[];
+  interactionTargetLayerIds: string[];
+  activeInteractionTriggerLayerId: string | null;
+  activeInteractionTargetLayerIds: string[];
+  activeUIState: string;
+}
+
+const LayerTreeStoreContext = React.createContext<LayerTreeStoreValues>(null!);
+
 interface LayersTreeProps {
   layers: Layer[];
-  selectedLayerId: string | null;
-  selectedLayerIds?: string[]; // New multi-select support
   onLayerSelect: (layerId: string) => void;
   onReorder: (newLayers: Layer[], movedLayerId?: string) => void;
   pageId: string;
   liveLayerUpdates?: UseLiveLayerUpdatesReturn | null;
   liveComponentUpdates?: UseLiveComponentUpdatesReturn | null;
+}
+
+const ROW_HEIGHT = 32;
+
+interface DndInfo {
+  attributes: Record<string, unknown>;
+  listeners: Record<string, unknown>;
+  setRowElement: (el: HTMLDivElement | null) => void;
+}
+
+const DndInfoContext = React.createContext<React.MutableRefObject<DndInfo>>(null!);
+
+interface VirtualLayerRowProps {
+  nodeId: string;
+  isRenaming: boolean;
+  isLocalizing: boolean;
+  translateY: number;
+  children: React.ReactNode;
+}
+
+/**
+ * Wrapper that owns dnd-kit hooks so the inner memoized LayerRow
+ * is shielded from DndContext re-renders. Passes dnd info via a
+ * stable ref context so LayerRow can apply it to its content div.
+ */
+function VirtualLayerRow({ nodeId, isRenaming, isLocalizing, translateY, children }: VirtualLayerRowProps) {
+  const { setNodeRef: setDropRef } = useDroppable({ id: nodeId });
+  const { attributes, listeners, setNodeRef: setDragRef } = useDraggable({
+    id: nodeId,
+    disabled: isRenaming || isLocalizing,
+  });
+
+  const elementRef = useRef<HTMLDivElement | null>(null);
+  const dragRefFn = useRef(setDragRef);
+  const dropRefFn = useRef(setDropRef);
+  dragRefFn.current = setDragRef;
+  dropRefFn.current = setDropRef;
+
+  // Stable ref callback — identity never changes
+  const setRowElement = useCallback((el: HTMLDivElement | null) => {
+    elementRef.current = el;
+    dragRefFn.current(el);
+    dropRefFn.current(el);
+  }, []);
+
+  const dndInfoRef = useRef<DndInfo>({
+    attributes: attributes as unknown as Record<string, unknown>,
+    listeners: listeners as unknown as Record<string, unknown>,
+    setRowElement,
+  });
+  dndInfoRef.current.attributes = attributes as unknown as Record<string, unknown>;
+  dndInfoRef.current.listeners = listeners as unknown as Record<string, unknown>;
+
+  // Re-register DOM element when dnd-kit ref setters change
+  useLayoutEffect(() => {
+    if (elementRef.current) {
+      setDragRef(elementRef.current);
+      setDropRef(elementRef.current);
+    }
+  }, [setDragRef, setDropRef]);
+
+  return (
+    <DndInfoContext.Provider value={dndInfoRef}>
+      <div
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          width: '100%',
+          height: ROW_HEIGHT,
+          transform: `translateY(${translateY}px)`,
+        }}
+      >
+        {children}
+      </div>
+    </DndInfoContext.Provider>
+  );
 }
 
 interface LayerRowProps {
@@ -156,12 +247,11 @@ interface LayerRowProps {
   isDragging: boolean;
   isDragActive: boolean;
   dropPosition: 'above' | 'below' | 'inside' | null;
-  highlightedDepths: Set<number>;
+  highlightedDepths: string;
   onSelect: (id: string) => void;
   onMultiSelect: (id: string, modifiers: { meta: boolean; shift: boolean }) => void;
   onToggle: (id: string) => void;
   pageId: string;
-  selectedLayerId: string | null;
   liveLayerUpdates?: UseLiveLayerUpdatesReturn | null;
   liveComponentUpdates?: UseLiveComponentUpdatesReturn | null;
   activeBreakpoint: Breakpoint;
@@ -203,7 +293,6 @@ const LayerRow = React.memo(function LayerRow({
   onMultiSelect,
   onToggle,
   pageId,
-  selectedLayerId,
   liveLayerUpdates,
   liveComponentUpdates,
   activeBreakpoint,
@@ -212,20 +301,18 @@ const LayerRow = React.memo(function LayerRow({
   onRenameConfirm,
   onToggleVisibility,
 }: LayerRowProps) {
-  const getStyleById = useLayerStylesStore((state) => state.getStyleById);
-  const getComponentById = useComponentsStore((state) => state.getComponentById);
-  const collections = useCollectionsStore((state) => state.collections);
-  const fieldsByCollectionId = useCollectionsStore((state) => state.fields);
-
-  // Use selective subscriptions to avoid re-renders when unrelated state changes
-  const selectLayerWithSublayer = useEditorStore((state) => state.selectLayerWithSublayer);
-  const editingComponentId = useEditorStore((state) => state.editingComponentId);
-  const interactionTriggerLayerIds = useEditorStore((state) => state.interactionTriggerLayerIds);
-  const interactionTargetLayerIds = useEditorStore((state) => state.interactionTargetLayerIds);
-  const activeInteractionTriggerLayerId = useEditorStore((state) => state.activeInteractionTriggerLayerId);
-  const activeInteractionTargetLayerIds = useEditorStore((state) => state.activeInteractionTargetLayerIds);
-  const setHoveredLayerId = useEditorStore((state) => state.setHoveredLayerId);
-  const activeUIState = useEditorStore((state) => state.activeUIState);
+  const {
+    getComponentById,
+    collections,
+    fieldsByCollectionId,
+    selectLayerWithSublayer,
+    editingComponentId,
+    interactionTriggerLayerIds,
+    interactionTargetLayerIds,
+    activeInteractionTriggerLayerId,
+    activeInteractionTargetLayerIds,
+    activeUIState,
+  } = React.useContext(LayerTreeStoreContext);
   const isStateActive = activeUIState !== 'neutral';
 
   // Disable layer drag/drop and add buttons in non-default locales — the tree
@@ -237,14 +324,8 @@ const LayerRow = React.memo(function LayerRow({
     return !!(locale && !locale.is_default);
   });
 
-  const { setNodeRef: setDropRef } = useDroppable({
-    id: node.id,
-  });
-
-  const { attributes, listeners, setNodeRef: setDragRef } = useDraggable({
-    id: node.id,
-    disabled: isRenaming || isLocalizing,
-  });
+  const dndInfo = React.useContext(DndInfoContext);
+  const { attributes, listeners, setRowElement } = dndInfo.current;
 
   const renameInputRef = React.useRef<HTMLInputElement>(null);
   const renameReadyRef = React.useRef(false);
@@ -271,12 +352,6 @@ const LayerRow = React.memo(function LayerRow({
       renameReadyRef.current = false;
     }
   }, [isRenaming]);
-
-  // Combine refs for drag and drop
-  const setRefs = (element: HTMLDivElement | null) => {
-    setDragRef(element);
-    setDropRef(element);
-  };
 
   const hasChildren = node.layer.children && node.layer.children.length > 0;
   const isCollapsed = node.collapsed || false;
@@ -322,7 +397,10 @@ const LayerRow = React.memo(function LayerRow({
   // Check if this is the Body layer (locked)
   const isLocked = node.layer.id === 'body';
 
-  const [isHovered, setIsHovered] = React.useState(false);
+  // Hover is driven by CSS :hover (via `group-hover/row:` on the wrapper) so
+  // each mouseover/leave doesn't queue a React commit. Background colors for
+  // both states are computed once per render and applied through CSS variables.
+  const canHover = !isDragActive && !isDragging && !isLockedByOther;
 
   const rowBg = isSelected && !usePurpleStyle && !isStateActive
     ? 'var(--primary)'
@@ -331,29 +409,30 @@ const LayerRow = React.memo(function LayerRow({
       : isSelected && usePurpleStyle
         ? 'rgb(168 85 247)'
         : isChildOfSelected && !usePurpleStyle && !isStateActive
-          ? isHovered
-            ? 'color-mix(in oklch, var(--primary) 20%, var(--background))'
-            : 'color-mix(in oklch, var(--primary) 15%, var(--background))'
+          ? 'color-mix(in oklch, var(--primary) 15%, var(--background))'
           : isChildOfSelected && !usePurpleStyle && isStateActive
-            ? isHovered
-              ? 'color-mix(in oklch, #8dd92f 20%, var(--background))'
-              : 'color-mix(in oklch, #8dd92f 15%, var(--background))'
+            ? 'color-mix(in oklch, #8dd92f 15%, var(--background))'
             : isChildOfSelected && usePurpleStyle
               ? 'color-mix(in oklch, rgb(168 85 247) 10%, var(--background))'
-              : !isDragActive && !isDragging && !isLockedByOther && isHovered
-                ? 'color-mix(in oklch, var(--foreground) 8%, var(--background))'
-                : 'transparent';
+              : 'transparent';
 
-  const hasAlwaysVisibleIcons = !!node.layer.settings?.hidden
-    || isLockedByOther
-    || interactionTriggerLayerIds.includes(node.id)
-    || interactionTargetLayerIds.includes(node.id);
+  const rowHoverBg = !canHover || isSelected
+    ? rowBg
+    : isChildOfSelected && !usePurpleStyle && !isStateActive
+      ? 'color-mix(in oklch, var(--primary) 20%, var(--background))'
+      : isChildOfSelected && !usePurpleStyle && isStateActive
+        ? 'color-mix(in oklch, #8dd92f 20%, var(--background))'
+        : isChildOfSelected && usePurpleStyle
+          ? rowBg
+          : 'color-mix(in oklch, var(--foreground) 8%, var(--background))';
 
-  const iconBg = rowBg === 'transparent'
-    ? 'var(--background)'
-    : isSelected || isChildOfSelected || hasAlwaysVisibleIcons
-      ? rowBg
-      : 'transparent';
+  // The icon area sits on top of the row content, so its background must be
+  // opaque to hide long layer names that scroll behind it. When the row itself
+  // has no background, fall back to the panel background.
+  const deriveIconBg = (bg: string) => bg === 'transparent' ? 'var(--background)' : bg;
+
+  const iconBg = deriveIconBg(rowBg);
+  const iconHoverBg = deriveIconBg(rowHoverBg);
 
   // Sublayer rows (content blocks or text style targets)
   if (node.sublayer) {
@@ -473,29 +552,30 @@ const LayerRow = React.memo(function LayerRow({
       pageId={pageId}
       isLocked={isLocked}
       onLayerSelect={onSelect}
-      selectedLayerId={selectedLayerId}
       liveLayerUpdates={liveLayerUpdates}
       liveComponentUpdates={liveComponentUpdates}
       editingComponentId={editingComponentId}
     >
       <div
-        className="relative flex"
+        className="relative flex group/row"
         style={{ width: '100%', minWidth: '100%' }}
-        onMouseEnter={() => { if (!isDragging) setIsHovered(true); }}
-        onMouseLeave={() => setIsHovered(false)}
       >
         {/* Background layer - stays fixed when scrolling horizontally */}
         <div className="absolute inset-0 pointer-events-none">
           <div
             className={cn(
-              'sticky left-0 h-full',
+              'sticky left-0 h-full bg-(--row-bg) group-hover/row:bg-(--row-hover-bg)',
               isSelected && !hasVisibleChildren && 'rounded-lg',
               isSelected && hasVisibleChildren && 'rounded-t-lg',
               !isSelected && isChildOfSelected && !isLastVisibleDescendant && 'rounded-none',
               !isSelected && isChildOfSelected && isLastVisibleDescendant && 'rounded-b-lg',
               !isSelected && !isChildOfSelected && 'rounded-lg',
             )}
-            style={{ width: 'var(--tree-available-width)', background: rowBg }}
+            style={{
+              width: 'var(--tree-available-width)',
+              '--row-bg': rowBg,
+              '--row-hover-bg': rowHoverBg,
+            } as React.CSSProperties}
           />
         </div>
 
@@ -515,7 +595,7 @@ const LayerRow = React.memo(function LayerRow({
           {node.depth > 0 && (
             <>
               {Array.from({ length: node.depth }).map((_, i) => {
-                const shouldHighlight = (isSelected || isChildOfSelected) && highlightedDepths.has(i);
+                const shouldHighlight = (isSelected || isChildOfSelected) && highlightedDepths.includes(`,${i},`);
                 return (
                   <div
                     key={i}
@@ -548,7 +628,7 @@ const LayerRow = React.memo(function LayerRow({
 
           {/* Main Row */}
           <div
-            ref={setRefs}
+            ref={setRowElement}
             {...(isRenaming ? {} : attributes)}
             {...(isRenaming ? {} : listeners)}
             data-drag-active={isDragActive}
@@ -563,8 +643,6 @@ const LayerRow = React.memo(function LayerRow({
               !isSelected && isChildOfSelected && 'text-current/70',
             )}
             style={{ width: 'max-content', minWidth: '100%' }}
-            onMouseEnter={() => { if (!isDragging) setHoveredLayerId(node.id); }}
-            onMouseLeave={() => setHoveredLayerId(null)}
             onClick={(e) => {
               if (isRenaming) return;
               if (isLockedByOther) {
@@ -684,8 +762,11 @@ const LayerRow = React.memo(function LayerRow({
             style={{ left: `${node.depth * 14 + 8 + 36}px` }}
           >
             <div
-              className="sticky right-0 h-full flex items-center pointer-events-auto gap-0.5 px-1 rounded-r-lg"
-              style={{ background: iconBg }}
+              className="sticky right-0 h-full flex items-center pointer-events-auto gap-0.5 px-1 rounded-r-lg bg-(--icon-bg) group-hover/row:bg-(--icon-hover-bg)"
+              style={{
+                '--icon-bg': iconBg,
+                '--icon-hover-bg': iconHoverBg,
+              } as React.CSSProperties}
             >
               {isLockedByOther && (
                 <div className="mr-1 shrink-0">
@@ -812,6 +893,28 @@ function collectCollapsedIds(layers: Layer[]): Set<string> {
   return collapsed;
 }
 
+/**
+ * Build a stable string key fingerprinting the explicit `open` flags in the
+ * layer tree. Used as an effect dep so we only resync local `collapsedIds`
+ * state when collapse-relevant data actually changes — not on every keystroke
+ * that creates a fresh `layers` array reference.
+ */
+function collectCollapseKey(layers: Layer[]): string {
+  const parts: string[] = [];
+  function traverse(layerList: Layer[]) {
+    for (const layer of layerList) {
+      if (layer.open === false) {
+        parts.push(layer.id);
+      }
+      if (layer.children && layer.children.length > 0) {
+        traverse(layer.children);
+      }
+    }
+  }
+  traverse(layers);
+  return parts.join('|');
+}
+
 // Helper function to update a layer's open state in the tree
 function updateLayerOpenState(layers: Layer[], layerId: string, isOpen: boolean): Layer[] {
   return layers.map(layer => {
@@ -870,8 +973,6 @@ function setLayersOpen(layers: Layer[], idsToOpen: Set<string>): Layer[] {
 // Main LayersTree Component
 export default function LayersTree({
   layers,
-  selectedLayerId,
-  selectedLayerIds: propSelectedLayerIds,
   onLayerSelect,
   onReorder,
   pageId,
@@ -901,14 +1002,56 @@ export default function LayersTree({
     return () => window.removeEventListener('pointermove', handlePointerMove);
   }, [activeId]);
 
-  // Pull multi-select state and breakpoint from editor store
-  const { selectedLayerIds: storeSelectedLayerIds, lastSelectedLayerId, toggleSelection, selectRange, editingComponentId, activeBreakpoint, activeSublayerIndex: storeActiveSublayerIndex, activeTextStyleKey: storeActiveTextStyleKey, activeListItemIndex: storeActiveListItemIndex, leftSidebarWidth } = useEditorStore();
+  // Pull selection and breakpoint from editor store
+  const selectedLayerId = useEditorStore((s) => s.selectedLayerId);
+  const storeSelectedLayerIds = useEditorStore((s) => s.selectedLayerIds);
+  const lastSelectedLayerId = useEditorStore((s) => s.lastSelectedLayerId);
+  const toggleSelection = useEditorStore((s) => s.toggleSelection);
+  const selectRange = useEditorStore((s) => s.selectRange);
+  const editingComponentId = useEditorStore((s) => s.editingComponentId);
+  const activeBreakpoint = useEditorStore((s) => s.activeBreakpoint);
+  const storeActiveSublayerIndex = useEditorStore((s) => s.activeSublayerIndex);
+  const storeActiveTextStyleKey = useEditorStore((s) => s.activeTextStyleKey);
+  const storeActiveListItemIndex = useEditorStore((s) => s.activeListItemIndex);
+  const selectLayerWithSublayer = useEditorStore((s) => s.selectLayerWithSublayer);
+  const interactionTriggerLayerIds = useEditorStore((s) => s.interactionTriggerLayerIds);
+  const interactionTargetLayerIds = useEditorStore((s) => s.interactionTargetLayerIds);
+  const activeInteractionTriggerLayerId = useEditorStore((s) => s.activeInteractionTriggerLayerId);
+  const activeInteractionTargetLayerIds = useEditorStore((s) => s.activeInteractionTargetLayerIds);
+  const activeUIState = useEditorStore((s) => s.activeUIState);
+  const leftSidebarWidth = useEditorStore((s) => s.leftSidebarWidth);
 
-  // Get component by ID function for drag overlay
-  const { getComponentById } = useComponentsStore();
+  const isLocalizing = useLocalisationStore((state) => {
+    const id = state.selectedLocaleId;
+    if (!id) return false;
+    const locale = state.locales.find((l) => l.id === id);
+    return !!(locale && !locale.is_default);
+  });
 
-  // Get collections and fields from store
-  const { collections, fields: fieldsByCollectionId, items: collectionItems } = useCollectionsStore();
+  const getComponentById = useComponentsStore((s) => s.getComponentById);
+
+  const collections = useCollectionsStore((s) => s.collections);
+  const fieldsByCollectionId = useCollectionsStore((s) => s.fields);
+  const collectionItems = useCollectionsStore((s) => s.items);
+
+  const layerTreeStoreValues = useMemo<LayerTreeStoreValues>(() => ({
+    getComponentById,
+    collections,
+    fieldsByCollectionId,
+    selectLayerWithSublayer,
+    editingComponentId,
+    interactionTriggerLayerIds,
+    interactionTargetLayerIds,
+    activeInteractionTriggerLayerId,
+    activeInteractionTargetLayerIds,
+    activeUIState,
+  }), [
+    getComponentById, collections, fieldsByCollectionId,
+    selectLayerWithSublayer, editingComponentId,
+    interactionTriggerLayerIds, interactionTargetLayerIds,
+    activeInteractionTriggerLayerId, activeInteractionTargetLayerIds,
+    activeUIState,
+  ]);
 
   // CMS data for resolving rich text sublayers from actual CMS item content
   const currentPageCollectionItemId = useEditorStore((state) => state.currentPageCollectionItemId);
@@ -923,8 +1066,7 @@ export default function LayersTree({
     return item?.values ?? null;
   }, [pageCollectionId, currentPageCollectionItemId, collectionItems]);
 
-  // Use prop or store state (prop takes precedence for compatibility)
-  const selectedLayerIds = propSelectedLayerIds ?? storeSelectedLayerIds;
+  const selectedLayerIds = storeSelectedLayerIds;
 
   // Flatten the tree for rendering (sorted by CSS order on responsive breakpoints)
   const flattenedNodes = useMemo(
@@ -1061,17 +1203,17 @@ export default function LayersTree({
 
   // Calculate which depth levels should be highlighted (selected containers)
   const highlightedDepths = useMemo(() => {
-    const depths = new Set<number>();
+    const depths: number[] = [];
     const selectedIds = selectedLayerId ? [selectedLayerId, ...selectedLayerIds] : selectedLayerIds;
 
     selectedIds.forEach(id => {
       const node = flattenedNodes.find(n => n.id === id);
-      if (node && node.canHaveChildren) {
-        depths.add(node.depth);
+      if (node && node.canHaveChildren && !depths.includes(node.depth)) {
+        depths.push(node.depth);
       }
     });
 
-    return depths;
+    return `,${depths.join(',')},`;
   }, [flattenedNodes, selectedLayerId, selectedLayerIds]);
 
   // Get the currently active node being dragged
@@ -1146,27 +1288,30 @@ export default function LayersTree({
     })
   );
 
-  // Multi-select click handler
   const handleMultiSelect = useCallback((id: string, modifiers: { meta: boolean; shift: boolean }) => {
     if (id === 'body') {
-      // Body layer can't be multi-selected
       onLayerSelect(id);
       return;
     }
 
     if (modifiers.meta) {
-      // Cmd/Ctrl+Click: Toggle selection
       toggleSelection(id);
-    } else if (modifiers.shift && lastSelectedLayerId) {
-      // Shift+Click: Select range
-      selectRange(lastSelectedLayerId, id, flattenedNodes);
+    } else if (modifiers.shift) {
+      const lastId = useEditorStore.getState().lastSelectedLayerId;
+      if (lastId) selectRange(lastId, id, flattenedNodes);
     }
-  }, [toggleSelection, selectRange, lastSelectedLayerId, flattenedNodes, onLayerSelect]);
+  }, [toggleSelection, selectRange, flattenedNodes, onLayerSelect]);
 
-  // Sync collapsedIds state when layers change (from external updates)
+  // Sync collapsedIds state when collapse flags change (from external updates).
+  // Depend on a derived key instead of the `layers` reference so the tree
+  // doesn't rebuild this Set on every keystroke when only text/style changed.
+  const collapseKey = useMemo(() => collectCollapseKey(layers), [layers]);
   useEffect(() => {
     setCollapsedIds(collectCollapsedIds(layers));
-  }, [layers]);
+    // `layers` is intentionally excluded — we re-sync only when the derived
+    // collapse fingerprint changes, not on every layer-tree mutation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collapseKey]);
 
   // Listen for expand events from ElementLibrary
   useEffect(() => {
@@ -1326,7 +1471,6 @@ export default function LayersTree({
     }
   }, []);
 
-  const ROW_HEIGHT = 32;
   const treeAvailableWidth = leftSidebarWidth - 32;
   const maxDepth = useMemo(() => flattenedNodes.reduce((max, n) => Math.max(max, n.depth), 0), [flattenedNodes]);
 
@@ -1396,8 +1540,38 @@ export default function LayersTree({
     return () => clearTimeout(timeout);
   }, [shouldScrollToSelected, selectedLayerId, flattenedNodes, virtualizer]);
 
-  // Pull hover state management from editor store
-  const { setHoveredLayerId: setHoveredLayerIdFromStore } = useEditorStore();
+  const setHoveredLayerIdFromStore = useEditorStore((s) => s.setHoveredLayerId);
+
+  // Hover delegation via passive native listener — zero cost during mouseover
+  useEffect(() => {
+    const el = wrapperRef.current;
+    if (!el) return;
+
+    let hoverId: string | null = null;
+
+    const onOver = (e: MouseEvent) => {
+      const row = (e.target as HTMLElement).closest<HTMLElement>('[data-layer-id]');
+      const id = row?.dataset.layerId ?? null;
+      if (id !== hoverId) {
+        hoverId = id;
+        setHoveredLayerIdFromStore(id);
+      }
+    };
+
+    const onLeave = () => {
+      if (hoverId !== null) {
+        hoverId = null;
+        setHoveredLayerIdFromStore(null);
+      }
+    };
+
+    el.addEventListener('mouseover', onOver, { passive: true });
+    el.addEventListener('mouseleave', onLeave, { passive: true });
+    return () => {
+      el.removeEventListener('mouseover', onOver);
+      el.removeEventListener('mouseleave', onLeave);
+    };
+  }, [setHoveredLayerIdFromStore]);
 
   // Handle drag start
   const handleDragStart = useCallback((event: DragStartEvent) => {
@@ -1873,7 +2047,6 @@ export default function LayersTree({
     [onLayerSelect]
   );
 
-  // Pre-compute selection-related data for all nodes (avoids expensive calculations in render loop)
   const nodeSelectionData = useMemo(() => {
     const selectedIdsSet = new Set(selectedLayerIds);
     if (selectedLayerId) selectedIdsSet.add(selectedLayerId);
@@ -1994,6 +2167,7 @@ export default function LayersTree({
   }, [flattenedNodes, selectedLayerIds, selectedLayerId, collapsedIds, storeActiveSublayerIndex, storeActiveTextStyleKey, storeActiveListItemIndex]);
 
   return (
+    <LayerTreeStoreContext.Provider value={layerTreeStoreValues}>
     <DndContext
       sensors={sensors}
       collisionDetection={pointerFirstCollision}
@@ -2008,17 +2182,21 @@ export default function LayersTree({
           const node = flattenedNodes[virtualRow.index];
           const selectionData = nodeSelectionData.get(node.id)!;
 
+          // `highlightedDepths` is only consumed when drawing the connector
+          // lines on selected / child-of-selected rows. Other rows would
+          // otherwise re-render on every selection change just because the
+          // string flipped — pin them to the empty token so React.memo bails.
+          const rowHighlightedDepths = (selectionData.isSelected || selectionData.isChildOfSelected)
+            ? highlightedDepths
+            : ',,';
+
           return (
-            <div
+            <VirtualLayerRow
               key={node.id}
-              style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: '100%',
-                height: ROW_HEIGHT,
-                transform: `translateY(${virtualRow.start}px)`,
-              }}
+              nodeId={node.id}
+              isRenaming={renamingLayerId === node.id}
+              isLocalizing={isLocalizing}
+              translateY={virtualRow.start}
             >
               <LayerRow
                 node={node}
@@ -2031,12 +2209,11 @@ export default function LayersTree({
                 isDragging={activeId === node.id}
                 isDragActive={!!activeId}
                 dropPosition={overId === node.id ? dropPosition : null}
-                highlightedDepths={highlightedDepths}
+                highlightedDepths={rowHighlightedDepths}
                 onSelect={handleSelect}
                 onMultiSelect={handleMultiSelect}
                 onToggle={handleToggle}
                 pageId={pageId}
-                selectedLayerId={selectedLayerId}
                 liveLayerUpdates={liveLayerUpdates}
                 liveComponentUpdates={liveComponentUpdates}
                 activeBreakpoint={activeBreakpoint}
@@ -2045,7 +2222,7 @@ export default function LayersTree({
                 onRenameConfirm={handleRenameConfirm}
                 onToggleVisibility={handleToggleVisibility}
               />
-            </div>
+            </VirtualLayerRow>
           );
         })}
 
@@ -2103,6 +2280,7 @@ export default function LayersTree({
       )}
       <div className="min-h-10" />
     </DndContext>
+    </LayerTreeStoreContext.Provider>
   );
 }
 

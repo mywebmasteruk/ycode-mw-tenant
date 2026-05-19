@@ -139,17 +139,28 @@ export function consumePageMcpSync(pageId: string): boolean {
 }
 
 function updateLayerInTree(tree: Layer[], layerId: string, updater: (l: Layer) => Layer): Layer[] {
-  return tree.map((node) => {
+  // Preserve identity for branches that don't contain `layerId` so downstream
+  // React.memo on LayerItem can bail out on unchanged subtrees instead of
+  // re-rendering the entire layer tree on every property edit.
+  let changed = false;
+  const next = tree.map((node) => {
     if (node.id === layerId) {
+      changed = true;
       return updater(node);
     }
 
     if (node.children && node.children.length > 0) {
-      return { ...node, children: updateLayerInTree(node.children, layerId, updater) };
+      const newChildren = updateLayerInTree(node.children, layerId, updater);
+      if (newChildren !== node.children) {
+        changed = true;
+        return { ...node, children: newChildren };
+      }
     }
 
     return node;
   });
+
+  return changed ? next : tree;
 }
 
 /**
@@ -511,11 +522,18 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
           // The new state will trigger another auto-save which will record its own version
         }
 
-        // After successfully saving the draft, generate and save CSS from ALL pages
+        // After successfully saving the draft, generate per-page CSS server-side
+        // and also regenerate the global draft_css for builder preview
         try {
-          const { generateAndSaveCSS } = await import('@/lib/client/cssGenerator');
+          // Per-page CSS: generate server-side for just this page (background, non-blocking)
+          fetch('/ycode/api/css/generate-pages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pageIds: [pageId] }),
+          }).catch(() => {});
 
-          // Collect layers from ALL pages for comprehensive CSS generation
+          // Global draft_css: still needed for builder preview
+          const { generateAndSaveCSS } = await import('@/lib/client/cssGenerator');
           const allLayers: Layer[] = [];
           const allDrafts = get().draftsByPageId;
           Object.values(allDrafts).forEach((pageDraft) => {
@@ -523,11 +541,9 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
               allLayers.push(...pageDraft.layers);
             }
           });
-
           await generateAndSaveCSS(allLayers);
         } catch (cssError) {
           console.error('Failed to generate CSS after save:', cssError);
-          // Don't fail the save operation if CSS generation fails
         }
       }
     } catch (error) {
@@ -1221,6 +1237,14 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
     set({
       pages: updatedPages,
       draftsByPageId: remainingDrafts
+    });
+
+    // Drop the version-tracking cache entry so the deleted page's layer JSON
+    // doesn't linger in memory for the rest of the session.
+    import('@/lib/version-tracking').then(({ clearVersionTracking }) => {
+      clearVersionTracking('page_layers', pageId);
+    }).catch(() => {
+      // non-fatal: cache will be replaced on next session
     });
   },
 

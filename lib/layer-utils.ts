@@ -2461,15 +2461,12 @@ export function serializeLayers(
   components: Component[] = [],
   editingComponentVariables?: ComponentVariable[],
 ): { layers: Layer[]; componentMap: Record<string, string> } {
-  // First build the component map (before resolving)
   const componentMap = buildComponentMap(layers);
-
-  // Then resolve component instances
   const resolvedLayers = resolveComponentsInLayers(layers, components, editingComponentVariables);
+  const cloned = JSON.parse(JSON.stringify(resolvedLayers));
 
-  // Deep clone to avoid mutations
   return {
-    layers: JSON.parse(JSON.stringify(resolvedLayers)),
+    layers: cloned,
     componentMap,
   };
 }

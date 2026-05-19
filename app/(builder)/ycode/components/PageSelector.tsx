@@ -9,7 +9,7 @@
  */
 
 // 1. React
-import React, { useState, useMemo, useCallback, useEffect } from 'react';
+import React, { memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
 // 3. ShadCN UI
 import Icon from '@/components/ui/icon';
@@ -48,9 +48,143 @@ interface PageSelectorProps {
 }
 
 /**
+ * Context used by TreeRow children so toggling a single folder's collapse
+ * state doesn't have to pass the (changing) `collapsedFolderIds` Set down
+ * through every node's props — which would defeat React.memo on each row.
+ */
+interface TreeContextValue {
+  collapsedFolderIds: Set<string>;
+  selectedValue: string | null;
+  onToggleFolder: (folderId: string) => void;
+  onPageSelect: (pageId: string) => void;
+}
+
+const TreeContext = React.createContext<TreeContextValue | null>(null);
+
+interface TreeRowProps {
+  node: PageTreeNode;
+  depth: number;
+  /**
+   * Pre-computed boolean so a parent state change that doesn't affect this
+   * row (e.g. toggling a sibling's collapse) cannot trigger a re-render here.
+   */
+  isCollapsed: boolean;
+  isSelected: boolean;
+}
+
+const TreeRow = memo(function TreeRow({ node, depth, isCollapsed, isSelected }: TreeRowProps) {
+  const ctx = useContext(TreeContext);
+  const isFolder = node.type === 'folder';
+  const hasChildren = !!(node.children && node.children.length > 0);
+
+  const handleRowClick = useCallback(() => {
+    if (!ctx) return;
+    if (isFolder) {
+      ctx.onToggleFolder(node.id);
+    } else {
+      ctx.onPageSelect(node.id);
+    }
+  }, [ctx, isFolder, node.id]);
+
+  const handleChevronClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (isFolder && ctx) {
+      ctx.onToggleFolder(node.id);
+    }
+  }, [ctx, isFolder, node.id]);
+
+  return (
+    <div>
+      <div
+        onClick={handleRowClick}
+        className={cn(
+          "hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground text-muted-foreground [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full cursor-pointer items-center gap-1.25 rounded-sm py-1.5 pr-8 pl-2 text-xs outline-hidden select-none data-disabled:opacity-50 data-disabled:cursor-not-allowed [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
+          isSelected && 'bg-secondary/50'
+        )}
+        style={{ paddingLeft: `${depth * 14 + 8}px` }}
+      >
+        {hasChildren ? (
+          <button
+            onClick={handleChevronClick}
+            className={cn(
+              'size-3 flex items-center justify-center shrink-0',
+              isCollapsed ? '' : 'rotate-90'
+            )}
+          >
+            <Icon
+              name="chevronRight"
+              className={cn('size-2.5 opacity-50', isSelected && 'opacity-80')}
+            />
+          </button>
+        ) : (
+          <div className="size-3 shrink-0 flex items-center justify-center">
+            <div className={cn('ml-px w-1.5 h-px bg-white opacity-0', isSelected && 'opacity-0')} />
+          </div>
+        )}
+
+        <Icon
+          name={getNodeIcon(node)}
+          className={cn('size-3 mr-0.5', isSelected ? 'opacity-90' : 'opacity-50')}
+        />
+
+        <span className="grow text-xs font-medium overflow-hidden text-ellipsis whitespace-nowrap pointer-events-none">
+          {isFolder ? (node.data as PageFolder).name : (node.data as Page).name}
+        </span>
+
+        {isSelected && (
+          <span className="absolute right-2 flex size-3 items-center justify-center">
+            <Icon name="check" className="size-3 opacity-50" />
+          </span>
+        )}
+      </div>
+
+      {isFolder && !isCollapsed && hasChildren && (
+        <div>
+          {node.children!.map((child) => (
+            <TreeRowConnector
+              key={child.id} node={child}
+              depth={depth + 1}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
+
+/**
+ * Thin wrapper that reads `collapsedFolderIds` and `selectedValue` from
+ * context and forwards only primitive props to the memoized `TreeRow`. This
+ * keeps `TreeRow` insulated from Set/object identity changes higher up the
+ * tree — a toggle on folder A only re-renders A's row (and its child connectors
+ * for unmount), not unrelated rows.
+ */
+function TreeRowConnector({ node, depth }: { node: PageTreeNode; depth: number }) {
+  const ctx = useContext(TreeContext);
+  const isCollapsed = !!ctx && node.type === 'folder' && ctx.collapsedFolderIds.has(node.id);
+  const isSelected = !!ctx && node.type === 'page' && node.id === ctx.selectedValue;
+  return <TreeRow
+    node={node} depth={depth}
+    isCollapsed={isCollapsed} isSelected={isSelected}
+         />;
+}
+
+/**
+ * Stable key derived from folder IDs so we can resync `collapsedFolderIds`
+ * only when the folder set actually changes — not on every fresh array
+ * reference from the store.
+ */
+function getFolderIdKey(folders: PageFolder[]): string {
+  if (folders.length === 0) return '';
+  const ids = folders.map((f) => f.id);
+  ids.sort();
+  return ids.join('|');
+}
+
+/**
  * Reusable page selector with folder tree dropdown
  */
-export default function PageSelector({
+function PageSelectorImpl({
   value,
   onValueChange,
   placeholder = 'Select...',
@@ -61,21 +195,35 @@ export default function PageSelector({
   popoverClassName,
 }: PageSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
-  const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(new Set());
 
   const pages = usePagesStore((state) => state.pages);
   const folders = usePagesStore((state) => state.folders);
 
+  // O(1) lookups instead of repeated `.find()` walks over the arrays.
+  const pagesById = useMemo(() => {
+    const map = new Map<string, Page>();
+    for (const page of pages) map.set(page.id, page);
+    return map;
+  }, [pages]);
+
+  const foldersById = useMemo(() => {
+    const map = new Map<string, PageFolder>();
+    for (const folder of folders) map.set(folder.id, folder);
+    return map;
+  }, [folders]);
+
   // Separate regular pages from error pages
   const { regularPages, errorPages } = useMemo(() => {
-    const regular = pages.filter(page => page.error_page === null);
-    const errors = pages
-      .filter(page => page.error_page !== null)
-      .sort((a, b) => (a.error_page || 0) - (b.error_page || 0));
+    const regular: Page[] = [];
+    const errors: Page[] = [];
+    for (const page of pages) {
+      if (page.error_page === null) regular.push(page);
+      else errors.push(page);
+    }
+    errors.sort((a, b) => (a.error_page || 0) - (b.error_page || 0));
     return { regularPages: regular, errorPages: errors };
   }, [pages]);
 
-  // Build folder tree from regular (non-error) pages
   const pageTree = useMemo(
     () => buildPageTree(regularPages, folders),
     [regularPages, folders]
@@ -114,44 +262,76 @@ export default function PageSelector({
     };
   }, [includeErrorPages, errorPages]);
 
-  // Collapse all folders by default
+  // Initialize the collapsed set lazily on mount so a parent re-render that
+  // hands us a fresh `folders` reference (same content) doesn't blow away the
+  // user's expansion state.
+  const [collapsedFolderIds, setCollapsedFolderIds] = useState<Set<string>>(() => {
+    const ids = new Set<string>(folders.map((f) => f.id));
+    if (includeErrorPages) ids.add('virtual-error-pages-folder');
+    return ids;
+  });
+
+  // Tracks which folder IDs we've ever seen, used to detect "new" folders that
+  // should default to collapsed without clobbering the user's existing expand
+  // choices.
+  const knownFolderIdsRef = useRef<Set<string>>(new Set(folders.map((f) => f.id)));
+
+  // Only resync when the folder ID set actually changes (folder added or
+  // deleted) or `includeErrorPages` toggles. Editing a folder's name/order
+  // keeps the same IDs → no resync, no re-render, user expansion preserved.
+  const folderIdKey = useMemo(() => getFolderIdKey(folders), [folders]);
+  const prevFolderIdKeyRef = useRef(folderIdKey);
+  const prevIncludeErrorPagesRef = useRef(includeErrorPages);
   useEffect(() => {
-    const allFolderIds = new Set(folders.map(f => f.id));
-    if (includeErrorPages) {
-      allFolderIds.add('virtual-error-pages-folder');
+    if (prevFolderIdKeyRef.current === folderIdKey && prevIncludeErrorPagesRef.current === includeErrorPages) {
+      return;
     }
-    setCollapsedFolderIds(allFolderIds);
-  }, [folders, includeErrorPages]);
+    const wasIncludeErrorPages = prevIncludeErrorPagesRef.current;
+    prevFolderIdKeyRef.current = folderIdKey;
+    prevIncludeErrorPagesRef.current = includeErrorPages;
+    setCollapsedFolderIds((prev) => {
+      const known = knownFolderIdsRef.current;
+      const next = new Set<string>();
+      for (const folder of folders) {
+        if (!known.has(folder.id) || prev.has(folder.id)) {
+          // New folder → collapse by default; or previously collapsed → keep.
+          next.add(folder.id);
+        }
+        // Otherwise was expanded → keep expanded (omitted from `next`).
+      }
+      if (includeErrorPages && (!wasIncludeErrorPages || prev.has('virtual-error-pages-folder'))) {
+        next.add('virtual-error-pages-folder');
+      }
+      knownFolderIdsRef.current = new Set(folders.map((f) => f.id));
+      return next;
+    });
+  }, [folderIdKey, includeErrorPages, folders]);
 
-  /** Get all ancestor folder IDs for a given page */
   const getAncestorFolderIds = useCallback((pageId: string): string[] => {
-    const page = pages.find(p => p.id === pageId);
+    const page = pagesById.get(pageId);
     if (!page?.page_folder_id) return [];
-
     const ancestors: string[] = [];
     let currentFolderId: string | null = page.page_folder_id;
-
     while (currentFolderId) {
       ancestors.push(currentFolderId);
-      const folder = folders.find(f => f.id === currentFolderId);
-      currentFolderId = folder?.page_folder_id || null;
+      const folder = foldersById.get(currentFolderId);
+      currentFolderId = folder?.page_folder_id ?? null;
     }
-
     return ancestors;
-  }, [pages, folders]);
+  }, [pagesById, foldersById]);
 
-  /** When the popover opens, expand ancestors of the selected page */
   const handleOpenChange = useCallback((open: boolean) => {
     setIsOpen(open);
     if (open && value) {
       const ancestorIds = getAncestorFolderIds(value);
       if (ancestorIds.length > 0) {
         setCollapsedFolderIds(prev => {
+          let changed = false;
           const next = new Set(prev);
           for (const id of ancestorIds) {
-            next.delete(id);
+            if (next.delete(id)) changed = true;
           }
-          return next;
+          return changed ? next : prev;
         });
       }
     }
@@ -174,87 +354,17 @@ export default function PageSelector({
     setIsOpen(false);
   }, [onValueChange]);
 
-  // Resolve selected page for the trigger display
   const selectedPage = useMemo(() => {
     if (!value) return null;
-    return pages.find(p => p.id === value) || null;
-  }, [value, pages]);
+    return pagesById.get(value) ?? null;
+  }, [value, pagesById]);
 
-  // Recursive tree node renderer
-  const renderTreeNode = useCallback((node: PageTreeNode, depth: number = 0) => {
-    const isFolder = node.type === 'folder';
-    const isCollapsed = isFolder && collapsedFolderIds.has(node.id);
-    const isSelected = !isFolder && node.id === value;
-    const hasChildren = node.children && node.children.length > 0;
-
-    return (
-      <div key={node.id}>
-        <div
-          onClick={() => {
-            if (isFolder) {
-              toggleFolder(node.id);
-            } else {
-              handlePageSelect(node.id);
-            }
-          }}
-          className={cn(
-            "hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground text-muted-foreground [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full cursor-pointer items-center gap-1.25 rounded-sm py-1.5 pr-8 pl-2 text-xs outline-hidden select-none data-disabled:opacity-50 data-disabled:cursor-not-allowed [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
-            isSelected && 'bg-secondary/50'
-          )}
-          style={{ paddingLeft: `${depth * 14 + 8}px` }}
-        >
-          {/* Expand/Collapse */}
-          {hasChildren ? (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                if (isFolder) {
-                  toggleFolder(node.id);
-                }
-              }}
-              className={cn(
-                'size-3 flex items-center justify-center shrink-0',
-                isCollapsed ? '' : 'rotate-90'
-              )}
-            >
-              <Icon
-                name="chevronRight"
-                className={cn('size-2.5 opacity-50', isSelected && 'opacity-80')}
-              />
-            </button>
-          ) : (
-            <div className="size-3 shrink-0 flex items-center justify-center">
-              <div className={cn('ml-px w-1.5 h-px bg-white opacity-0', isSelected && 'opacity-0')} />
-            </div>
-          )}
-
-          {/* Icon */}
-          <Icon
-            name={getNodeIcon(node)}
-            className={cn('size-3 mr-0.5', isSelected ? 'opacity-90' : 'opacity-50')}
-          />
-
-          {/* Label */}
-          <span className="grow text-xs font-medium overflow-hidden text-ellipsis whitespace-nowrap pointer-events-none">
-            {isFolder ? (node.data as PageFolder).name : (node.data as Page).name}
-          </span>
-
-          {/* Check indicator */}
-          {isSelected && (
-            <span className="absolute right-2 flex size-3 items-center justify-center">
-              <Icon name="check" className="size-3 opacity-50" />
-            </span>
-          )}
-        </div>
-
-        {isFolder && !isCollapsed && node.children && (
-          <div>
-            {node.children.map(child => renderTreeNode(child, depth + 1))}
-          </div>
-        )}
-      </div>
-    );
-  }, [collapsedFolderIds, value, toggleFolder, handlePageSelect]);
+  const treeContext = useMemo<TreeContextValue>(() => ({
+    collapsedFolderIds,
+    selectedValue: value,
+    onToggleFolder: toggleFolder,
+    onPageSelect: handlePageSelect,
+  }), [collapsedFolderIds, value, toggleFolder, handlePageSelect]);
 
   return (
     <Popover open={isOpen} onOpenChange={handleOpenChange}>
@@ -288,18 +398,22 @@ export default function PageSelector({
 
       <PopoverContent className={cn('w-auto min-w-56 max-w-96 p-1', popoverClassName)} align={align}>
         <div className="max-h-100 overflow-y-auto">
-          {/* Regular pages tree */}
-          {pageTree.length > 0 && pageTree.map(node => renderTreeNode(node, 0))}
+          <TreeContext.Provider value={treeContext}>
+            {pageTree.length > 0 && pageTree.map((node) => (
+              <TreeRowConnector
+                key={node.id} node={node}
+                depth={0}
+              />
+            ))}
 
-          {/* Error pages section */}
-          {errorPagesNode && (
-            <>
-              <Separator className="my-1" />
-              {renderTreeNode(errorPagesNode, 0)}
-            </>
-          )}
+            {errorPagesNode && (
+              <>
+                <Separator className="my-1" />
+                <TreeRowConnector node={errorPagesNode} depth={0} />
+              </>
+            )}
+          </TreeContext.Provider>
 
-          {/* Empty state */}
           {pageTree.length === 0 && !errorPagesNode && (
             <div className="text-sm text-muted-foreground text-center py-4">
               No pages found
@@ -310,3 +424,5 @@ export default function PageSelector({
     </Popover>
   );
 }
+
+export default memo(PageSelectorImpl);

@@ -310,11 +310,12 @@ export async function publishComponent(draftComponentId: string): Promise<Compon
 
 /**
  * Publish multiple components in batch
- * Uses batch upsert for efficiency
+ * Only upserts components whose content_hash actually changed.
+ * Returns the IDs of components that were modified.
  */
-export async function publishComponents(componentIds: string[]): Promise<{ count: number }> {
+export async function publishComponents(componentIds: string[]): Promise<{ count: number; changedComponentIds: string[] }> {
   if (componentIds.length === 0) {
-    return { count: 0 };
+    return { count: 0, changedComponentIds: [] };
   }
 
   const client = await getSupabaseAdmin();
@@ -339,9 +340,10 @@ export async function publishComponents(componentIds: string[]): Promise<{ count
   }
 
   if (!draftComponents || draftComponents.length === 0) {
-    return { count: 0 };
+    return { count: 0, changedComponentIds: [] };
   }
 
+<<<<<<< HEAD
   const componentsToUpsert = draftComponents.map(draft => ({
     id: draft.id,
     name: draft.name,
@@ -354,16 +356,54 @@ export async function publishComponents(componentIds: string[]): Promise<{ count
   }));
 
   const { error: upsertError } = await client
+=======
+  // Fetch existing published versions to compare hashes
+  const { data: publishedComponents } = await client
+>>>>>>> upstream/main
     .from('components')
-    .upsert(componentsToUpsert, {
-      onConflict: 'id,is_published',
-    });
+    .select('id, content_hash')
+    .in('id', draftComponents.map(d => d.id))
+    .eq('is_published', true);
 
-  if (upsertError) {
-    throw new Error(`Failed to publish components: ${upsertError.message}`);
+  const publishedHashById = new Map<string, string>();
+  if (publishedComponents) {
+    for (const pub of publishedComponents) {
+      if (pub.content_hash) publishedHashById.set(pub.id, pub.content_hash);
+    }
   }
 
-  return { count: componentsToUpsert.length };
+  // Only upsert components that are new or have changed
+  const componentsToUpsert = draftComponents
+    .filter(draft => {
+      const pubHash = publishedHashById.get(draft.id);
+      return !pubHash || pubHash !== draft.content_hash;
+    })
+    .map(draft => ({
+      id: draft.id,
+      name: draft.name,
+      layers: draft.layers,
+      variables: draft.variables,
+      content_hash: draft.content_hash,
+      is_published: true,
+      updated_at: new Date().toISOString(),
+    }));
+
+  if (componentsToUpsert.length > 0) {
+    const { error: upsertError } = await client
+      .from('components')
+      .upsert(componentsToUpsert, {
+        onConflict: 'id,is_published',
+      });
+
+    if (upsertError) {
+      throw new Error(`Failed to publish components: ${upsertError.message}`);
+    }
+  }
+
+  return {
+    count: componentsToUpsert.length,
+    changedComponentIds: componentsToUpsert.map(c => c.id),
+  };
 }
 
 /**
@@ -647,18 +687,53 @@ export async function softDeleteComponent(id: string): Promise<SoftDeleteResult>
 
   const affectedEntities = await findEntitiesUsingComponent(id);
 
+<<<<<<< HEAD
   for (const entity of affectedEntities) {
     if (entity.type === 'page') {
       let pageUpdateQuery = client
+=======
+  // Detach component from all affected page_layers and recompute hashes
+  const { generatePageLayersHash } = await import('@/lib/hash-utils');
+
+  for (const entity of affectedEntities) {
+    if (entity.type === 'page') {
+      // Fetch existing generated_css to keep hash consistent
+      const { data: existing } = await client
+        .from('page_layers')
+        .select('generated_css')
+        .eq('id', entity.id)
+        .eq('is_published', false)
+        .single();
+
+      const contentHash = generatePageLayersHash({
+        layers: entity.newLayers,
+        generated_css: existing?.generated_css || null,
+      });
+
+      const { error: updateError } = await client
+>>>>>>> upstream/main
         .from('page_layers')
         .update({
           layers: entity.newLayers,
+          content_hash: contentHash,
           updated_at: new Date().toISOString(),
         })
+<<<<<<< HEAD
         .eq('id', entity.id);
       pageUpdateQuery = applyTenantEq(pageUpdateQuery, tenantId);
 
       const { error: updateError } = await pageUpdateQuery;
+=======
+        .eq('id', entity.id)
+        // CRITICAL: page_layers has composite PK (id, is_published). Without
+        // this filter, the UPDATE writes the new layers + draft content_hash
+        // onto the published row too. Two failure modes:
+        //   1. Published row carries new layers but stale generated_css —
+        //      site renders broken classes for the deleted component.
+        //   2. batchPublishPageLayers compares hashes, sees draft == published
+        //      (we just wrote it!), and skips the page on publish.
+        .eq('is_published', false);
+>>>>>>> upstream/main
 
       if (updateError) {
         console.error(`Failed to update page_layers ${entity.id}:`, updateError);

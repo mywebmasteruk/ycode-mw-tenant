@@ -77,7 +77,8 @@ const TextBackgroundImageTab = forwardRef<TextBackgroundImageTabHandle, TextBack
     allFields,
     collections,
   }, ref) {
-    const { activeBreakpoint, activeUIState } = useEditorStore();
+    const activeBreakpoint = useEditorStore((s) => s.activeBreakpoint);
+    const activeUIState = useEditorStore((s) => s.activeUIState);
     const openFileManager = useEditorStore((state) => state.openFileManager);
     const { updateDesignProperty, getDesignProperty } = useDesignSync({
       layer,

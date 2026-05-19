@@ -41,7 +41,8 @@ const XY_FIELDS = [
 
 const TransformControls = memo(function TransformControls({ layer, onLayerUpdate }: TransformControlsProps) {
   const [isOpen, setIsOpen] = useState(true);
-  const { activeBreakpoint, activeUIState } = useEditorStore();
+  const activeBreakpoint = useEditorStore((state) => state.activeBreakpoint);
+  const activeUIState = useEditorStore((state) => state.activeUIState);
   const { updateDesignProperty, debouncedUpdateDesignProperty, getDesignProperty } = useDesignSync({
     layer,
     onLayerUpdate,

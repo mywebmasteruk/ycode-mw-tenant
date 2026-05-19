@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useCollaborationPresenceStore } from '../stores/useCollaborationPresenceStore'
 import { useAuthStore } from '../stores/useAuthStore'
 import { useEditorStore } from '../stores/useEditorStore'
+import { createChannelLifecycle } from '@/lib/realtime-channel'
 
 /**
  * Throttle a callback to a certain delay, It will only call the callback if the delay has passed, with the arguments
@@ -72,6 +73,11 @@ const generateUserId = (username: string) => {
 
 const EVENT_NAME = 'realtime-cursor-move'
 
+// How often we refresh a remote user's metadata in the local store while
+// receiving their cursor broadcasts. Anything more frequent than this just
+// produces re-render churn for subscribers of `users` without visible benefit.
+const REMOTE_USER_REFRESH_MS = 5000
+
 type CursorEventPayload = {
     position: {
         x: number
@@ -103,13 +109,15 @@ export const useRealtimeCursors = ({
   const [userId] = useState(generateUserId(username))
   const [cursors, setCursors] = useState<Record<string, CursorEventPayload>>({})
   const cursorPayload = useRef<CursorEventPayload | null>(null)
+  const remoteUserLastRefresh = useRef<Record<string, number>>({})
 
   const channelRef = useRef<RealtimeChannel | null>(null)
     
   // Get collaboration state
-  const { updateUser, setConnectionStatus, setCurrentUser } = useCollaborationPresenceStore()
-  const { user } = useAuthStore()
-  const { selectedLayerId } = useEditorStore()
+  const setConnectionStatus = useCollaborationPresenceStore((s) => s.setConnectionStatus);
+  const setCurrentUser = useCollaborationPresenceStore((s) => s.setCurrentUser);
+  const user = useAuthStore((s) => s.user);
+  const selectedLayerId = useEditorStore((s) => s.selectedLayerId);
   
   // Ref to avoid stale closures and prevent channel reinitialization on user object reference changes
   const userRef = useRef(user)
@@ -140,29 +148,21 @@ export const useRealtimeCursors = ({
 
       cursorPayload.current = payload
 
-      // Update collaboration store
-      if (user) {
-        // Always include email and essential user info to prevent "Unknown" user issues
-        // This ensures if the user is created here (before subscribe callback), they have complete data
-        updateUser(user.id, {
-          user_id: user.id,
-          email: user.email,
-          display_name: user.user_metadata?.display_name || '',
-          avatar_url: user.user_metadata?.avatar_url || null,
-          color: color,
-          cursor: { x: clientX, y: clientY },
-          selected_layer_id: selectedLayerId,
-          last_active: Date.now()
-        })
-      }
-
+      // Only broadcast cursor position to other users here.
+      // We intentionally do NOT call updateUser() for the local user on every
+      // mousemove: that would spread the entire `users` slice in the
+      // collaboration store every ~30ms, forcing all subscribers (toolbar,
+      // panels, popovers) to re-render and starving the browser of paint time
+      // — which causes CSS :hover to lag during quick cursor sweeps.
+      // Local user metadata is initialized in the subscribe handler and
+      // `selected_layer_id` / `last_active` are kept fresh via separate effects.
       channelRef.current?.send({
         type: 'broadcast',
         event: EVENT_NAME,
         payload: payload,
       })
     },
-    [color, userId, username, selectedLayerId, user, updateUser]
+    [color, userId, username, selectedLayerId, user]
   )
 
   const handleMouseMove = useThrottleCallback(callback, throttleMs)
@@ -197,9 +197,12 @@ export const useRealtimeCursors = ({
   }, []);
 
   useEffect(() => {
+    const lifecycle = createChannelLifecycle();
+
     const initializeChannel = async () => {
       const supabaseClient = await getSupabaseClient();
       const channel = supabaseClient.channel(roomName)
+      if (!lifecycle.track(channel, supabaseClient)) return;
 
       channel
         .on('presence', { event: 'sync' }, () => {
@@ -266,15 +269,23 @@ export const useRealtimeCursors = ({
 
           // Update collaboration store with remote user info for lock indicator display
           // (Locks are handled by use-layer-locks.ts, not here)
+          // Throttle to once every REMOTE_USER_REFRESH_MS per user — otherwise every
+          // incoming cursor broadcast (~33/sec per user) spreads the `users` slice
+          // and re-renders every subscriber, starving CSS :hover paints.
           if (remoteUser.authId) {
-            const { updateUser: storeUpdateUser } = useCollaborationPresenceStore.getState();
-            storeUpdateUser(remoteUser.authId, {
-              user_id: remoteUser.authId,
-              email: remoteUser.name,
-              color: remoteColor,
-              avatar_url: remoteUser.avatarUrl || null,
-              last_active: Date.now()
-            });
+            const now = Date.now();
+            const lastRefreshed = remoteUserLastRefresh.current[remoteUser.authId] ?? 0;
+            if (now - lastRefreshed >= REMOTE_USER_REFRESH_MS) {
+              remoteUserLastRefresh.current[remoteUser.authId] = now;
+              const { updateUser: storeUpdateUser } = useCollaborationPresenceStore.getState();
+              storeUpdateUser(remoteUser.authId, {
+                user_id: remoteUser.authId,
+                email: remoteUser.name,
+                color: remoteColor,
+                avatar_url: remoteUser.avatarUrl || null,
+                last_active: now
+              });
+            }
           }
 
           setCursors((prev) => {
@@ -290,6 +301,7 @@ export const useRealtimeCursors = ({
         })
         .subscribe(async (status: any) => {
           if (status === REALTIME_SUBSCRIBE_STATES.SUBSCRIBED) {
+            if (lifecycle.cancelled) return;
             const currentUser = userRef.current;
             const avatarUrl = currentUser?.user_metadata?.avatar_url || null;
             await channel.track({ 
@@ -301,6 +313,7 @@ export const useRealtimeCursors = ({
               avatarUrl: avatarUrl,
               lockedLayerId: selectedLayerId || null
             })
+            if (lifecycle.cancelled) return;
             channelRef.current = channel
             setConnectionStatus(true)
                     
@@ -310,7 +323,8 @@ export const useRealtimeCursors = ({
               const displayName = currentUser.user_metadata?.display_name || '';
               setCurrentUser(currentUser.id, currentUser.email, avatarUrl)
               // Also add current user to users object with email, display name, and avatar
-              updateUser(currentUser.id, {
+              const { updateUser: storeUpdateUser } = useCollaborationPresenceStore.getState();
+              storeUpdateUser(currentUser.id, {
                 user_id: currentUser.id,
                 email: currentUser.email,
                 display_name: displayName,
@@ -329,12 +343,10 @@ export const useRealtimeCursors = ({
     };
         
     initializeChannel();
-        
+
     return () => {
-      if (channelRef.current) {
-        channelRef.current.unsubscribe();
-        channelRef.current = null;
-      }
+      lifecycle.teardown();
+      channelRef.current = null;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomName, userId, hasUser, setConnectionStatus, setCurrentUser])
@@ -349,6 +361,16 @@ export const useRealtimeCursors = ({
         name: username,
         color: color,
         lockedLayerId: selectedLayerId || null
+      });
+    }
+
+    // Mirror the change into the local collaboration store so getUsersByLayer
+    // and related selectors stay accurate without coupling to mousemove.
+    if (user?.id) {
+      const { updateUser: storeUpdateUser } = useCollaborationPresenceStore.getState();
+      storeUpdateUser(user.id, {
+        selected_layer_id: selectedLayerId,
+        last_active: Date.now(),
       });
     }
   }, [selectedLayerId, userId, user?.id, user?.email, username, color]);

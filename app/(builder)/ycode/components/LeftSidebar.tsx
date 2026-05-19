@@ -22,6 +22,7 @@ import { resetBindingsAfterMove } from '@/lib/layer-utils';
 
 // 5.5 Hooks
 import { useEditorUrl } from '@/hooks/use-editor-url';
+
 import type { EditorTab } from '@/hooks/use-editor-url';
 import { useLayerLocks } from '@/hooks/use-layer-locks';
 import { useResizableSidebar } from '@/hooks/use-resizable-sidebar';
@@ -34,8 +35,6 @@ import type { UseLiveLayerUpdatesReturn } from '@/hooks/use-live-layer-updates';
 import type { UseLiveComponentUpdatesReturn } from '@/hooks/use-live-component-updates';
 
 interface LeftSidebarProps {
-  selectedLayerId: string | null;
-  selectedLayerIds?: string[]; // New multi-select support
   onLayerSelect: (layerId: string | null) => void;
   currentPageId: string | null;
   onPageSelect: (pageId: string) => void;
@@ -44,14 +43,16 @@ interface LeftSidebarProps {
 }
 
 const LeftSidebar = React.memo(function LeftSidebar({
-  selectedLayerId,
-  selectedLayerIds,
   onLayerSelect,
   currentPageId,
   onPageSelect,
   liveLayerUpdates,
   liveComponentUpdates,
 }: LeftSidebarProps) {
+  // Intentionally NOT subscribing to selectedLayerId here — it's only read
+  // inside the asset-select handler. A subscription would re-render the
+  // whole left sidebar (pages list, layers tree, context menus, …) on
+  // every selection change, which is what made selecting a layer feel slow.
   const { sidebarTab } = useEditorUrl();
   const [showElementLibrary, setShowElementLibrary] = useState(false);
   const { width: sidebarWidth, isDragging: isResizing, handleMouseDown: handleResizeMouseDown } = useResizableSidebar({ side: 'left' });
@@ -85,7 +86,9 @@ const LeftSidebar = React.memo(function LeftSidebar({
 
   const activeTab = storeSidebarTab || sidebarTab;
 
-  const componentDrafts = useComponentsStore((state) => state.componentDrafts);
+  const editingComponentDraft = useComponentsStore((state) =>
+    editingComponentId ? state.componentDrafts[editingComponentId] ?? null : null
+  );
   const getComponentById = useComponentsStore((state) => state.getComponentById);
   const updateComponentDraft = useComponentsStore((state) => state.updateComponentDraft);
 
@@ -145,13 +148,13 @@ const LeftSidebar = React.memo(function LeftSidebar({
   const layersForCurrentPage = useMemo(() => {
     // If editing a component, show component layers instead
     if (editingComponentId) {
-      return componentDrafts[editingComponentId] || [];
+      return editingComponentDraft || [];
     }
 
     // Otherwise show page layers
     if (!currentPageId) return [];
     return currentDraft ? currentDraft.layers : [];
-  }, [editingComponentId, componentDrafts, currentPageId, currentDraft]);
+  }, [editingComponentId, editingComponentDraft, currentPageId, currentDraft]);
 
   // Handle layer reordering from drag & drop
   const handleLayersReorder = useCallback((newLayers: Layer[], movedLayerId?: string) => {
@@ -243,6 +246,7 @@ const LeftSidebar = React.memo(function LeftSidebar({
       return;
     }
 
+    const selectedLayerId = useEditorStore.getState().selectedLayerId;
     if (!selectedLayerId) {
       setAssetMessage('❌ Please select an image layer first');
       setTimeout(() => setAssetMessage(null), 3000);
@@ -360,8 +364,6 @@ const LeftSidebar = React.memo(function LeftSidebar({
                 ) : (
                   <LayersTree
                     layers={layersForCurrentPage}
-                    selectedLayerId={selectedLayerId}
-                    selectedLayerIds={selectedLayerIds}
                     onLayerSelect={handleLayerSelect}
                     onReorder={handleLayersReorder}
                     pageId={currentPageId || ''}

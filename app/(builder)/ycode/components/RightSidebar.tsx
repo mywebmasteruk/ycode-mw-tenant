@@ -11,7 +11,6 @@ import React, { useCallback, useMemo, useState, useEffect, useRef } from 'react'
 
 // 2. External libraries
 import debounce from 'lodash.debounce';
-
 // 3. ShadCN UI
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -118,7 +117,6 @@ import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 interface RightSidebarProps {
-  selectedLayerId: string | null;
   onLayerUpdate: (layerId: string, updates: Partial<Layer>) => void;
 }
 
@@ -135,9 +133,10 @@ function pruneTextDescendants(children: Layer[] | undefined): Layer[] {
 }
 
 const RightSidebar = React.memo(function RightSidebar({
-  selectedLayerId,
   onLayerUpdate,
 }: RightSidebarProps) {
+  const selectedLayerId = useEditorStore((state) => state.selectedLayerId);
+
   const { openComponent, urlState, updateQueryParams } = useEditorActions();
   const { routeType } = useEditorUrl();
   const { isLocalizing, currentLocale, defaultLocale } = useLocalizationMode();
@@ -269,8 +268,9 @@ const RightSidebar = React.memo(function RightSidebar({
     return [];
   }, [editingComponentId, componentDrafts, currentPageId, currentDraft]);
 
-  // Cached layer index for O(1) lookups
-  const layerIndexes = useMemo(() => getLayerIndexes(allLayers), [allLayers]);
+  const layerIndexes = useMemo(() => {
+    return getLayerIndexes(allLayers);
+  }, [allLayers]);
 
   const selectedLayer: Layer | null = useMemo(() => {
     if (!selectedLayerId) return null;

@@ -6,6 +6,22 @@ import type { Layer, Breakpoint, Asset, AssetCategoryFilter } from '../types';
 import { useCanvasTextEditorStore } from './useCanvasTextEditorStore';
 import { updateUrlQueryParam } from '@/hooks/use-editor-url';
 
+// Debounce window for the `?layer=…` URL mirror. Long enough to coalesce
+// rapid clicks (which would otherwise each trigger a Router-wide re-render
+// through Next.js's patched `history.replaceState`), short enough that the
+// URL is up-to-date by the time anyone copies it.
+const LAYER_URL_DEBOUNCE_MS = 250;
+let pendingLayerUrlTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingLayerUrlValue: string | null = null;
+
+function scheduleLayerUrlUpdate(id: string | null): void {
+  pendingLayerUrlValue = id;
+  if (pendingLayerUrlTimer !== null) return;
+  pendingLayerUrlTimer = setTimeout(() => {
+    pendingLayerUrlTimer = null;
+    updateUrlQueryParam('layer', pendingLayerUrlValue);
+  }, LAYER_URL_DEBOUNCE_MS);
+}
 interface HistoryEntry {
   pageId: string;
   layers: Layer[];
@@ -255,9 +271,14 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   isCanvasContextMenuOpen: false,
   setCanvasContextMenuOpen: (value) => set({ isCanvasContextMenuOpen: value }),
   sliderSnapCounts: {},
-  setSliderSnapCount: (sliderId, count) => set((state) => ({
-    sliderSnapCounts: { ...state.sliderSnapCounts, [sliderId]: count },
-  })),
+  setSliderSnapCount: (sliderId, count) => set((state) => {
+    // Swiper fires `update` on every DOM mutation inside its wrapper, which
+    // happens constantly in the iframe (Tailwind class injections, child
+    // re-renders). Bail out when the count hasn't changed so subscribers
+    // — notably slideBullets `LayerItem`s — don't re-render.
+    if (state.sliderSnapCounts[sliderId] === count) return state;
+    return { sliderSnapCounts: { ...state.sliderSnapCounts, [sliderId]: count } };
+  }),
   // Canvas sibling reorder initial state
   isDraggingLayerOnCanvas: false,
   draggedLayerId: null,
@@ -284,8 +305,6 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   },
 
   setSelectedLayerId: (id) => {
-    // Legacy support - also update selectedLayerIds
-    // Clear active text style and sublayer when changing layers
     set({
       selectedLayerId: id,
       selectedLayerIds: id ? [id] : [],
@@ -295,14 +314,17 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
       activeListItemIndex: null,
     });
 
-    // Update URL query param if we're in a route that supports layer selection
-    // Check if we're in /ycode/layers, /ycode/pages, or /ycode/components route
     if (typeof window !== 'undefined') {
       const pathname = window.location.pathname;
       const isLayerRoute = /^\/ycode\/(layers|pages|components)\//.test(pathname);
-      
+
       if (isLayerRoute) {
-        updateUrlQueryParam('layer', id || null);
+        // Debounce the URL update: Next.js's App Router patches
+        // history.replaceState, so every direct call triggers a Router-wide
+        // re-render (`useSearchParams` consumers, etc.). Coalescing rapid
+        // selections keeps the `?layer=…` deep link accurate without paying
+        // the cascade cost on every click.
+        scheduleLayerUrlUpdate(id || null);
       }
     }
   },

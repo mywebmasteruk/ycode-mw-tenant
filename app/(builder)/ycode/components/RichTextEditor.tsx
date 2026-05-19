@@ -1667,64 +1667,6 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
         </div>
       )}
 
-      {/* Table context toolbar */}
-      {withFormatting && showFormattingToolbar && editor && !disabled && editor.isActive('table') && (
-        <div className="flex items-center gap-0.5 border-t border-border px-2 py-1 bg-muted/50">
-          <span className="text-[10px] text-muted-foreground mr-1.5">Table</span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className="size-6! p-0!"
-            title="Add column after"
-            onClick={() => editor.chain().focus().addColumnAfter().run()}
-          >
-            <Icon name="add-column" className="size-3" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className="size-6! p-0!"
-            title="Add row after"
-            onClick={() => editor.chain().focus().addRowAfter().run()}
-          >
-            <Icon name="add-row" className="size-3" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className="size-6! p-0!"
-            title="Delete column"
-            onClick={() => editor.chain().focus().deleteColumn().run()}
-          >
-            <Icon name="delete-column" className="size-3" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className="size-6! p-0!"
-            title="Delete row"
-            onClick={() => editor.chain().focus().deleteRow().run()}
-          >
-            <Icon name="delete-row" className="size-3" />
-          </Button>
-          <div className="w-px h-4 bg-border mx-1" />
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            className="size-6! p-0! text-destructive hover:text-destructive"
-            title="Delete table"
-            onClick={() => editor.chain().focus().deleteTable().run()}
-          >
-            <Icon name="delete-table" className="size-3" />
-          </Button>
-        </div>
-      )}
-
       <RichTextComponentPicker
         open={componentPickerOpen}
         onOpenChange={setComponentPickerOpen}

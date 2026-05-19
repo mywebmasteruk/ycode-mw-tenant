@@ -6,6 +6,7 @@ import { usePagesStore } from '../stores/usePagesStore';
 import { useCollaborationPresenceStore } from '../stores/useCollaborationPresenceStore';
 import { createClient } from '@/lib/supabase-browser';
 import { debounce } from '../lib/collaboration-utils';
+import { createChannelLifecycle } from '@/lib/realtime-channel';
 import type { Page } from '../types';
 
 interface PageUpdate {
@@ -24,13 +25,9 @@ interface UseLivePageUpdatesReturn {
 }
 
 export function useLivePageUpdates(): UseLivePageUpdatesReturn {
-  const { user } = useAuthStore();
-  const {
-    loadPages,
-    addPage,
-    updatePage,
-    removePage
-  } = usePagesStore();
+  const user = useAuthStore((state) => state.user);
+  const addPage = usePagesStore((state) => state.addPage);
+  const removePage = usePagesStore((state) => state.removePage);
   const updateUser = useCollaborationPresenceStore((state) => state.updateUser);
   const currentUserId = useCollaborationPresenceStore((state) => state.currentUserId);
 
@@ -71,22 +68,22 @@ export function useLivePageUpdates(): UseLivePageUpdatesReturn {
       return;
     }
 
+    const lifecycle = createChannelLifecycle();
+
     const initializeChannel = async () => {
       try {
         const supabase = await createClient();
         const channel = supabase.channel('pages:updates');
+        if (!lifecycle.track(channel, supabase)) return;
 
-        // Listen for page updates
         channel.on('broadcast', { event: 'page_update' }, (payload) => {
           handleIncomingPageUpdate(payload.payload);
         });
 
-        // Listen for page creation
         channel.on('broadcast', { event: 'page_created' }, (payload) => {
           handleIncomingPageCreate(payload.payload);
         });
 
-        // Listen for page deletion
         channel.on('broadcast', { event: 'page_deleted' }, (payload) => {
           handleIncomingPageDelete(payload.payload);
         });
@@ -97,6 +94,7 @@ export function useLivePageUpdates(): UseLivePageUpdatesReturn {
           }
         });
 
+        if (lifecycle.cancelled) return;
         channelRef.current = channel;
       } catch (error) {
         console.error('Failed to initialize page updates:', error);
@@ -106,10 +104,8 @@ export function useLivePageUpdates(): UseLivePageUpdatesReturn {
     initializeChannel();
 
     return () => {
-      if (channelRef.current) {
-        channelRef.current.unsubscribe();
-        channelRef.current = null;
-      }
+      lifecycle.teardown();
+      channelRef.current = null;
       isReceivingUpdates.current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- handlers are stable refs, adding would cause reconnect loops

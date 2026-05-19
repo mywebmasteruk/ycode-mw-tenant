@@ -131,23 +131,61 @@ interface UseUndoRedoReturn {
   initialize: () => Promise<void>;
 }
 
-// Cache for tracking the previous state of entities
-const previousStateCache = new Map<string, any>();
+// Cache for tracking the previous state of entities.
+// Stored as JSON strings to cut V8 retained memory (~3x smaller than parsed objects).
+const previousStateCache = new Map<string, string>();
 
-// Local undo/redo buffer for unsaved changes (per entity)
+// Local undo/redo buffer for unsaved changes (per entity).
+// `state` is JSON-stringified to avoid keeping a parsed deep clone per entry.
 interface LocalChange {
-  state: any;
+  state: string;
   timestamp: number;
 }
 
 const localUndoBuffer = new Map<string, LocalChange[]>();
 const localRedoBuffer = new Map<string, LocalChange[]>();
 
+// Hard cap per entity to prevent unbounded memory growth on long unsaved-edit
+// sessions (e.g. rapid drag/resize before debounced auto-save fires). The
+// `versionSaved` event clears the buffer; this cap only matters in worst case.
+const MAX_LOCAL_BUFFER_SIZE = 100;
+
 // Operation lock to prevent concurrent undo/redo operations per entity
 const operationLocks = new Map<string, boolean>();
 
 // Track entities currently being initialized to prevent false change detection
 const initializingEntities = new Set<string>();
+
+/** Store a state in the cache as a JSON string. */
+function setCachedState(cacheKey: string, state: unknown): void {
+  try {
+    previousStateCache.set(cacheKey, JSON.stringify(state));
+  } catch {
+    // ignore — stringify failures shouldn't crash the editor
+  }
+}
+
+/** Store an already-stringified state (no re-stringify). */
+function setCachedStateRaw(cacheKey: string, stateJson: string): void {
+  previousStateCache.set(cacheKey, stateJson);
+}
+
+/** Read and parse a cached state. Returns undefined when missing/invalid. */
+function getCachedState(cacheKey: string): any {
+  const stored = previousStateCache.get(cacheKey);
+  if (!stored) return undefined;
+  try {
+    return JSON.parse(stored);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Trim a buffer to MAX_LOCAL_BUFFER_SIZE by dropping the oldest entries. */
+function trimBuffer(buffer: LocalChange[]): void {
+  const overflow = buffer.length - MAX_LOCAL_BUFFER_SIZE;
+  if (overflow > 0) buffer.splice(0, overflow);
+}
 
 export function useUndoRedo({
   entityType,
@@ -263,7 +301,7 @@ export function useUndoRedo({
       // false change detection when re-entering edit mode
       // Only update if not already set by loadComponentDraft
       if (currentState && !previousStateCache.has(cacheKey)) {
-        previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(currentState)));
+        setCachedState(cacheKey, currentState);
       }
 
       // Clear local buffers when switching entities to prevent stale state interference
@@ -354,7 +392,7 @@ export function useUndoRedo({
 
     // Initialize cache if needed
     if (!previousStateCache.has(cacheKey)) {
-      previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(currentState)));
+      setCachedState(cacheKey, currentState);
       return;
     }
 
@@ -364,7 +402,7 @@ export function useUndoRedo({
     }
 
     // Check if state actually changed
-    const prevState = previousStateCache.get(cacheKey);
+    const prevState = getCachedState(cacheKey);
 
     // Strip UI-only properties (like 'open') before comparison for layer-based entities
     const isLayerEntity = entityType === 'page_layers' || entityType === 'component';
@@ -398,14 +436,19 @@ export function useUndoRedo({
         }
       }
 
-      // Add current state to undo buffer
-      const undoBuffer = localUndoBuffer.get(cacheKey) || [];
-      undoBuffer.push({
-        state: JSON.parse(JSON.stringify(prevState)),
-        timestamp: Date.now(),
-      });
-      localUndoBuffer.set(cacheKey, undoBuffer);
-      setLocalUndoCount(undoBuffer.length);
+      // Add the (full, unstripped) previous state to the undo buffer.
+      // Read the JSON straight from the cache to avoid an extra stringify pass.
+      const prevStateJson = previousStateCache.get(cacheKey);
+      if (prevStateJson) {
+        const undoBuffer = localUndoBuffer.get(cacheKey) || [];
+        undoBuffer.push({
+          state: prevStateJson,
+          timestamp: Date.now(),
+        });
+        trimBuffer(undoBuffer);
+        localUndoBuffer.set(cacheKey, undoBuffer);
+        setLocalUndoCount(undoBuffer.length);
+      }
 
       // Clear redo buffer when new change is made (both local and database)
       localRedoBuffer.delete(cacheKey);
@@ -414,8 +457,8 @@ export function useUndoRedo({
       // Also clear database redo stack immediately (don't wait for save)
       useVersionsStore.getState().clearRedoStack(entityType, entityId);
 
-      // Update previous state
-      previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(currentState)));
+      // Update previous state cache with the (full, unstripped) current state
+      setCachedState(cacheKey, currentState);
 
     }
   }, [cacheKey, entityId, entityType, getCurrentState, draftsByPageId, componentDrafts, styles]);
@@ -458,9 +501,12 @@ export function useUndoRedo({
           localUndoBuffer.set(cacheKey, undoBuffer);
           setLocalUndoCount(undoBuffer.length);
 
+          // Parse the stored state once; reuse below
+          const restoredState = JSON.parse(lastChange.state);
+
           // Validate buffer state for components
           if (process.env.NODE_ENV === 'development' && entityType === 'component') {
-            const layerIds = (lastChange.state as Layer[]).map(l => l.id);
+            const layerIds = (restoredState as Layer[]).map(l => l.id);
             const duplicates = layerIds.filter((id, index) => layerIds.indexOf(id) !== index);
             if (duplicates.length > 0) {
               console.error(`❌ [Local Undo] Component ${entityId} - Buffer state has DUPLICATE IDs:`, duplicates);
@@ -469,21 +515,23 @@ export function useUndoRedo({
             }
           }
 
-          // Add current state to redo buffer
+          // Add current state to redo buffer (stringified to reduce memory)
           const currentState = getCurrentState();
           if (currentState) {
             const redoBuffer = localRedoBuffer.get(cacheKey) || [];
             redoBuffer.push({
-              state: JSON.parse(JSON.stringify(currentState)),
+              state: JSON.stringify(currentState),
               timestamp: Date.now(),
             });
+            trimBuffer(redoBuffer);
             localRedoBuffer.set(cacheKey, redoBuffer);
             setLocalRedoCount(redoBuffer.length);
           }
 
           // Restore the previous state
-          await applyState(lastChange.state);
-          previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(lastChange.state)));
+          await applyState(restoredState);
+          // Cache already has it as a string — store raw, skip a stringify
+          setCachedStateRaw(cacheKey, lastChange.state);
 
           // Auto-save will detect the state change and handle saving with debouncing
           return true;
@@ -537,7 +585,7 @@ export function useUndoRedo({
 
         // Update cache
         if (cacheKey) {
-          previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(restoredState)));
+          setCachedState(cacheKey, restoredState);
         }
 
         // Auto-save will detect the state change and handle saving with debouncing
@@ -566,7 +614,7 @@ export function useUndoRedo({
 
         await applyState(version.snapshot);
         if (cacheKey) {
-          previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(version.snapshot)));
+          setCachedState(cacheKey, version.snapshot);
         }
 
         // Restore UI metadata from snapshot
@@ -613,21 +661,26 @@ export function useUndoRedo({
           localRedoBuffer.set(cacheKey, redoBuffer);
           setLocalRedoCount(redoBuffer.length);
 
-          // Add current state to undo buffer
+          // Parse the stored state once
+          const nextState = JSON.parse(nextChange.state);
+
+          // Add current state to undo buffer (stringified to reduce memory)
           const currentState = getCurrentState();
           if (currentState) {
             const undoBuffer = localUndoBuffer.get(cacheKey) || [];
             undoBuffer.push({
-              state: JSON.parse(JSON.stringify(currentState)),
+              state: JSON.stringify(currentState),
               timestamp: Date.now(),
             });
+            trimBuffer(undoBuffer);
             localUndoBuffer.set(cacheKey, undoBuffer);
             setLocalUndoCount(undoBuffer.length);
           }
 
           // Restore the next state
-          await applyState(nextChange.state);
-          previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(nextChange.state)));
+          await applyState(nextState);
+          // Cache already has it as a string — store raw, skip a stringify
+          setCachedStateRaw(cacheKey, nextChange.state);
 
           // Auto-save will detect the state change and handle saving with debouncing
           return true;
@@ -655,7 +708,7 @@ export function useUndoRedo({
         if (cacheKey) {
           const currentState = getCurrentState();
           if (currentState) {
-            previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(currentState)));
+            setCachedState(cacheKey, currentState);
           }
         }
 
@@ -706,7 +759,7 @@ export function useUndoRedo({
 
         // Update cache
         if (cacheKey) {
-          previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(newState)));
+          setCachedState(cacheKey, newState);
         }
 
         // Auto-save will detect the state change and handle saving with debouncing
@@ -792,7 +845,7 @@ export function useUndoRedo({
 
           // Update cache
           if (cacheKey) {
-            previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(currentState)));
+            setCachedState(cacheKey, currentState);
           }
         }
       } catch (error) {
@@ -818,7 +871,7 @@ export function useUndoRedo({
  */
 export function getPreviousState(entityType: VersionEntityType, entityId: string): any {
   const cacheKey = `${entityType}:${entityId}`;
-  return previousStateCache.get(cacheKey);
+  return getCachedState(cacheKey);
 }
 
 /**
@@ -826,7 +879,7 @@ export function getPreviousState(entityType: VersionEntityType, entityId: string
  */
 export function updatePreviousState(entityType: VersionEntityType, entityId: string, state: any): void {
   const cacheKey = `${entityType}:${entityId}`;
-  previousStateCache.set(cacheKey, JSON.parse(JSON.stringify(state)));
+  setCachedState(cacheKey, state);
 }
 
 /**

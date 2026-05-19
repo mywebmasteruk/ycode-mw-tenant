@@ -7,9 +7,18 @@
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import type { LayerStyle, Layer } from '@/types';
+<<<<<<< HEAD
 import { generateLayerStyleContentHash } from '../hash-utils';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
+=======
+import {
+  generateLayerStyleContentHash,
+  generatePageLayersHash,
+  generateComponentContentHash,
+} from '../hash-utils';
+import { updateLayersWithStyle } from '@/lib/layer-style-utils';
+>>>>>>> upstream/main
 
 /**
  * Input data for creating a new layer style
@@ -291,11 +300,12 @@ export async function publishLayerStyle(draftStyleId: string): Promise<LayerStyl
 
 /**
  * Publish multiple layer styles in batch
- * Uses batch upsert for efficiency
+ * Only upserts styles whose content_hash actually changed.
+ * Returns the IDs of styles that were modified.
  */
-export async function publishLayerStyles(styleIds: string[]): Promise<{ count: number }> {
+export async function publishLayerStyles(styleIds: string[]): Promise<{ count: number; changedStyleIds: string[] }> {
   if (styleIds.length === 0) {
-    return { count: 0 };
+    return { count: 0, changedStyleIds: [] };
   }
 
   const client = await getSupabaseAdmin();
@@ -303,6 +313,7 @@ export async function publishLayerStyles(styleIds: string[]): Promise<{ count: n
     throw new Error('Failed to initialize Supabase client');
   }
 
+<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
 
   // Batch fetch all draft styles
@@ -313,15 +324,25 @@ export async function publishLayerStyles(styleIds: string[]): Promise<{ count: n
     .eq('is_published', false);
   fetchQuery = applyTenantEq(fetchQuery, tenantId);
   const { data: draftStyles, error: fetchError } = await fetchQuery;
+=======
+  // Batch fetch all draft styles (exclude soft-deleted)
+  const { data: draftStyles, error: fetchError } = await client
+    .from('layer_styles')
+    .select('*')
+    .in('id', styleIds)
+    .eq('is_published', false)
+    .is('deleted_at', null);
+>>>>>>> upstream/main
 
   if (fetchError) {
     throw new Error(`Failed to fetch draft layer styles: ${fetchError.message}`);
   }
 
   if (!draftStyles || draftStyles.length === 0) {
-    return { count: 0 };
+    return { count: 0, changedStyleIds: [] };
   }
 
+<<<<<<< HEAD
   // Prepare styles for batch upsert
   const stylesToUpsert = draftStyles.map(draft => ({
     id: draft.id,
@@ -337,16 +358,55 @@ export async function publishLayerStyles(styleIds: string[]): Promise<{ count: n
 
   // Batch upsert all styles
   const { error: upsertError } = await client
+=======
+  // Fetch existing published versions to compare hashes
+  const { data: publishedStyles } = await client
+>>>>>>> upstream/main
     .from('layer_styles')
-    .upsert(stylesToUpsert, {
-      onConflict: 'id,is_published',
-    });
+    .select('id, content_hash')
+    .in('id', draftStyles.map(d => d.id))
+    .eq('is_published', true);
 
-  if (upsertError) {
-    throw new Error(`Failed to publish layer styles: ${upsertError.message}`);
+  const publishedHashById = new Map<string, string>();
+  if (publishedStyles) {
+    for (const pub of publishedStyles) {
+      if (pub.content_hash) publishedHashById.set(pub.id, pub.content_hash);
+    }
   }
 
-  return { count: stylesToUpsert.length };
+  // Only upsert styles that are new or have changed
+  const stylesToUpsert = draftStyles
+    .filter(draft => {
+      const pubHash = publishedHashById.get(draft.id);
+      return !pubHash || pubHash !== draft.content_hash;
+    })
+    .map(draft => ({
+      id: draft.id,
+      name: draft.name,
+      classes: draft.classes,
+      design: draft.design,
+      group: draft.group,
+      content_hash: draft.content_hash,
+      is_published: true,
+      updated_at: new Date().toISOString(),
+    }));
+
+  if (stylesToUpsert.length > 0) {
+    const { error: upsertError } = await client
+      .from('layer_styles')
+      .upsert(stylesToUpsert, {
+        onConflict: 'id,is_published',
+      });
+
+    if (upsertError) {
+      throw new Error(`Failed to publish layer styles: ${upsertError.message}`);
+    }
+  }
+
+  return {
+    count: stylesToUpsert.length,
+    changedStyleIds: stylesToUpsert.map(s => s.id),
+  };
 }
 
 /**
@@ -361,13 +421,19 @@ export async function getUnpublishedLayerStyles(): Promise<LayerStyle[]> {
     throw new Error('Failed to initialize Supabase client');
   }
 
+<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
 
   // Get all draft layer styles
   let draftQuery = client
+=======
+  // Get all draft layer styles (exclude soft-deleted)
+  const { data: draftStyles, error } = await client
+>>>>>>> upstream/main
     .from('layer_styles')
     .select('*')
     .eq('is_published', false)
+    .is('deleted_at', null)
     .order('created_at', { ascending: false });
   draftQuery = applyTenantEq(draftQuery, tenantId);
   const { data: draftStyles, error } = await draftQuery;
@@ -643,13 +709,32 @@ export async function softDeleteStyle(id: string): Promise<LayerStyleSoftDeleteR
   // Find all affected entities
   const affectedEntities = await findEntitiesUsingLayerStyle(id);
 
-  // Detach style from all affected page_layers
+  // Detach style from all affected page_layers and recompute hashes
+  const { generatePageLayersHash } = await import('@/lib/hash-utils');
+
   for (const entity of affectedEntities) {
     if (entity.type === 'page') {
+<<<<<<< HEAD
       let pageUpdateQuery = client
+=======
+      const { data: existing } = await client
+        .from('page_layers')
+        .select('generated_css')
+        .eq('id', entity.id)
+        .eq('is_published', false)
+        .single();
+
+      const contentHash = generatePageLayersHash({
+        layers: entity.newLayers,
+        generated_css: existing?.generated_css || null,
+      });
+
+      const { error: updateError } = await client
+>>>>>>> upstream/main
         .from('page_layers')
         .update({
           layers: entity.newLayers,
+          content_hash: contentHash,
           updated_at: new Date().toISOString(),
         })
         .eq('id', entity.id);
@@ -742,4 +827,137 @@ export async function deleteStyle(id: string): Promise<void> {
   if (error) {
     throw new Error(`Failed to delete layer style: ${error.message}`);
   }
+}
+
+/**
+ * Propagate updated layer style values into the draft layers of every page
+ * and component that references them.
+ *
+ * Layer styles are denormalized: when applied, the style's classes/design are
+ * COPIED onto the layer (alongside layer.styleId). The builder client only
+ * syncs the currently-open pages when a style is edited, so pages and
+ * components that aren't loaded keep stale denormalized values in the DB.
+ *
+ * Without this server-side sync, publishing a style change updates only the
+ * layer_styles row — the layers themselves still carry the OLD classes, so
+ * the published HTML references the old class names and renders with the
+ * old style. The CSS catch-up doesn't fix it because it generates CSS from
+ * the same stale layers.
+ *
+ * Skips layers that have styleOverrides (local customizations win). Also
+ * handles textStyles entries (rich-text inline styles) via the existing
+ * updateLayersWithStyle helper.
+ *
+ * @returns IDs of pages and components whose drafts were updated. Callers
+ *   should republish affected components so their published versions get
+ *   the fresh classes; affected pages are handled by the CSS catch-up step.
+ */
+export async function syncLayerStyleChangesToDrafts(
+  styleIds: string[],
+): Promise<{ affectedPageIds: string[]; affectedComponentIds: string[] }> {
+  if (styleIds.length === 0) {
+    return { affectedPageIds: [], affectedComponentIds: [] };
+  }
+
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    return { affectedPageIds: [], affectedComponentIds: [] };
+  }
+
+  // Use the just-published versions of the changed styles as the source of
+  // truth: they were just upserted by publishLayerStyles with the new values.
+  const { data: styles } = await client
+    .from('layer_styles')
+    .select('id, classes, design')
+    .in('id', styleIds)
+    .eq('is_published', true)
+    .is('deleted_at', null);
+
+  if (!styles || styles.length === 0) {
+    return { affectedPageIds: [], affectedComponentIds: [] };
+  }
+
+  // --- Sync draft page_layers ---
+  const { data: pageLayersRecords } = await client
+    .from('page_layers')
+    .select('id, page_id, layers, generated_css, content_hash')
+    .eq('is_published', false)
+    .is('deleted_at', null);
+
+  const affectedPageIds: string[] = [];
+  const now = new Date().toISOString();
+
+  for (const record of pageLayersRecords || []) {
+    // Skip rows without an actual layer tree — they can't reference any
+    // style anyway, and hashing a missing `layers` field with our default
+    // `[]` would diverge from whatever the original save path stored.
+    if (!Array.isArray(record.layers)) continue;
+
+    let layers = record.layers as Layer[];
+    for (const style of styles) {
+      layers = updateLayersWithStyle(layers, style.id, style.classes, style.design);
+    }
+
+    // Match the canonical save formula exactly: empty-string generated_css
+    // must coalesce to null, otherwise the recomputed hash will drift from
+    // the stored one on every publish.
+    const newHash = generatePageLayersHash({
+      layers,
+      generated_css: record.generated_css || null,
+    });
+
+    if (newHash !== record.content_hash) {
+      affectedPageIds.push(record.page_id);
+      // CRITICAL: page_layers has a composite primary key (id, is_published).
+      // Drafts and published rows share the same `id`, so without filtering
+      // by is_published this UPDATE silently clobbers the published row too,
+      // writing the new layers + hash but NOT a fresh generated_css. That
+      // breaks the published render (new class names, old CSS file) AND
+      // makes batchPublishPageLayers below think nothing changed.
+      await client
+        .from('page_layers')
+        .update({ layers, content_hash: newHash, updated_at: now })
+        .eq('id', record.id)
+        .eq('is_published', false);
+    }
+  }
+
+  // --- Sync draft components ---
+  const { data: componentRecords } = await client
+    .from('components')
+    .select('id, name, layers, variables, content_hash')
+    .eq('is_published', false)
+    .is('deleted_at', null);
+
+  const affectedComponentIds: string[] = [];
+
+  for (const record of componentRecords || []) {
+    // Same guard as page_layers above: components with no layer tree have
+    // nothing to sync, and forcing `[]` would diverge from the stored hash.
+    if (!Array.isArray(record.layers)) continue;
+
+    let layers = record.layers as Layer[];
+    for (const style of styles) {
+      layers = updateLayersWithStyle(layers, style.id, style.classes, style.design);
+    }
+
+    const newHash = generateComponentContentHash({
+      name: record.name,
+      layers,
+      variables: record.variables,
+    });
+
+    if (newHash !== record.content_hash) {
+      affectedComponentIds.push(record.id);
+      // Same composite-key trap as page_layers: components share an `id`
+      // across draft/published. Always scope the update to the draft row.
+      await client
+        .from('components')
+        .update({ layers, content_hash: newHash, updated_at: now })
+        .eq('id', record.id)
+        .eq('is_published', false);
+    }
+  }
+
+  return { affectedPageIds, affectedComponentIds };
 }

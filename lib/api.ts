@@ -533,6 +533,21 @@ export const collectionsApi = {
     });
   },
 
+  /**
+   * Batch-fetch items for reference-field display lookups across many
+   * collections in a single round-trip. Skips status + count enrichment
+   * since callers only consume raw `values`.
+   */
+  async getReferencedItemsBatch(
+    collectionIds: string[],
+    limit: number = 100
+  ): Promise<ApiResponse<{ items: Record<string, { items: CollectionItemWithValues[] }> }>> {
+    return apiRequest('/ycode/api/collections/items/batch', {
+      method: 'POST',
+      body: JSON.stringify({ collectionIds, limit, skipEnrichment: true }),
+    });
+  },
+
   async getItems(
     collectionId: string,
     options?: {

@@ -461,9 +461,9 @@ export function useEditorUrl() {
  */
 export function useEditorActions() {
   const { navigateToLayers, navigateToPage, navigateToPageEdit, navigateToPageLayers, navigateToCollection, navigateToCollections, navigateToCollectionItem, navigateToNewCollectionItem, navigateToComponent, updateQueryParams, urlState } = useEditorUrl();
-  const { setCurrentPageId } = useEditorStore();
-  const { setSelectedCollectionId } = useCollectionsStore();
-  const { setEditingComponentId } = useEditorStore();
+  const setCurrentPageId = useEditorStore((s) => s.setCurrentPageId);
+  const setSelectedCollectionId = useCollectionsStore((s) => s.setSelectedCollectionId);
+  const setEditingComponentId = useEditorStore((s) => s.setEditingComponentId);
 
   // Combined action: Open page (updates state + URL)
   const openPage = useCallback(

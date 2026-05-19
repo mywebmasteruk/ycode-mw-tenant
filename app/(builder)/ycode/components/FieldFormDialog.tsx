@@ -89,7 +89,7 @@ export default function FieldFormDialog({
 
   // Stores
   const { collections, fields: fieldsByCollectionId } = useCollectionsStore();
-  const { openFileManager } = useEditorStore();
+  const openFileManager = useEditorStore((state) => state.openFileManager);
   const getAsset = useAssetsStore((state) => state.getAsset);
 
   // Filter out the current collection from reference options (can't reference self)

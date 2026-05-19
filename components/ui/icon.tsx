@@ -1043,8 +1043,12 @@ export const iconExists = (name: string): boolean => {
 
 /**
  * Generic SVG Icon component. Forwards all SVG props (className, style, event handlers, etc.).
+ * Memoized: icons are rendered in dense lists (layer tree rows, every right-sidebar
+ * control, every select item, …). Almost all call sites pass primitive `name` +
+ * `className` strings, so the shallow compare bails cheaply and avoids hundreds
+ * of pointless SVG re-renders on every layer-selection cascade.
  */
-export const Icon: React.FC<IconProps> = ({ name, ...svgProps }) => {
+export const Icon: React.FC<IconProps> = React.memo(function Icon({ name, ...svgProps }) {
   const children = ICONS[name];
   if (!children) {
     console.warn(`Icon: no icon found for name "${name}"`);
@@ -1061,6 +1065,6 @@ export const Icon: React.FC<IconProps> = ({ name, ...svgProps }) => {
       {children}
     </svg>
   );
-};
+});
 
 export default Icon;
