@@ -380,6 +380,12 @@ export function getOptimizedImageUrl(
  * @param url - Original image URL
  * @param sizes - Array of widths in pixels (default: see below)
  * @param quality - Image quality 0-100 (default: 85)
+ * @param intrinsicWidth - Source image natural width. When provided, caps
+ *   variants to it so descriptors match the file the proxy returns (Sharp
+ *   runs with `withoutEnlargement: true`). Without this, a 1512px source
+ *   with a `?width=1920 1920w` descriptor sends a 1512px file: browsers
+ *   then compute `intrinsic = 1512 / (1920/1512) = 1190px` and render the
+ *   image ~21% smaller than intended.
  * @returns Srcset string with multiple size options
  *
  * Default ladder: 320, 480, 640, 750, 828, 1080, 1280, 1536, 1920.
@@ -406,19 +412,32 @@ export function getOptimizedImageUrl(
 export function generateImageSrcset(
   url: string,
   sizes: number[] = [320, 480, 640, 750, 828, 1080, 1280, 1536, 1920],
-  quality: number = 85
+  quality: number = 85,
+  intrinsicWidth?: number | null
 ): string {
   if (!isTransformableUrl(url)) return '';
+
+  // Cap descriptors at the source's natural width when known and smaller than
+  // our default top-end. This keeps `descriptor === file actual width` so the
+  // browser's intrinsic-size math stays correct (see param docs above).
+  let effectiveSizes = sizes;
+  if (intrinsicWidth && intrinsicWidth > 0) {
+    const maxDefault = sizes[sizes.length - 1];
+    if (intrinsicWidth < maxDefault) {
+      effectiveSizes = sizes.filter((w) => w < intrinsicWidth);
+      effectiveSizes.push(intrinsicWidth);
+    }
+  }
 
   try {
     if (isProxyUrl(url)) {
       const baseUrl = url.split('?')[0];
-      return sizes
+      return effectiveSizes
         .map((width) => `${baseUrl}?width=${width}&quality=${quality} ${width}w`)
         .join(', ');
     }
 
-    const srcsetEntries = sizes.map((width) => {
+    const srcsetEntries = effectiveSizes.map((width) => {
       const sizeUrl = new URL(url);
       sizeUrl.searchParams.set('width', width.toString());
       sizeUrl.searchParams.set('quality', quality.toString());

@@ -2179,7 +2179,6 @@ const LayerItemImpl: React.FC<{
       const effectiveLoading = isLcpCandidate ? 'eager' : imgLoadingAttr;
 
       const optimizedSrc = getOptimizedImageUrl(finalImageUrl, 1920, 85);
-      const srcset = generateImageSrcset(finalImageUrl);
 
       // Prefer an explicit `sizes` attribute. Otherwise, if we have an
       // intrinsic pixel width, emit a media-aware sizes string so browsers
@@ -2191,6 +2190,12 @@ const LayerItemImpl: React.FC<{
         : null;
       const sizes = explicitSizes
         || (widthForSizes ? `(max-width: 768px) 100vw, ${widthForSizes}px` : getImageSizes());
+
+      // Pass intrinsic width so srcset descriptors don't exceed the source's
+      // natural size (the proxy won't upscale; mismatched descriptors break
+      // browser intrinsic-dimension math and shrink the rendered image).
+      const intrinsicWidthForSrcset = widthForSizes ? parseInt(widthForSizes, 10) : null;
+      const srcset = generateImageSrcset(finalImageUrl, undefined, undefined, intrinsicWidthForSrcset);
 
       const imageProps: Record<string, any> = {
         ...elementProps,
