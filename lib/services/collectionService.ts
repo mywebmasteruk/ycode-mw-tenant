@@ -804,45 +804,30 @@ async function cleanupDeletedPublishedItems(
   }
 
   // Batch hard delete published versions (CASCADE will delete values)
-<<<<<<< HEAD
-  let delPubItems = client
-    .from('collection_items')
-    .delete()
-    .in('id', deletedItemIds)
-    .eq('is_published', true);
-  delPubItems = applyTenantEq(delPubItems, tenantId);
-  await delPubItems;
-
-  // Batch hard delete draft versions (CASCADE will delete values)
-  let delDraftItems = client
-    .from('collection_items')
-    .delete()
-    .in('id', deletedItemIds)
-    .eq('is_published', false);
-  delDraftItems = applyTenantEq(delDraftItems, tenantId);
-  await delDraftItems;
-=======
   for (let i = 0; i < deletedItemIds.length; i += 500) {
     const batch = deletedItemIds.slice(i, i + 500);
-    await client
+    let delPubItems = client
       .from('collection_items')
       .delete()
       .in('id', batch)
       .eq('is_published', true);
+    delPubItems = applyTenantEq(delPubItems, tenantId);
+    await delPubItems;
   }
 
   // Batch hard delete draft versions (CASCADE will delete values)
   for (let i = 0; i < deletedItemIds.length; i += 500) {
     const batch = deletedItemIds.slice(i, i + 500);
-    await client
+    let delDraftItems = client
       .from('collection_items')
       .delete()
       .in('id', batch)
       .eq('is_published', false);
+    delDraftItems = applyTenantEq(delDraftItems, tenantId);
+    await delDraftItems;
   }
 
   return { deletedCount: deletedItemIds.length, deletedSlugs };
->>>>>>> upstream/main
 }
 
 /**
