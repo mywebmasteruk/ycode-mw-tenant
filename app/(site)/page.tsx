@@ -49,23 +49,11 @@ const getTenantCacheContext = cache(async () => {
  * Cached with tag-based revalidation (no time-based stale cache)
  */
 async function fetchPublishedHomepage() {
-<<<<<<< HEAD
   const { effectiveTid, keySuffix } = await getTenantCacheContext();
   const tags = [
     tenantAllPagesTag(effectiveTid),
     tenantRouteTag(effectiveTid, '/'),
   ];
-=======
-  // Tags are both 'route-/' AND 'all-pages':
-  // - route-/ lets selective invalidation purge just this page's data cache
-  // - all-pages lets full invalidation (color variables, redirects, etc.)
-  //   sweep every page's data cache in one invalidateByTag call.
-  // Vercel's invalidateByTag is tag-precise, so no cascade — selective
-  // invalidation of one route doesn't disturb others. (Next.js bug #63509
-  // would apply if we used revalidateTag for selective on Vercel, but we
-  // route exclusively through invalidateByTag here.)
-  const tags = ['route-/', 'all-pages'];
->>>>>>> upstream/main
   const opts = { tags, revalidate: false as const };
 
   try {
@@ -126,11 +114,12 @@ async function fetchCachedGlobalSettings() {
 }
 
 async function fetchCachedRedirects(): Promise<RedirectType[] | null> {
+  const { effectiveTid, keySuffix } = await getTenantCacheContext();
   try {
     return await unstable_cache(
       async () => getSettingByKey('redirects') as Promise<RedirectType[] | null>,
-      ['data-for-redirects'],
-      { tags: ['all-pages'], revalidate: false }
+      ['data-for-redirects', keySuffix],
+      { tags: [tenantAllPagesTag(effectiveTid)], revalidate: false }
     )();
   } catch {
     return null;
@@ -167,10 +156,13 @@ async function fetchCachedErrorPage(errorCode: 401) {
 }
 
 export default async function Home() {
-  // Tag this response for Vercel CDN cache invalidation. The publish endpoint
-  // purges this exact tag (route-/) so only the homepage cache entry is
-  // invalidated. No-ops outside Vercel.
-  await addCacheTag(['route-/', 'all-pages']);
+  // MASJIDWEB_SEAM: tenant-aware cache tags — see docs/masjidweb-core-seams.md#tier-4
+  const { effectiveTid } = await getTenantCacheContext();
+  await addCacheTag([
+    tenantAllPagesTag(effectiveTid),
+    tenantRouteTag(effectiveTid, '/'),
+  ]);
+  // MASJIDWEB_SEAM_END
 
   // Check for redirects targeting the homepage
   const redirects = await fetchCachedRedirects();
@@ -329,7 +321,6 @@ export async function generateMetadata(): Promise<Metadata> {
       }),
       baseUrl: getSiteBaseUrl({ globalCanonicalUrl: globalSettings.globalCanonicalUrl }),
     }),
-<<<<<<< HEAD
     ['data-for-route-/-meta', keySuffix],
     {
       tags: [
@@ -338,10 +329,6 @@ export async function generateMetadata(): Promise<Metadata> {
       ],
       revalidate: false,
     }
-=======
-    ['data-for-route-/-meta'],
-    { tags: ['route-/', 'all-pages'], revalidate: false }
->>>>>>> upstream/main
   )();
 
   if (baseUrl) {
