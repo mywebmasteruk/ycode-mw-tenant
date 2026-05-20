@@ -1,11 +1,4 @@
 import { revalidateTag, revalidatePath } from 'next/cache';
-<<<<<<< HEAD
-import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
-import {
-  tenantAllPagesTag,
-  tenantRouteTag,
-} from '@/lib/masjidweb/tenant-cache-tags';
-=======
 import { invalidateByTag } from '@vercel/functions';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { buildSlugPath } from '@/lib/page-utils';
@@ -16,6 +9,11 @@ import type {
   PublishLocalisationResult,
   SlugSnapshot,
 } from '@/lib/services/localisationService';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import {
+  tenantAllPagesTag,
+  tenantRouteTag,
+} from '@/lib/masjidweb/tenant-cache-tags';
 
 /**
  * Maximum number of routes to warm in a single invalidation event.
@@ -39,17 +37,14 @@ function chunk<T>(arr: T[], size: number): T[][] {
   }
   return chunks;
 }
->>>>>>> upstream/main
 
 /**
  * Cache Invalidation Service
  *
-<<<<<<< HEAD
- * Netlify: revalidateTag clears Next data cache; optional REST purge clears Edge when configured.
-=======
  * Handles CDN cache invalidation for published pages using Next.js revalidation.
  * Supports both full-site invalidation and selective per-page invalidation.
->>>>>>> upstream/main
+ * 
+ * Netlify: revalidateTag clears Next data cache; optional REST purge clears Edge when configured.
  */
 
 /** Legacy tag when tenant id is unknown (single-tenant / admin scripts). */
@@ -72,23 +67,8 @@ function netlifyPurgeCredentials(): {
 }
 
 /**
-<<<<<<< HEAD
  * @param publisherTenantId - When set, purge only that tenant's tagged HTML (see proxy
  *   Netlify-Cache-Tag). Avoids invalidating other tenants on the same Netlify site.
-=======
- * Invalidate cache for a specific page by route path.
- *
- * On Vercel: uses invalidateByTag exclusively, which talks directly to Vercel's
- * CDN purge API and covers all three cache layers (CDN, Runtime, Data). We
- * deliberately avoid revalidateTag here because Next.js bug #63509 causes it
- * to cascade-invalidate other tags consumed by the page render, breaking
- * selective invalidation on Vercel.
- *
- * On self-hosted (no Vercel runtime): invalidateByTag no-ops, so we fall
- * back to revalidateTag to clear the in-process Next.js data cache.
- *
- * @param routePath - Route path (without leading slash for tag, with for path)
->>>>>>> upstream/main
  */
 export async function purgeNetlifyEdgeCache(
   publisherTenantId?: string | null,
@@ -228,21 +208,34 @@ export async function purgeNetlifyEdgeCache(
   return { method: 'none', ok: false, error };
 }
 
+/**
+ * Invalidate cache for a specific page by route path.
+ *
+ * On Vercel: uses invalidateByTag exclusively, which talks directly to Vercel's
+ * CDN purge API and covers all three cache layers (CDN, Runtime, Data). We
+ * deliberately avoid revalidateTag here because Next.js bug #63509 causes it
+ * to cascade-invalidate other tags consumed by the page render, breaking
+ * selective invalidation on Vercel.
+ *
+ * On self-hosted (no Vercel runtime): invalidateByTag no-ops, so we fall
+ * back to revalidateTag to clear the in-process Next.js data cache.
+ *
+ * @param routePath - Route path (without leading slash for tag, with for path)
+ */
 export async function invalidatePage(routePath: string): Promise<boolean> {
-  const tag = `route-/${routePath}`;
   try {
-<<<<<<< HEAD
+    // MASJIDWEB_SEAM: tenant-scoped invalidation — see docs/masjidweb-core-seams.md#tier-3
     const effectiveTid = await resolveEffectiveTenantId();
     const normalized = routePath.replace(/^\/+/, '');
-    revalidateTag(tenantRouteTag(effectiveTid, normalized || '/'), 'max');
-    revalidatePath(normalized ? `/${normalized}` : '/', 'page');
-=======
+    const tag = tenantRouteTag(effectiveTid, normalized || '/');
+    
     if (process.env.VERCEL === '1') {
       await invalidateByTag(tag);
     } else {
       revalidateTag(tag, { expire: 0 });
     }
->>>>>>> upstream/main
+    revalidatePath(normalized ? `/${normalized}` : '/', 'page');
+    // MASJIDWEB_SEAM_END
     return true;
   } catch (error) {
     console.error('❌ [Cache] Invalidation error:', error);
@@ -250,13 +243,6 @@ export async function invalidatePage(routePath: string): Promise<boolean> {
   }
 }
 
-<<<<<<< HEAD
-export async function invalidatePages(routePaths: string[]): Promise<boolean> {
-  const results = await Promise.all(
-    routePaths.map((routePath) => invalidatePage(routePath)),
-  );
-  return results.every(Boolean);
-=======
 /**
  * Invalidate cache for multiple pages.
  * Uses Vercel's batched invalidateByTag on Vercel, revalidateTag elsewhere.
@@ -266,7 +252,14 @@ export async function invalidatePages(routePaths: string[]): Promise<boolean> {
 export async function invalidatePages(routePaths: string[]): Promise<boolean> {
   if (routePaths.length === 0) return true;
   try {
-    const tags = routePaths.map((p) => `route-/${p}`);
+    // MASJIDWEB_SEAM: tenant-scoped batch invalidation — see docs/masjidweb-core-seams.md#tier-3
+    const effectiveTid = await resolveEffectiveTenantId();
+    const tags = routePaths.map((p) => {
+      const normalized = p.replace(/^\/+/, '');
+      return tenantRouteTag(effectiveTid, normalized || '/');
+    });
+    // MASJIDWEB_SEAM_END
+    
     if (process.env.VERCEL === '1') {
       await invalidateByTag(tags);
     } else {
@@ -279,7 +272,6 @@ export async function invalidatePages(routePaths: string[]): Promise<boolean> {
     console.error('❌ [Cache] Invalidation error:', error);
     return false;
   }
->>>>>>> upstream/main
 }
 
 export async function clearAllCache(
@@ -288,25 +280,20 @@ export async function clearAllCache(
   const tid = publisherTenantId?.trim() || null;
   let nextCacheNote: string | undefined;
   try {
-<<<<<<< HEAD
-    // Next.js 16 expects a profile string (e.g. "max"); invalid profile or missing
-    // incrementalCache on some hosts must not fail the whole publish pipeline.
-    revalidateTag(tenantAllPagesTag(tid), 'max');
-    revalidateTag(tenantRouteTag(tid, '/'), 'max');
-    revalidatePath('/', 'layout');
-    revalidatePath('/', 'page');
-=======
+    // MASJIDWEB_SEAM: tenant-scoped full cache clear — see docs/masjidweb-core-seams.md#tier-3
     if (process.env.VERCEL === '1') {
-      // Vercel: direct CDN purge by the 'all-pages' tag set on every page
+      // Vercel: direct CDN purge by the tenant-scoped 'all-pages' tag set on every page
       // response. Covers CDN, Runtime, and Data caches in one call. Avoids
       // revalidateTag's cascade bug (#63509).
-      await invalidateByTag('all-pages');
+      await invalidateByTag(tenantAllPagesTag(tid));
     } else {
       // Self-hosted: clear Next.js's in-process caches.
-      revalidateTag('all-pages', { expire: 0 });
+      revalidateTag(tenantAllPagesTag(tid), { expire: 0 });
+      revalidateTag(tenantRouteTag(tid, '/'), { expire: 0 });
       revalidatePath('/', 'layout');
+      revalidatePath('/', 'page');
     }
->>>>>>> upstream/main
+    // MASJIDWEB_SEAM_END
   } catch (error) {
     nextCacheNote =
       error instanceof Error ? error.message : String(error);
@@ -635,7 +622,9 @@ export async function selectiveInvalidation(
   indirectlyAffectedPageIds: string[] = [],
 ): Promise<SelectiveInvalidationResult> {
   if (globalChanged) {
-    await clearAllCache();
+    // MASJIDWEB_SEAM: tenant-scoped full invalidation — see docs/masjidweb-core-seams.md#tier-3
+    await clearAllCache(await resolveEffectiveTenantId());
+    // MASJIDWEB_SEAM_END
     return { strategy: 'full', invalidatedRoutes: [], reason: 'global resources changed' };
   }
 
