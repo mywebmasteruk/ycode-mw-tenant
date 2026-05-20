@@ -23,10 +23,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-<<<<<<< HEAD
-    // Revalidate the cache for this tag
-    revalidateTag(tag, 'max');
-=======
     // On Vercel: direct CDN purge, avoids revalidateTag cascade bug (#63509).
     // Off Vercel: revalidateTag for Next.js's in-process data cache.
     if (process.env.VERCEL === '1') {
@@ -34,7 +30,6 @@ export async function POST(request: NextRequest) {
     } else {
       revalidateTag(tag, { expire: 0 });
     }
->>>>>>> upstream/main
 
     return noCache({
       revalidated: true,
