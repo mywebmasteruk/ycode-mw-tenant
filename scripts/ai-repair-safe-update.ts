@@ -112,6 +112,11 @@ async function main(): Promise<void> {
       'OPENROUTER_API_KEY is not set. Add it as a GitHub Actions secret on this repository.',
     );
   }
+  if (!apiKey.startsWith('sk-or-') && !apiKey.startsWith('sk-')) {
+    throw new Error(
+      'OPENROUTER_API_KEY looks invalid. Set a real OpenRouter key (sk-or-…) as a GitHub Actions secret on this repository.',
+    );
+  }
 
   const model = process.env.OPENROUTER_MODEL?.trim() || DEFAULT_AI_REPAIR_MODEL;
   const prNumber = process.env.PR_NUMBER?.trim();
