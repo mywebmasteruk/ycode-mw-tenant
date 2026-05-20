@@ -5,13 +5,10 @@ import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepos
 import { getItemWithValues, deleteItem } from '@/lib/repositories/collectionItemRepository';
 import { setValues } from '@/lib/repositories/collectionItemValueRepository';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
-<<<<<<< HEAD
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { scopeCollectionItemTimestampUpdate } from '@/lib/masjidweb/collection-item-timestamp-scope';
-=======
 import { invalidateForCollectionChange } from '@/lib/services/cacheService';
 import type { CollectionField, CollectionItemWithValues } from '@/types';
->>>>>>> upstream/main
 import { transformItemToPublicWithRefs, parseFieldProjections } from '../../../../reference-resolver';
 
 /**
