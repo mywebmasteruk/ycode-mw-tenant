@@ -11,13 +11,10 @@ import { getKnexClient } from '../knex-client';
 import { getPublishedPagesByIds } from '@/lib/repositories/pageRepository';
 import { batchPublishPageLayers } from '@/lib/repositories/pageLayersRepository';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
-<<<<<<< HEAD
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
-=======
 import { buildSlugPath } from '@/lib/page-utils';
 import type { Page, PageFolder } from '@/types';
->>>>>>> upstream/main
 
 /**
  * Helper: Generate a unique slug from a page name
