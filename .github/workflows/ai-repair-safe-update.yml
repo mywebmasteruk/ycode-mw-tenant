@@ -49,21 +49,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Install dependencies
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci
-          else
-            npm install --no-audit --no-fund
-          fi
-
       - name: Run AI conflict repair
         id: repair
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_MODEL: ${{ vars.OPENROUTER_REPAIR_MODEL }}
-        run: npm run updates:ai-repair
+        run: npx --yes tsx scripts/ai-repair-safe-update.ts
 
       - name: Commit and push repairs
         id: push
