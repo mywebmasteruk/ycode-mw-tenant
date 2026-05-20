@@ -1,12 +1,8 @@
 import { NextRequest } from 'next/server';
 import { noCache } from '@/lib/api-response';
 import { importProject, unpackImport } from '@/lib/services/projectService';
-<<<<<<< HEAD
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
-import { clearAllCache } from '@/lib/services/cacheService';
-=======
 import { clearAllCache, getAllPublishedRoutes, warmRoutes } from '@/lib/services/cacheService';
->>>>>>> upstream/main
 import { ToastError } from '@/lib/toast-error';
 
 export const dynamic = 'force-dynamic';
@@ -49,13 +45,10 @@ export async function POST(request: NextRequest) {
       return noCache({ error: result.error }, 500);
     }
 
-<<<<<<< HEAD
-    await clearAllCache(await resolveEffectiveTenantId());
-=======
     // Project import swaps in a new published site. Without warming, the
     // first visit to each page after import is a cold render.
     try {
-      await clearAllCache();
+      await clearAllCache(await resolveEffectiveTenantId());
       const routes = await getAllPublishedRoutes();
       const warmResult = await warmRoutes(routes, request);
       if (warmResult) {
@@ -66,7 +59,6 @@ export async function POST(request: NextRequest) {
     } catch (cacheError) {
       console.error('[Cache] project import: cache invalidation failed:', cacheError);
     }
->>>>>>> upstream/main
 
     return noCache({
       success: true,
