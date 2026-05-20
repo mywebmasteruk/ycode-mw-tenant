@@ -8,11 +8,8 @@
  */
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
-<<<<<<< HEAD
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
-import type { Locale, Translation } from '@/types';
-=======
 import type { Locale, Translation, TranslationSourceType } from '@/types';
 
 export interface ChangedLocale {
@@ -47,7 +44,6 @@ export interface SlugSnapshot {
   /** Pre-upsert published CMS item slug translations: locale_id → item_id → slug. */
   cmsSlugsByLocale: Map<string, Map<string, string>>;
 }
->>>>>>> upstream/main
 
 export interface PublishLocalisationResult {
   locales: number;
@@ -153,12 +149,18 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
   // `buildSlugSnapshot` reads to compute OLD URLs for slug renames.
   // ──────────────────────────────────────────────────────────────────────
 
+  let publishedLocalesQuery = client.from('locales').select('*').eq('is_published', true);
+  publishedLocalesQuery = applyTenantEq(publishedLocalesQuery, tenantId);
+  
+  let publishedTranslationsQuery = client.from('translations').select('*').eq('is_published', true);
+  publishedTranslationsQuery = applyTenantEq(publishedTranslationsQuery, tenantId);
+
   const [
     { data: existingPublishedLocalesRaw },
     { data: existingPublishedTranslationsRaw },
   ] = await Promise.all([
-    client.from('locales').select('*').eq('is_published', true),
-    client.from('translations').select('*').eq('is_published', true),
+    publishedLocalesQuery,
+    publishedTranslationsQuery,
   ]);
 
   const existingPublishedLocales: Locale[] = existingPublishedLocalesRaw || [];
@@ -240,12 +242,14 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
     // Step 2: Soft-delete published versions of soft-deleted draft locales (single query)
     if (softDeletedDraftLocales.length > 0) {
       const localeIds = softDeletedDraftLocales.map((locale: Locale) => locale.id);
-      const { error: deleteLocalesError } = await client
+      let deleteQuery = client
         .from('locales')
         .update({ deleted_at: deletedAt })
         .in('id', localeIds)
         .eq('is_published', true)
         .is('deleted_at', null);
+      deleteQuery = applyTenantEq(deleteQuery, tenantId);
+      const { error: deleteLocalesError } = await deleteQuery;
 
       if (deleteLocalesError) {
         throw new Error(`Failed to soft-delete locales: ${deleteLocalesError.message}`);
@@ -263,6 +267,7 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
         created_at: locale.created_at,
         updated_at: locale.updated_at,
         deleted_at: null,
+        ...(tenantId ? { tenant_id: tenantId } : {}),
       }));
 
       const { error: upsertError } = await client
@@ -271,59 +276,8 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
           onConflict: 'id,is_published',
         });
 
-<<<<<<< HEAD
-      const existingPublishedIds = new Set(existingPublished?.map(l => l.id) || []);
-
-      const localesToInsert: any[] = [];
-      const localesToUpdate: any[] = [];
-
-      for (const locale of activeDraftLocales) {
-        const publishedData = {
-          id: locale.id,
-          code: locale.code,
-          label: locale.label,
-          is_default: locale.is_default,
-          is_published: true,
-          created_at: locale.created_at,
-          updated_at: locale.updated_at,
-          deleted_at: null,
-          ...(tenantId ? { tenant_id: tenantId } : {}),
-        };
-
-        if (existingPublishedIds.has(locale.id)) {
-          localesToUpdate.push(publishedData);
-        } else {
-          localesToInsert.push(publishedData);
-        }
-      }
-
-      // Insert new published locales
-      if (localesToInsert.length > 0) {
-        const { error: insertError } = await client
-          .from('locales')
-          .insert(localesToInsert);
-
-        if (insertError) {
-          throw new Error(`Failed to insert published locales: ${insertError.message}`);
-        }
-      }
-
-      // Update existing published locales (batch operation)
-      if (localesToUpdate.length > 0) {
-        // Use upsert for updates since we know these records exist
-        const { error: updateError } = await client
-          .from('locales')
-          .upsert(localesToUpdate, {
-            onConflict: 'id,is_published',
-          });
-
-        if (updateError) {
-          throw new Error(`Failed to update published locales: ${updateError.message}`);
-        }
-=======
       if (upsertError) {
         throw new Error(`Failed to upsert published locales: ${upsertError.message}`);
->>>>>>> upstream/main
       }
 
       publishedLocalesCount = activeDraftLocales.length;
@@ -336,10 +290,12 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
   const translationsStart = performance.now();
 
   // Step 4: Fetch all draft translations (including soft-deleted)
-  const { data: allDraftTranslations, error: translationsError } = await client
+  let draftTranslationsQuery = client
     .from('translations')
     .select('*')
     .eq('is_published', false);
+  draftTranslationsQuery = applyTenantEq(draftTranslationsQuery, tenantId);
+  const { data: allDraftTranslations, error: translationsError } = await draftTranslationsQuery;
 
   if (translationsError) {
     throw new Error(`Failed to fetch draft translations: ${translationsError.message}`);
@@ -398,12 +354,14 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
     // Step 5: Soft-delete published versions of soft-deleted draft translations (single query)
     if (softDeletedDraftTranslations.length > 0) {
       const translationIds = softDeletedDraftTranslations.map((translation: Translation) => translation.id);
-      const { error: deleteTranslationsError } = await client
+      let deleteQuery = client
         .from('translations')
         .update({ deleted_at: deletedAt })
         .in('id', translationIds)
         .eq('is_published', true)
         .is('deleted_at', null);
+      deleteQuery = applyTenantEq(deleteQuery, tenantId);
+      const { error: deleteTranslationsError } = await deleteQuery;
 
       if (deleteTranslationsError) {
         throw new Error(`Failed to soft-delete translations: ${deleteTranslationsError.message}`);
@@ -425,6 +383,7 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
         created_at: translation.created_at,
         updated_at: translation.updated_at,
         deleted_at: null,
+        ...(tenantId ? { tenant_id: tenantId } : {}),
       }));
 
       const { error: upsertError } = await client
