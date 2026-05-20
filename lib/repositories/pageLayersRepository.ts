@@ -1,4 +1,5 @@
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import type { PageLayers, Layer } from '../../types';
 import { generatePageLayersHash } from '../hash-utils';
@@ -69,9 +70,7 @@ export async function getLayersByPageId(
     .eq('page_id', pageId)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    query = query.eq('tenant_id', tenantId);
-  }
+  query = applyTenantEq(query, tenantId);
 
   // Apply is_published filter if provided
   if (isPublished !== undefined) {
@@ -115,9 +114,7 @@ export async function getDraftLayers(pageId: string): Promise<PageLayers | null>
     .is('deleted_at', null)
     .order('created_at', { ascending: false });
 
-  if (tenantId) {
-    q = q.eq('tenant_id', tenantId);
-  }
+  q = applyTenantEq(q, tenantId);
 
   const { data, error } = await q;
 
@@ -155,9 +152,7 @@ export async function getPublishedLayers(pageId: string): Promise<PageLayers | n
     .order('created_at', { ascending: false })
     .limit(1);
 
-  if (tenantId) {
-    q = q.eq('tenant_id', tenantId);
-  }
+  q = applyTenantEq(q, tenantId);
 
   const { data, error } = await q.single();
 
@@ -246,9 +241,7 @@ export async function upsertDraftLayers(
       .eq('id', existingDraft.id)
       .eq('is_published', false);
 
-    if (tenantId) {
-      upd = upd.eq('tenant_id', tenantId);
-    }
+    upd = applyTenantEq(upd, tenantId);
 
     const { data, error } = await upd.select().single();
 
@@ -265,11 +258,8 @@ export async function upsertDraftLayers(
       content_hash: contentHash,
       is_published: false,
       ...additionalData,
+      ...(tenantId ? { tenant_id: tenantId } : {}),
     };
-
-    if (tenantId) {
-      insertData.tenant_id = tenantId;
-    }
 
     const { data, error } = await client
       .from('page_layers')
@@ -305,9 +295,7 @@ export async function getAllDraftLayers(): Promise<PageLayers[]> {
     .is('deleted_at', null)
     .order('created_at', { ascending: false });
 
-  if (tenantId) {
-    q = q.eq('tenant_id', tenantId);
-  }
+  q = applyTenantEq(q, tenantId);
 
   const { data, error } = await q;
 
@@ -343,9 +331,7 @@ export async function getDraftLayersForPages(pageIds: string[]): Promise<PageLay
     .is('deleted_at', null)
     .order('created_at', { ascending: false });
 
-  if (tenantId) {
-    q = q.eq('tenant_id', tenantId);
-  }
+  q = applyTenantEq(q, tenantId);
 
   const { data, error } = await q;
 
@@ -380,9 +366,7 @@ export async function getPublishedLayersByIds(ids: string[]): Promise<PageLayers
     .eq('is_published', true)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    q = q.eq('tenant_id', tenantId);
-  }
+  q = applyTenantEq(q, tenantId);
 
   const { data, error } = await q;
 
@@ -413,9 +397,7 @@ export async function getPublishedLayersById(id: string): Promise<PageLayers | n
     .eq('is_published', true)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    q = q.eq('tenant_id', tenantId);
-  }
+  q = applyTenantEq(q, tenantId);
 
   const { data, error } = await q.single();
 
@@ -457,44 +439,16 @@ export async function publishPageLayers(draftPageId: string, publishedPageId: st
   const existingPublished = await getPublishedLayersById(draftLayers.id);
 
   if (existingPublished) {
-<<<<<<< HEAD
     if (!shouldCopyDraftToPublished(draftLayers, existingPublished)) {
       return existingPublished;
-=======
-    // Update existing published version only if content_hash changed
-    const hasChanges = existingPublished.content_hash !== draftLayers.content_hash;
-
-    if (hasChanges) {
-      // Prepare update data WITHOUT primary key fields (id, is_published)
-      const updateData: any = {
-        page_id: publishedPageId,
-        layers: draftLayers.layers,
-        generated_css: draftLayers.generated_css || null,
-        content_hash: draftLayers.content_hash,
-        updated_at: new Date().toISOString(),
-      };
-
-      const { data, error } = await client
-        .from('page_layers')
-        .update(updateData)
-        .eq('id', existingPublished.id)
-        .eq('is_published', true)
-        .select()
-        .single();
-
-      if (error) {
-        throw new Error(`Failed to update published layers: ${error.message}`);
-      }
-
-      return data;
->>>>>>> upstream/main
     }
 
     // Prepare update data WITHOUT primary key fields (id, is_published)
     const updateData: any = {
-      page_id: publishedPageId, // Same page ID (draft and published pages share same id)
+      page_id: publishedPageId,
       layers: draftLayers.layers,
-      content_hash: draftLayers.content_hash, // Copy hash from draft
+      generated_css: draftLayers.generated_css || null,
+      content_hash: draftLayers.content_hash,
       updated_at: new Date().toISOString(),
     };
 
@@ -504,9 +458,7 @@ export async function publishPageLayers(draftPageId: string, publishedPageId: st
       .eq('id', existingPublished.id)
       .eq('is_published', true);
 
-    if (tenantId) {
-      pubUpd = pubUpd.eq('tenant_id', tenantId);
-    }
+    pubUpd = applyTenantEq(pubUpd, tenantId);
 
     const { data, error } = await pubUpd.select().single();
 
@@ -517,28 +469,20 @@ export async function publishPageLayers(draftPageId: string, publishedPageId: st
     return data;
   } else {
     // Create new published version - include ALL fields for insert
-<<<<<<< HEAD
     const rowTid =
       tenantId ??
       (draftLayers as { tenant_id?: string | null }).tenant_id ??
       undefined;
 
     const insertData: Record<string, unknown> = {
-      id: draftLayers.id, // Use same ID (composite key with is_published)
-=======
-    const insertData: any = {
       id: draftLayers.id,
->>>>>>> upstream/main
       page_id: publishedPageId,
       layers: draftLayers.layers,
       generated_css: draftLayers.generated_css || null,
       content_hash: draftLayers.content_hash,
       is_published: true,
+      ...(rowTid ? { tenant_id: rowTid } : {}),
     };
-
-    if (rowTid) {
-      insertData.tenant_id = rowTid;
-    }
 
     const { data, error } = await client
       .from('page_layers')
@@ -658,9 +602,7 @@ export async function getPageLayers(pageId: string): Promise<PageLayers[]> {
     .is('deleted_at', null)
     .order('created_at', { ascending: false });
 
-  if (tenantId) {
-    q = q.eq('tenant_id', tenantId);
-  }
+  q = applyTenantEq(q, tenantId);
 
   const { data, error } = await q;
 
@@ -695,11 +637,17 @@ async function expandThroughComponents(
 ): Promise<string[]> {
   if (componentIds.length === 0 && styleIds.length === 0) return [];
 
-  const { data: allComponents } = await client
+  const tenantId = await resolveEffectiveTenantId();
+
+  let q = client
     .from('components')
     .select('id, layers')
     .eq('is_published', false)
     .is('deleted_at', null);
+
+  q = applyTenantEq(q, tenantId);
+
+  const { data: allComponents } = await q;
 
   if (!allComponents || allComponents.length === 0) return [];
 
@@ -782,6 +730,8 @@ export async function findAffectedPages(
   const client = await getSupabaseAdmin();
   if (!client) throw new Error('Supabase client not available for dependency scan');
 
+  const tenantId = await resolveEffectiveTenantId();
+
   // Expand component/style IDs through nested component references so that
   // editing Component B inside Component A also flags pages using A.
   const expandedComponentIds = (hasComponents || hasStyles)
@@ -791,11 +741,15 @@ export async function findAffectedPages(
   const hasExpandedComponents = allComponentIds.length > 0;
 
   // Single scan of all draft page_layers
-  const { data: allLayers } = await client
+  let layersQuery = client
     .from('page_layers')
     .select('page_id, layers')
     .eq('is_published', false)
     .is('deleted_at', null);
+
+  layersQuery = applyTenantEq(layersQuery, tenantId);
+
+  const { data: allLayers } = await layersQuery;
 
   if (allLayers) {
     const componentSet = new Set(allComponentIds);
@@ -833,11 +787,15 @@ export async function findAffectedPages(
 
   // Collections also need pages.settings search (dynamic template pages)
   if (hasCollections) {
-    const { data: allPages } = await client
+    let pagesQuery = client
       .from('pages')
       .select('id, settings')
       .eq('is_published', false)
       .is('deleted_at', null);
+
+    pagesQuery = applyTenantEq(pagesQuery, tenantId);
+
+    const { data: allPages } = await pagesQuery;
 
     if (allPages) {
       const collectionPageSet = new Set(result.collectionPageIds);
