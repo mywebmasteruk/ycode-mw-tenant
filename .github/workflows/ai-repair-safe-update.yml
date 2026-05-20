@@ -1,0 +1,111 @@
+name: AI repair safe update PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Safe update pull request number
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  ai-repair:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve PR head branch
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = Number.parseInt('${{ inputs.pr_number }}', 10);
+            if (!Number.isFinite(prNumber) || prNumber < 1) {
+              core.setFailed('Invalid pr_number');
+              return;
+            }
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+            core.setOutput('head_ref', pr.head.ref);
+            core.setOutput('html_url', pr.html_url);
+
+      - name: Checkout PR branch
+        run: |
+          git fetch origin "${{ steps.pr.outputs.head_ref }}"
+          git checkout "${{ steps.pr.outputs.head_ref }}"
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run AI conflict repair
+        id: repair
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL: ${{ vars.OPENROUTER_REPAIR_MODEL }}
+        run: npm run updates:ai-repair
+
+      - name: Commit and push repairs
+        id: push
+        run: |
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No file changes to push."
+            exit 0
+          fi
+          git commit -m "fix(ai): resolve safe update conflicts [automated]"
+          git push origin HEAD
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Verify production build
+        id: build
+        if: steps.push.outputs.changed == 'true'
+        run: npm run build
+
+      - name: Re-run update safety check
+        if: steps.push.outputs.changed == 'true'
+        continue-on-error: true
+        env:
+          UPDATE_BASE_REF: origin/main
+        run: npm run updates:safety-check
+
+      - name: Comment on pull request
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = Number.parseInt('${{ inputs.pr_number }}', 10);
+            const repairOutcome = '${{ steps.repair.outcome }}';
+            const pushChanged = '${{ steps.push.outputs.changed }}' === 'true';
+            const buildOutcome = '${{ steps.build.outcome }}' || 'skipped';
+            let body = '### MasjidWeb AI repair\n\n';
+            if (repairOutcome === 'failure') {
+              body += 'AI repair **failed**. Check the workflow logs for OpenRouter or conflict resolution errors.\n';
+            } else if (!pushChanged) {
+              body += 'AI repair found **no committable changes** (no conflict markers or already clean).\n';
+            } else {
+              body += 'AI repair **committed and pushed** conflict resolutions to this branch.\n';
+              body += 'Refresh the admin dashboard status after CI finishes.\n';
+            }
+            body += `\nWorkflow run: ${context.payload.repository.html_url}/actions/runs/${context.runId}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
