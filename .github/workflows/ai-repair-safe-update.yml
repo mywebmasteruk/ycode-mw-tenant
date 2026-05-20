@@ -44,6 +44,14 @@ jobs:
           git fetch origin "${{ steps.pr.outputs.head_ref }}"
           git checkout "${{ steps.pr.outputs.head_ref }}"
 
+      - name: Copy AI repair tooling from main
+        run: |
+          git fetch origin main
+          git checkout origin/main -- \
+            scripts/ai-repair-safe-update.ts \
+            lib/masjidweb/openrouter-repair.ts \
+            docs/masjidweb-core-seams.md
+
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
@@ -68,6 +76,10 @@ jobs:
           git commit -m "fix(ai): resolve safe update conflicts [automated]"
           git push origin HEAD
           echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies for build
+        if: steps.push.outputs.changed == 'true'
+        run: npm install --no-audit --no-fund --legacy-peer-deps
 
       - name: Verify production build
         id: build
