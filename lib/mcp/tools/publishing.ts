@@ -155,18 +155,13 @@ export function registerPublishingTools(server: McpServer) {
         await publishCSS();
       } catch (e) { failed.push('css'); console.error('[publish] CSS failed:', e); }
 
-<<<<<<< HEAD
-      // Clear cache (tenant-scoped when request/session supplies x-tenant-id)
-      try {
-        await clearAllCache(await resolveEffectiveTenantId());
-      } catch (e) { failed.push('cache'); console.error('[publish] cache clear failed:', e); }
-=======
       // Clear cache. No warming here: MCP is invoked over JSON-RPC, not HTTP,
       // so there's no Request/host header to build absolute URLs from. The
       // builder's HTTP publish endpoint warms after publish — this AI tool
       // path is rare enough that a cold next-visit is acceptable.
-      try { await clearAllCache(); } catch { /* non-fatal */ }
->>>>>>> upstream/main
+      try {
+        await clearAllCache(await resolveEffectiveTenantId());
+      } catch { /* non-fatal */ }
 
       // Save published_at timestamp
       try { await savePublishedAt(publishedAt); } catch (e) { failed.push('published_at'); console.error('[publish] published_at failed:', e); }
