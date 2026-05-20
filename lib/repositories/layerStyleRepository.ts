@@ -6,12 +6,6 @@
  */
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
-<<<<<<< HEAD
-import type { LayerStyle, Layer } from '@/types';
-import { generateLayerStyleContentHash } from '../hash-utils';
-import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
-import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
-=======
 import type { LayerStyle, Layer, ComponentVariant } from '@/types';
 import {
   generateLayerStyleContentHash,
@@ -19,7 +13,8 @@ import {
   generateComponentContentHash,
 } from '../hash-utils';
 import { updateLayersWithStyle } from '@/lib/layer-style-utils';
->>>>>>> upstream/main
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 /**
  * Input data for creating a new layer style
@@ -316,26 +311,17 @@ export async function publishLayerStyles(styleIds: string[]): Promise<{ count: n
     throw new Error('Failed to initialize Supabase client');
   }
 
-<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
 
-  // Batch fetch all draft styles
-  let fetchQuery = client
-    .from('layer_styles')
-    .select('*')
-    .in('id', styleIds)
-    .eq('is_published', false);
-  fetchQuery = applyTenantEq(fetchQuery, tenantId);
-  const { data: draftStyles, error: fetchError } = await fetchQuery;
-=======
   // Batch fetch all draft styles (exclude soft-deleted)
-  const { data: draftStyles, error: fetchError } = await client
+  let fetchQuery = client
     .from('layer_styles')
     .select('*')
     .in('id', styleIds)
     .eq('is_published', false)
     .is('deleted_at', null);
->>>>>>> upstream/main
+  fetchQuery = applyTenantEq(fetchQuery, tenantId);
+  const { data: draftStyles, error: fetchError } = await fetchQuery;
 
   if (fetchError) {
     throw new Error(`Failed to fetch draft layer styles: ${fetchError.message}`);
@@ -345,30 +331,14 @@ export async function publishLayerStyles(styleIds: string[]): Promise<{ count: n
     return { count: 0, changedStyleIds: [] };
   }
 
-<<<<<<< HEAD
-  // Prepare styles for batch upsert
-  const stylesToUpsert = draftStyles.map(draft => ({
-    id: draft.id,
-    name: draft.name,
-    classes: draft.classes,
-    design: draft.design,
-    group: draft.group,
-    content_hash: draft.content_hash,
-    is_published: true,
-    updated_at: new Date().toISOString(),
-    ...(tenantId ? { tenant_id: tenantId } : {}),
-  }));
-
-  // Batch upsert all styles
-  const { error: upsertError } = await client
-=======
   // Fetch existing published versions to compare hashes
-  const { data: publishedStyles } = await client
->>>>>>> upstream/main
+  let publishedQuery = client
     .from('layer_styles')
     .select('id, content_hash')
     .in('id', draftStyles.map(d => d.id))
     .eq('is_published', true);
+  publishedQuery = applyTenantEq(publishedQuery, tenantId);
+  const { data: publishedStyles } = await publishedQuery;
 
   const publishedHashById = new Map<string, string>();
   if (publishedStyles) {
@@ -392,6 +362,7 @@ export async function publishLayerStyles(styleIds: string[]): Promise<{ count: n
       content_hash: draft.content_hash,
       is_published: true,
       updated_at: new Date().toISOString(),
+      ...(tenantId ? { tenant_id: tenantId } : {}),
     }));
 
   if (stylesToUpsert.length > 0) {
@@ -424,15 +395,10 @@ export async function getUnpublishedLayerStyles(): Promise<LayerStyle[]> {
     throw new Error('Failed to initialize Supabase client');
   }
 
-<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
 
-  // Get all draft layer styles
-  let draftQuery = client
-=======
   // Get all draft layer styles (exclude soft-deleted)
-  const { data: draftStyles, error } = await client
->>>>>>> upstream/main
+  let draftQuery = client
     .from('layer_styles')
     .select('*')
     .eq('is_published', false)
@@ -654,13 +620,8 @@ export async function findEntitiesUsingLayerStyle(styleId: string): Promise<Laye
     }
   }
 
-<<<<<<< HEAD
-  // Find affected components
-  let componentsQuery = client
-=======
   // Find affected components — search all variant layer trees
-  const { data: componentRecords, error: compError } = await client
->>>>>>> upstream/main
+  let componentsQuery = client
     .from('components')
     .select('id, name, layers, variants')
     .eq('is_published', false)
@@ -737,23 +698,20 @@ export async function softDeleteStyle(id: string): Promise<LayerStyleSoftDeleteR
 
   for (const entity of affectedEntities) {
     if (entity.type === 'page') {
-<<<<<<< HEAD
-      let pageUpdateQuery = client
-=======
-      const { data: existing } = await client
+      let existingQuery = client
         .from('page_layers')
         .select('generated_css')
         .eq('id', entity.id)
-        .eq('is_published', false)
-        .single();
+        .eq('is_published', false);
+      existingQuery = applyTenantEq(existingQuery, tenantId);
+      const { data: existing } = await existingQuery.single();
 
       const contentHash = generatePageLayersHash({
         layers: entity.newLayers,
         generated_css: existing?.generated_css || null,
       });
 
-      const { error: updateError } = await client
->>>>>>> upstream/main
+      let pageUpdateQuery = client
         .from('page_layers')
         .update({
           layers: entity.newLayers,
@@ -768,9 +726,6 @@ export async function softDeleteStyle(id: string): Promise<LayerStyleSoftDeleteR
         console.error(`Failed to update page_layers ${entity.id}:`, updateError);
       }
     } else if (entity.type === 'component') {
-<<<<<<< HEAD
-      let compUpdateQuery = client
-=======
       const contentHash = generateComponentContentHash({
         name: entity.name,
         layers: entity.newLayers,
@@ -778,8 +733,7 @@ export async function softDeleteStyle(id: string): Promise<LayerStyleSoftDeleteR
         variants: entity.newVariants,
       });
 
-      const { error: updateError } = await client
->>>>>>> upstream/main
+      let compUpdateQuery = client
         .from('components')
         .update({
           layers: entity.newLayers,
@@ -900,25 +854,31 @@ export async function syncLayerStyleChangesToDrafts(
     return { affectedPageIds: [], affectedComponentIds: [] };
   }
 
+  const tenantId = await resolveEffectiveTenantId();
+
   // Use the just-published versions of the changed styles as the source of
   // truth: they were just upserted by publishLayerStyles with the new values.
-  const { data: styles } = await client
+  let stylesQuery = client
     .from('layer_styles')
     .select('id, classes, design')
     .in('id', styleIds)
     .eq('is_published', true)
     .is('deleted_at', null);
+  stylesQuery = applyTenantEq(stylesQuery, tenantId);
+  const { data: styles } = await stylesQuery;
 
   if (!styles || styles.length === 0) {
     return { affectedPageIds: [], affectedComponentIds: [] };
   }
 
   // --- Sync draft page_layers ---
-  const { data: pageLayersRecords } = await client
+  let pageLayersQuery = client
     .from('page_layers')
     .select('id, page_id, layers, generated_css, content_hash')
     .eq('is_published', false)
     .is('deleted_at', null);
+  pageLayersQuery = applyTenantEq(pageLayersQuery, tenantId);
+  const { data: pageLayersRecords } = await pageLayersQuery;
 
   const affectedPageIds: string[] = [];
   const now = new Date().toISOString();
@@ -950,20 +910,24 @@ export async function syncLayerStyleChangesToDrafts(
       // writing the new layers + hash but NOT a fresh generated_css. That
       // breaks the published render (new class names, old CSS file) AND
       // makes batchPublishPageLayers below think nothing changed.
-      await client
+      let updateQuery = client
         .from('page_layers')
         .update({ layers, content_hash: newHash, updated_at: now })
         .eq('id', record.id)
         .eq('is_published', false);
+      updateQuery = applyTenantEq(updateQuery, tenantId);
+      await updateQuery;
     }
   }
 
   // --- Sync draft components ---
-  const { data: componentRecords } = await client
+  let componentQuery = client
     .from('components')
     .select('id, name, layers, variants, variables, content_hash')
     .eq('is_published', false)
     .is('deleted_at', null);
+  componentQuery = applyTenantEq(componentQuery, tenantId);
+  const { data: componentRecords } = await componentQuery;
 
   const affectedComponentIds: string[] = [];
 
@@ -1002,7 +966,7 @@ export async function syncLayerStyleChangesToDrafts(
       affectedComponentIds.push(record.id);
       // Same composite-key trap as page_layers: components share an `id`
       // across draft/published. Always scope the update to the draft row.
-      await client
+      let updateQuery = client
         .from('components')
         .update({
           layers,
@@ -1012,6 +976,8 @@ export async function syncLayerStyleChangesToDrafts(
         })
         .eq('id', record.id)
         .eq('is_published', false);
+      updateQuery = applyTenantEq(updateQuery, tenantId);
+      await updateQuery;
     }
   }
 
