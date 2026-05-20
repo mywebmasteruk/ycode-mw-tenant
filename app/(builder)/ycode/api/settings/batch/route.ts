@@ -1,9 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { setSettings } from '@/lib/repositories/settingsRepository';
-<<<<<<< HEAD
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
-import { clearAllCache } from '@/lib/services/cacheService';
-=======
 import { clearAllCache, getAllPublishedRoutes, warmRoutes } from '@/lib/services/cacheService';
 
 /**
@@ -11,7 +8,6 @@ import { clearAllCache, getAllPublishedRoutes, warmRoutes } from '@/lib/services
  * /ycode/api/settings/[key]/route.ts — keep them in sync.
  */
 const DRAFT_ONLY_SETTING_KEYS = new Set(['draft_css', 'email']);
->>>>>>> upstream/main
 
 /**
  * PUT /ycode/api/settings/batch
@@ -34,16 +30,13 @@ export async function PUT(request: NextRequest) {
 
     const count = await setSettings(settings);
 
-<<<<<<< HEAD
-    await clearAllCache(await resolveEffectiveTenantId());
-=======
     // Only invalidate caches if any of the updated keys actually affect
     // public page rendering. Skips builder-only autosaves.
     const touchesPublicKeys = Object.keys(settings).some(
       (key) => !DRAFT_ONLY_SETTING_KEYS.has(key)
     );
     if (touchesPublicKeys) {
-      await clearAllCache();
+      await clearAllCache(await resolveEffectiveTenantId());
 
       // Prime the cache so the first visit to any public page after this
       // settings change doesn't pay the cold-cache cost. Capped inside
@@ -60,7 +53,6 @@ export async function PUT(request: NextRequest) {
         // Non-fatal: warming is an optimization
       }
     }
->>>>>>> upstream/main
 
     return NextResponse.json({
       data: { count },
