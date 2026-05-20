@@ -6,12 +6,9 @@
  */
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
-<<<<<<< HEAD
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
-=======
 import { generateContentHash } from '@/lib/hash-utils';
->>>>>>> upstream/main
 import type { ColorVariable } from '@/types';
 
 export interface CreateColorVariableData {
