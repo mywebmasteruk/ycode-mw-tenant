@@ -192,13 +192,8 @@ export async function generateStaticParams() {
  * Cached per slug and page for revalidation
  */
 async function fetchPublishedPageWithLayers(slugPath: string) {
-<<<<<<< HEAD
   const { effectiveTid, keySuffix } = await getTenantCacheContext();
-  const tags = [
-    tenantAllPagesTag(effectiveTid),
-    tenantRouteTag(effectiveTid, slugPath),
-  ];
-=======
+  // MASJIDWEB_SEAM: tenant-scoped cache tags — see docs/masjidweb-core-seams.md#tier-4
   // Tags are both 'route-/X' AND 'all-pages':
   // - route-/X lets selective invalidation purge just this page's data cache
   // - all-pages lets full invalidation (color variables, redirects, etc.)
@@ -207,8 +202,11 @@ async function fetchPublishedPageWithLayers(slugPath: string) {
   // doesn't cascade to entries that only share 'all-pages'. (Next.js bug
   // #63509 would apply if we used revalidateTag for selective, but we route
   // exclusively through invalidateByTag on Vercel.)
-  const tags = [`route-/${slugPath}`, 'all-pages'];
->>>>>>> upstream/main
+  const tags = [
+    tenantAllPagesTag(effectiveTid),
+    tenantRouteTag(effectiveTid, slugPath),
+  ];
+  // MASJIDWEB_SEAM_END
   const opts = { tags, revalidate: false as const };
 
   try {
@@ -248,7 +246,6 @@ async function fetchPublishedPageForMetadata(slugPath: string) {
   const { effectiveTid, keySuffix } = await getTenantCacheContext();
   return unstable_cache(
     async () => fetchPageByPathForMetadata(slugPath, true),
-<<<<<<< HEAD
     [`metadata-/${slugPath}`, keySuffix],
     {
       tags: [
@@ -257,10 +254,6 @@ async function fetchPublishedPageForMetadata(slugPath: string) {
       ],
       revalidate: false,
     }
-=======
-    [`metadata-/${slugPath}`],
-    { tags: [`route-/${slugPath}`, 'all-pages'], revalidate: false }
->>>>>>> upstream/main
   )();
 }
 
@@ -521,7 +514,6 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
       }),
       baseUrl: getSiteBaseUrl({ globalCanonicalUrl: globalSettings.globalCanonicalUrl }),
     }),
-<<<<<<< HEAD
     [`data-for-route-/${slugPath}-meta`, keySuffix],
     {
       tags: [
@@ -530,10 +522,6 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
       ],
       revalidate: false,
     }
-=======
-    [`data-for-route-/${slugPath}-meta`],
-    { tags: [`route-/${slugPath}`, 'all-pages'], revalidate: false }
->>>>>>> upstream/main
   )();
 
   if (baseUrl) {
