@@ -1,9 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSettingByKey, setSetting } from '@/lib/repositories/settingsRepository';
-<<<<<<< HEAD
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
-import { clearAllCache } from '@/lib/services/cacheService';
-=======
 import { clearAllCache, getAllPublishedRoutes, warmRoutes } from '@/lib/services/cacheService';
 
 /**
@@ -20,7 +17,6 @@ import { clearAllCache, getAllPublishedRoutes, warmRoutes } from '@/lib/services
  * color variables, etc.) are read by public pages and DO require invalidation.
  */
 const DRAFT_ONLY_SETTING_KEYS = new Set(['draft_css', 'email']);
->>>>>>> upstream/main
 
 /**
  * GET /ycode/api/settings/[key]
@@ -75,13 +71,12 @@ export async function PUT(
 
     await setSetting(key, value);
 
-<<<<<<< HEAD
-    await clearAllCache(await resolveEffectiveTenantId());
-=======
     // Skip cache invalidation for draft/internal settings so builder
     // autosaves don't purge the public CDN cache on every edit.
     if (!DRAFT_ONLY_SETTING_KEYS.has(key)) {
-      await clearAllCache();
+      // MASJIDWEB_SEAM: tenant-scoped cache clear — see docs/masjidweb-core-seams.md#tier-4
+      await clearAllCache(await resolveEffectiveTenantId());
+      // MASJIDWEB_SEAM_END
 
       // Prime the cache so the first visit to any public page after this
       // settings change doesn't pay the cold-cache cost. Capped inside
@@ -98,7 +93,6 @@ export async function PUT(
         // Non-fatal: warming is an optimization
       }
     }
->>>>>>> upstream/main
 
     return NextResponse.json({
       data: { key, value },
