@@ -60,8 +60,6 @@ function YCodeEditorLayout({ children, isTemplateTenant }: YCodeLayoutClientProp
     initialize();
   }, [initialize]);
 
-<<<<<<< HEAD
-=======
   // Reap expired collaboration locks and stale notifications for the lifetime
   // of the editor session. Both stores are global, so a single mount here
   // covers every builder route.
@@ -74,19 +72,6 @@ function YCodeEditorLayout({ children, isTemplateTenant }: YCodeLayoutClientProp
     };
   }, []);
 
-  // Exclude standalone routes from YCodeBuilder
-  // These routes should render independently without the editor UI
-  const prefixRoutes = ['/ycode/preview', '/ycode/devtools/'];
-  const exactRoutes = ['/ycode/welcome', '/ycode/accept-invite'];
-
-  if (
-    prefixRoutes.some(route => pathname?.startsWith(route))
-    || exactRoutes.includes(pathname || '')
-  ) {
-    return <>{children}</>;
-  }
-
->>>>>>> upstream/main
   // For settings, localization, profile, forms, and integrations routes, pass children to YCodeBuilder so it can render them
   if (routeType === 'settings' || routeType === 'localization' || routeType === 'profile' || routeType === 'forms' || routeType === 'integrations') {
     return <YCodeBuilder isTemplateTenant={isTemplateTenant}>{children}</YCodeBuilder>;
