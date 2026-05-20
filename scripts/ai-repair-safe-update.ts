@@ -16,6 +16,15 @@ function run(command: string): string {
   return execSync(command, { encoding: 'utf8', cwd: REPO_ROOT }).trim();
 }
 
+function runAllowFailure(command: string): boolean {
+  try {
+    execSync(command, { encoding: 'utf8', cwd: REPO_ROOT, stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function listLines(command: string): string[] {
   const out = run(command);
   if (!out) return [];
@@ -102,6 +111,10 @@ async function resolveConflictFile(
 
   writeFileSync(absolute, resolved.endsWith('\n') ? resolved : `${resolved}\n`, 'utf8');
   run(`git add -- "${filePath}"`);
+  if (!runAllowFailure('git diff --cached --quiet')) {
+    run(`git commit -m "fix(ai): resolve conflicts in ${filePath}"`);
+    run('git push origin HEAD');
+  }
   console.log(`Resolved ${filePath} (${result.model})`);
 }
 
