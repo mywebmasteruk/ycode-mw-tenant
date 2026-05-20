@@ -7,7 +7,7 @@
  * Works in both LayersTree sidebar and canvas
  */
 
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -42,7 +42,6 @@ interface LayerContextMenuProps {
   children: React.ReactNode;
   isLocked?: boolean;
   onLayerSelect?: (layerId: string) => void;
-  selectedLayerId?: string | null;
   liveLayerUpdates?: UseLiveLayerUpdatesReturn | null;
   liveComponentUpdates?: UseLiveComponentUpdatesReturn | null;
   /** When set, we're editing a component; resolve layer from component draft so "Detach" works for nested instances */
@@ -73,23 +72,50 @@ useEditorStore.subscribe((state, prevState) => {
   }
 });
 
-export default function LayerContextMenu({
+interface LayerContextMenuInnerProps extends Omit<LayerContextMenuProps, 'children'> {
+  isComponentDialogOpen: boolean;
+  setIsComponentDialogOpen: (open: boolean) => void;
+  isLayoutDialogOpen: boolean;
+  setIsLayoutDialogOpen: (open: boolean) => void;
+  isImportHtmlOpen: boolean;
+  setIsImportHtmlOpen: (open: boolean) => void;
+  isExportHtmlOpen: boolean;
+  setIsExportHtmlOpen: (open: boolean) => void;
+  exportHtml: string;
+  setExportHtml: (html: string) => void;
+  layerName: string;
+  setLayerName: (name: string) => void;
+}
+
+/**
+ * Heavy inner half of the layer context menu: all store subscriptions,
+ * memoized layer-tree lookups, handlers, and the rendered menu items / dialogs.
+ *
+ * Mounted only when the menu (or one of its dialogs) is actually open.
+ * Keeping it lazy means each layer row in `LayersTree` carries only a thin
+ * `<ContextMenu>` shell at rest — critical when a page has 1000+ layers.
+ */
+function LayerContextMenuInner({
   layerId,
   pageId,
-  children,
   isLocked = false,
   onLayerSelect,
-  selectedLayerId,
   liveLayerUpdates,
   liveComponentUpdates,
   editingComponentId = null,
-}: LayerContextMenuProps) {
-  const [isComponentDialogOpen, setIsComponentDialogOpen] = useState(false);
-  const [isLayoutDialogOpen, setIsLayoutDialogOpen] = useState(false);
-  const [isImportHtmlOpen, setIsImportHtmlOpen] = useState(false);
-  const [isExportHtmlOpen, setIsExportHtmlOpen] = useState(false);
-  const [exportHtml, setExportHtml] = useState('');
-  const [layerName, setLayerName] = useState('');
+  isComponentDialogOpen,
+  setIsComponentDialogOpen,
+  isLayoutDialogOpen,
+  setIsLayoutDialogOpen,
+  isImportHtmlOpen,
+  setIsImportHtmlOpen,
+  isExportHtmlOpen,
+  setIsExportHtmlOpen,
+  exportHtml,
+  setExportHtml,
+  layerName,
+  setLayerName,
+}: LayerContextMenuInnerProps) {
   const canvasPortalContainer = useCanvasPortalContainer();
   const canvasZoom = useCanvasZoom();
 
@@ -107,6 +133,17 @@ export default function LayerContextMenu({
   const getComponentById = useComponentsStore((state) => state.getComponentById);
   const components = useComponentsStore((state) => state.components);
   const componentDrafts = useComponentsStore((state) => state.componentDrafts);
+  const editingComponentVariantId = useEditorStore((state) => state.editingComponentVariantId);
+  // Resolve the active variant id for the component being edited. When
+  // unspecified (or pointing at a missing variant) we fall back to the first
+  // variant so the editor never shows an empty tree.
+  const activeVariantId = useMemo(() => {
+    if (!editingComponentId) return null;
+    const drafts = componentDrafts[editingComponentId];
+    if (!drafts) return editingComponentVariantId || null;
+    if (editingComponentVariantId && drafts[editingComponentVariantId]) return editingComponentVariantId;
+    return Object.keys(drafts)[0] || null;
+  }, [editingComponentId, editingComponentVariantId, componentDrafts]);
   const updateComponentDraft = useComponentsStore((state) => state.updateComponentDraft);
   const createComponentFromComponentLayer = useComponentsStore((state) => state.createComponentFromLayer);
 
@@ -125,14 +162,14 @@ export default function LayerContextMenu({
   const hasStyleClipboard = copiedStyle !== null;
   const hasInteractionsClipboard = copiedInteractions !== null;
 
-  // Resolve layers: component draft when editing a component, else page draft
+  // Resolve layers: active variant draft when editing a component, else page draft
   const isComponentContext = !!editingComponentId;
   const layers = useMemo(
     () =>
-      isComponentContext
-        ? (componentDrafts[editingComponentId!] || [])
+      isComponentContext && editingComponentId && activeVariantId
+        ? (componentDrafts[editingComponentId]?.[activeVariantId] || [])
         : (draftsByPageId[pageId]?.layers || []),
-    [isComponentContext, editingComponentId, componentDrafts, draftsByPageId, pageId]
+    [isComponentContext, editingComponentId, activeVariantId, componentDrafts, draftsByPageId, pageId]
   );
   const layer = findLayerById(layers, layerId);
 
@@ -171,18 +208,20 @@ export default function LayerContextMenu({
     return canDeleteLayer(layer);
   }, [layer]);
 
-  /** Update component draft layers and broadcast to collaborators */
+  /** Update active variant draft layers and broadcast to collaborators */
   const updateComponentAndBroadcast = (newLayers: Layer[]) => {
-    if (!editingComponentId) return;
-    updateComponentDraft(editingComponentId, newLayers);
+    if (!editingComponentId || !activeVariantId) return;
+    updateComponentDraft(editingComponentId, activeVariantId, newLayers);
     if (liveComponentUpdates) {
       liveComponentUpdates.broadcastComponentLayersUpdate(editingComponentId, newLayers);
     }
   };
 
-  /** Get current component layers for the editing context */
+  /** Get current variant layers for the editing context */
   const getComponentLayers = () =>
-    editingComponentId ? (componentDrafts[editingComponentId] || []) : [];
+    editingComponentId && activeVariantId
+      ? (componentDrafts[editingComponentId]?.[activeVariantId] || [])
+      : [];
 
   const handleCopy = () => {
     if (!canCopy) return;
@@ -423,17 +462,24 @@ export default function LayerContextMenu({
   const handleEditMasterComponent = async () => {
     if (!layer?.componentId) return;
 
-    const { setEditingComponentId, setSelectedLayerId, pushComponentNavigation, editingComponentId } = useEditorStore.getState();
-    const { loadComponentDraft, getComponentById } = useComponentsStore.getState();
+    const { setEditingComponentId, setSelectedLayerId, setEditingComponentVariantId, editingComponentVariantId, pushComponentNavigation, editingComponentId } = useEditorStore.getState();
+    const { loadComponentDraft, getComponentById, getComponentDraftLayers } = useComponentsStore.getState();
     const { pages } = usePagesStore.getState();
 
+    const component = getComponentById(layer.componentId);
+    if (!component) return;
+
+    // Resolve which variant to open — use the instance's configured variant
+    const requestedVariantId = layer.componentVariantId;
+    const targetVariantId = (requestedVariantId && component.variants?.some(v => v.id === requestedVariantId))
+      ? requestedVariantId
+      : (component.variants && component.variants.length > 0 ? component.variants[0].id : null);
+
     // Capture the current layer ID BEFORE clearing selection
-    // This is the layer we'll return to when exiting component edit mode
     const componentInstanceLayerId = layer.id;
 
     // Push current context to navigation stack before entering component edit mode
     if (editingComponentId) {
-      // We're currently editing a component, push it to stack
       const currentComponent = getComponentById(editingComponentId);
       if (currentComponent) {
         pushComponentNavigation({
@@ -441,10 +487,10 @@ export default function LayerContextMenu({
           id: editingComponentId,
           name: currentComponent.name,
           layerId: layer.id,
+          variantId: editingComponentVariantId ?? null,
         });
       }
     } else if (pageId) {
-      // We're on a page, push it to stack
       const currentPage = pages.find((p) => p.id === pageId);
       if (currentPage) {
         pushComponentNavigation({
@@ -457,23 +503,22 @@ export default function LayerContextMenu({
     }
 
     // Clear selection FIRST to release lock on current page's channel
-    // before switching to component's channel
     setSelectedLayerId(null);
 
-    // Enter edit mode (changes lock channel to component)
-    // Pass the component instance layer ID so we can restore it when exiting
+    // Enter edit mode and set the target variant
     setEditingComponentId(layer.componentId, pageId, componentInstanceLayerId);
+    setEditingComponentVariantId(targetVariantId);
 
     // Load component into draft (async to ensure proper cache sync)
     await loadComponentDraft(layer.componentId);
 
-    // Select root layer only if user hasn't already selected a valid component layer during the await
-    const component = getComponentById(layer.componentId);
-    if (component && component.layers && component.layers.length > 0) {
+    // Select root layer of the target variant's tree
+    const variantLayers = getComponentDraftLayers(layer.componentId, targetVariantId);
+    if (variantLayers && variantLayers.length > 0) {
       const currentSelection = useEditorStore.getState().selectedLayerId;
-      const hasValidSelection = currentSelection && findLayerById(component.layers, currentSelection);
+      const hasValidSelection = currentSelection && findLayerById(variantLayers, currentSelection);
       if (!hasValidSelection) {
-        setSelectedLayerId(component.layers[0].id);
+        setSelectedLayerId(variantLayers[0].id);
       }
     }
   };
@@ -486,8 +531,8 @@ export default function LayerContextMenu({
     // Use the shared utility function for detaching
     const newLayers = detachSpecificLayerFromComponent(layers, layerId, component || undefined);
 
-    if (isComponentContext && editingComponentId) {
-      updateComponentDraft(editingComponentId, newLayers);
+    if (isComponentContext && editingComponentId && activeVariantId) {
+      updateComponentDraft(editingComponentId, activeVariantId, newLayers);
     } else {
       setDraftLayers(pageId, newLayers);
     }
@@ -701,41 +746,11 @@ export default function LayerContextMenu({
   const showConvertOption = !!(layer && !isCollection && canHaveChildren(layer) && !layer.componentId);
   const isConvertDisabled = isLocked || isComponentInstance || !!(layer && isExcludedFromCollection(layer));
 
-  const handleOpenChange = (open: boolean) => {
-    if (open) {
-      dismissActiveContextMenu();
-      activeMenuDocument = canvasPortalContainer?.ownerDocument ?? document;
-    }
-
-    if (open && onLayerSelect && layer && selectedLayerId !== layerId) {
-      selectionFromMenu = true;
-      onLayerSelect(layerId);
-    }
-    // Hide the parent-document selection overlay while the canvas context menu is open,
-    // and suppress stale clicks that fire on the canvas when the menu dismisses
-    if (canvasPortalContainer) {
-      if (open) {
-        cancelAnimationFrame(pendingCloseRaf);
-        useEditorStore.getState().setCanvasContextMenuOpen(true);
-      } else {
-        pendingCloseRaf = requestAnimationFrame(() => {
-          useEditorStore.getState().setCanvasContextMenuOpen(false);
-        });
-      }
-    }
-  };
-
   // Check if we're on localhost
   const isLocalhost = typeof window !== 'undefined' && window.location.hostname === 'localhost';
 
   return (
-    <ContextMenu onOpenChange={handleOpenChange}>
-      <ContextMenuTrigger
-        asChild
-        onContextMenu={(e) => e.stopPropagation()}
-      >
-        {children}
-      </ContextMenuTrigger>
+    <>
       <ContextMenuContent
         className="w-46"
         container={canvasPortalContainer}
@@ -930,6 +945,111 @@ export default function LayerContextMenu({
         onOpenChange={setIsExportHtmlOpen}
         html={exportHtml}
       />
+    </>
+  );
+}
+
+/**
+ * Thin always-mounted shell rendered per layer row. Only when the menu opens
+ * (or a triggered dialog is active) does it mount {@link LayerContextMenuInner},
+ * which carries all Zustand subscriptions and Radix providers.
+ *
+ * Wrapped in `React.memo` because the layer tree re-renders frequently and
+ * the shell only depends on layerId / pageId / lock state / context flags.
+ */
+function LayerContextMenu({
+  layerId,
+  pageId,
+  children,
+  isLocked = false,
+  onLayerSelect,
+  liveLayerUpdates,
+  liveComponentUpdates,
+  editingComponentId = null,
+}: LayerContextMenuProps) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [isComponentDialogOpen, setIsComponentDialogOpen] = useState(false);
+  const [isLayoutDialogOpen, setIsLayoutDialogOpen] = useState(false);
+  const [isImportHtmlOpen, setIsImportHtmlOpen] = useState(false);
+  const [isExportHtmlOpen, setIsExportHtmlOpen] = useState(false);
+  const [exportHtml, setExportHtml] = useState('');
+  const [layerName, setLayerName] = useState('');
+  const canvasPortalContainer = useCanvasPortalContainer();
+
+  const anyDialogOpen =
+    isComponentDialogOpen || isLayoutDialogOpen || isImportHtmlOpen || isExportHtmlOpen;
+  const needsInner = menuOpen || anyDialogOpen;
+
+  const handleOpenChange = useCallback(
+    (open: boolean) => {
+      setMenuOpen(open);
+
+      if (open) {
+        dismissActiveContextMenu();
+        activeMenuDocument = canvasPortalContainer?.ownerDocument ?? document;
+      }
+
+      if (open && onLayerSelect) {
+        // Read selectedLayerId from the store on demand rather than via prop.
+        // This keeps the shell's prop surface stable across selection changes,
+        // letting React.memo skip re-renders for the 700+ wrapped layers in
+        // the canvas whenever a different layer is clicked.
+        const currentSelection = useEditorStore.getState().selectedLayerId;
+        if (currentSelection !== layerId) {
+          selectionFromMenu = true;
+          onLayerSelect(layerId);
+        }
+      }
+
+      // Hide the parent-document selection overlay while the canvas context menu is open,
+      // and suppress stale clicks that fire on the canvas when the menu dismisses
+      if (canvasPortalContainer) {
+        if (open) {
+          cancelAnimationFrame(pendingCloseRaf);
+          useEditorStore.getState().setCanvasContextMenuOpen(true);
+        } else {
+          pendingCloseRaf = requestAnimationFrame(() => {
+            useEditorStore.getState().setCanvasContextMenuOpen(false);
+          });
+        }
+      }
+    },
+    [canvasPortalContainer, onLayerSelect, layerId]
+  );
+
+  return (
+    <ContextMenu onOpenChange={handleOpenChange}>
+      <ContextMenuTrigger
+        asChild
+        onContextMenu={(e) => e.stopPropagation()}
+      >
+        {children}
+      </ContextMenuTrigger>
+      {needsInner && (
+        <LayerContextMenuInner
+          layerId={layerId}
+          pageId={pageId}
+          isLocked={isLocked}
+          onLayerSelect={onLayerSelect}
+          liveLayerUpdates={liveLayerUpdates}
+          liveComponentUpdates={liveComponentUpdates}
+          editingComponentId={editingComponentId}
+          isComponentDialogOpen={isComponentDialogOpen}
+          setIsComponentDialogOpen={setIsComponentDialogOpen}
+          isLayoutDialogOpen={isLayoutDialogOpen}
+          setIsLayoutDialogOpen={setIsLayoutDialogOpen}
+          isImportHtmlOpen={isImportHtmlOpen}
+          setIsImportHtmlOpen={setIsImportHtmlOpen}
+          isExportHtmlOpen={isExportHtmlOpen}
+          setIsExportHtmlOpen={setIsExportHtmlOpen}
+          exportHtml={exportHtml}
+          setExportHtml={setExportHtml}
+          layerName={layerName}
+          setLayerName={setLayerName}
+        />
+      )}
     </ContextMenu>
   );
 }
+
+export default React.memo(LayerContextMenu);

@@ -4,13 +4,14 @@
  * Manages real-time synchronization of layer changes using Supabase Realtime
  */
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useCollaborationPresenceStore, getResourceLockKey } from '../stores/useCollaborationPresenceStore';
 import { useAuthStore } from '../stores/useAuthStore';
 import { usePagesStore, markPageMcpSynced } from '../stores/usePagesStore';
 import { useEditorStore } from '../stores/useEditorStore';
 import { createClient } from '@/lib/supabase-browser';
 import { debounce } from '../lib/collaboration-utils';
+import { createChannelLifecycle } from '@/lib/realtime-channel';
 import type { Layer, LayerUpdate } from '../types';
 
 // Helper function to find layer in draft
@@ -37,8 +38,7 @@ export interface UseLiveLayerUpdatesReturn {
 export function useLiveLayerUpdates(
   pageId: string | null
 ): UseLiveLayerUpdatesReturn {
-  const { user } = useAuthStore();
-  const { updateLayer, draftsByPageId } = usePagesStore();
+  const user = useAuthStore((state) => state.user);
   const updateUser = useCollaborationPresenceStore((state) => state.updateUser);
   const currentUserId = useCollaborationPresenceStore((state) => state.currentUserId);
 
@@ -85,17 +85,18 @@ export function useLiveLayerUpdates(
       return;
     }
 
+    const lifecycle = createChannelLifecycle();
+
     const initializeChannel = async () => {
       try {
         const supabase = await createClient();
         const channel = supabase.channel(`page:${pageId}:updates`);
+        if (!lifecycle.track(channel, supabase)) return;
 
-        // Listen for layer updates
         channel.on('broadcast', { event: 'layer_update' }, (payload) => {
           handleIncomingUpdate(payload.payload);
         });
 
-        // Listen for layer structure changes
         channel.on('broadcast', { event: 'layer_added' }, (payload) => {
           handleIncomingLayerAdd(payload.payload);
         });
@@ -108,17 +109,15 @@ export function useLiveLayerUpdates(
           handleIncomingLayerMove(payload.payload);
         });
 
-        // Listen for full layer sync (from MCP / server-side changes)
+        // Full layer sync (from MCP / server-side changes)
         channel.on('broadcast', { event: 'layers_full_sync' }, (payload) => {
           handleIncomingFullSync(payload.payload);
         });
 
-        // Listen for user activity
         channel.on('broadcast', { event: 'user_activity' }, (payload) => {
           handleUserActivity(payload.payload);
         });
 
-        // Listen for lock changes
         channel.on('broadcast', { event: 'lock_change' }, (payload) => {
           handleLockChange(payload.payload);
         });
@@ -129,6 +128,7 @@ export function useLiveLayerUpdates(
           }
         });
 
+        if (lifecycle.cancelled) return;
         channelRef.current = channel;
       } catch (error) {
         console.error('Failed to initialize live updates:', error);
@@ -138,10 +138,8 @@ export function useLiveLayerUpdates(
     initializeChannel();
 
     return () => {
-      if (channelRef.current) {
-        channelRef.current.unsubscribe();
-        channelRef.current = null;
-      }
+      lifecycle.teardown();
+      channelRef.current = null;
       isReceivingUpdates.current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- handlers are stable refs, adding would cause reconnect loops
@@ -423,12 +421,17 @@ export function useLiveLayerUpdates(
     };
   }, []);
 
-  return {
+  // Stable return reference: broadcast callbacks are already memoized via
+  // useCallback, and `isReceivingUpdates` / `lastUpdateTime` are refs that
+  // mutate silently — no consumer reads them. Returning a stable object
+  // prevents downstream `React.memo` cascades through Canvas → LayerRenderer
+  // → LayerContextMenu when the host component re-renders for unrelated reasons.
+  return useMemo(() => ({
     broadcastLayerUpdate,
     broadcastLayerAdd,
     broadcastLayerDelete,
     broadcastLayerMove,
     isReceivingUpdates: isReceivingUpdates.current,
-    lastUpdateTime: lastUpdateTime.current
-  };
+    lastUpdateTime: lastUpdateTime.current,
+  }), [broadcastLayerUpdate, broadcastLayerAdd, broadcastLayerDelete, broadcastLayerMove]);
 }

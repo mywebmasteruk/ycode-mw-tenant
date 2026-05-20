@@ -126,6 +126,8 @@ export interface UpdateCollectionItemValueData {
  * Get all values for multiple items in one query (batch operation)
  * @param item_ids - Array of item UUIDs
  * @param is_published - Filter for draft (false) or published (true) values. Defaults to false (draft).
+ * @param knownFieldTypes - Optional pre-loaded field-id → type map to skip the extra lookup
+ * @param fieldIds - Optional whitelist of field IDs to fetch
  */
 export async function getValuesByItemIds(
   item_ids: string[],
@@ -569,6 +571,17 @@ export async function setValuesByFieldName(
     valuesToSet[fieldId] = valueToString(value, type);
   }
 
+  // Auto-bump the virtual `updated_at` field whenever values are being set,
+  // unless the caller explicitly provided one. The DB column on
+  // `collection_items` is bumped via updateContentHash below, but the
+  // user-facing "Updated Date" column in the CMS table reads this virtual
+  // field — without this, edits would never appear to refresh.
+  const updatedAtFieldId = Object.keys(fieldKeyMap).find(id => fieldKeyMap[id] === 'updated_at');
+  const autoBumpedUpdatedAt = updatedAtFieldId && !(updatedAtFieldId in valuesToSet);
+  if (autoBumpedUpdatedAt) {
+    valuesToSet[updatedAtFieldId!] = new Date().toISOString();
+  }
+
   // Detect changes and removals for translation management (only for draft)
   if (!is_published) {
     const changedKeys: string[] = [];
@@ -576,6 +589,9 @@ export async function setValuesByFieldName(
 
     // Check for changed values
     for (const [fieldId, newValue] of Object.entries(valuesToSet)) {
+      // An auto-bumped `updated_at` shouldn't mark translations as incomplete
+      if (autoBumpedUpdatedAt && fieldId === updatedAtFieldId) continue;
+
       const oldValue = currentValuesMap[fieldId];
 
       // Generate content key based on field key (if exists) or field id

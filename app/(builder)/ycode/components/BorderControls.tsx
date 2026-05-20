@@ -67,7 +67,8 @@ function parseBorderColorToCss(color: string, colorVariables?: import('@/types')
 }
 
 const BorderControls = memo(function BorderControls({ layer, onLayerUpdate, activeTextStyleKey, fieldGroups, allFields, collections }: BorderControlsProps) {
-  const { activeBreakpoint, activeUIState } = useEditorStore();
+  const activeBreakpoint = useEditorStore((s) => s.activeBreakpoint);
+  const activeUIState = useEditorStore((s) => s.activeUIState);
   const colorVariables = useColorVariablesStore((s) => s.colorVariables);
   const { updateDesignProperty, updateDesignProperties, debouncedUpdateDesignProperty, getDesignProperty } = useDesignSync({
     layer,

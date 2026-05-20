@@ -80,6 +80,7 @@ const nextConfig: NextConfig = {
         ],
       },
       {
+<<<<<<< HEAD
         source: '/:path((?!ycode|_next|a/).*)*',
         headers: [
           {
@@ -91,6 +92,16 @@ const nextConfig: NextConfig = {
             value: 'private, max-age=0, must-revalidate',
           },
           {
+=======
+        // Apply to public pages ONLY (exclude /ycode/*, /_next/*, /a/*)
+        // NOTE: Do NOT set Cache-Control here. Vercel recommends letting
+        // ISR manage cache headers automatically so per-URL cache-tag
+        // tracking works for selective revalidateTag invalidations.
+        // Manual s-maxage breaks per-URL purging on catch-all routes.
+        source: '/:path((?!ycode|_next|a/).*)*',
+        headers: [
+          {
+>>>>>>> upstream/main
             // Open the TLS connection to fonts.gstatic.com while the document
             // is still streaming so woff2 binaries can be fetched the moment
             // the inlined @font-face rules are parsed. Sending this as a

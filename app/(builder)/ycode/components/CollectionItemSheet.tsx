@@ -91,7 +91,8 @@ export default function CollectionItemSheet({
   const { collections, fields, items, updateItem, createItem, setItemStatus } = useCollectionsStore();
   const { updateItemInLayerData, invalidateLayerData, refetchLayersForCollection } = useCollectionLayerStore();
   const { updatePageCollectionItem, refetchPageCollectionItem, pages } = usePagesStore();
-  const { currentPageId, openFileManager } = useEditorStore();
+  const currentPageId = useEditorStore((state) => state.currentPageId);
+  const openFileManager = useEditorStore((state) => state.openFileManager);
   const getAsset = useAssetsStore((state) => state.getAsset);
   const timezone = useSettingsStore((state) => state.settingsByKey.timezone as string | null) ?? 'UTC';
 

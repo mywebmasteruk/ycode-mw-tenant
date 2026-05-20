@@ -12,6 +12,7 @@ import { useLayerStylesStore } from '../stores/useLayerStylesStore';
 import { useCollaborationPresenceStore } from '../stores/useCollaborationPresenceStore';
 import { createClient } from '@/lib/supabase-browser';
 import { detachStyleAcrossStores, updateStyleAcrossStores } from '../lib/layer-style-store-utils';
+import { createChannelLifecycle } from '@/lib/realtime-channel';
 import type { LayerStyle } from '../types';
 
 // Types for style updates
@@ -30,7 +31,7 @@ export interface UseLiveLayerStyleUpdatesReturn {
 }
 
 export function useLiveLayerStyleUpdates(): UseLiveLayerStyleUpdatesReturn {
-  const { user } = useAuthStore();
+  const user = useAuthStore((state) => state.user);
   const updateUser = useCollaborationPresenceStore((state) => state.updateUser);
   const currentUserId = useCollaborationPresenceStore((state) => state.currentUserId);
 
@@ -43,12 +44,14 @@ export function useLiveLayerStyleUpdates(): UseLiveLayerStyleUpdatesReturn {
       return;
     }
 
+    const lifecycle = createChannelLifecycle();
+
     const initializeChannel = async () => {
       try {
         const supabase = await createClient();
         const channel = supabase.channel('layer-styles:updates');
+        if (!lifecycle.track(channel, supabase)) return;
 
-        // Listen for style events
         channel.on('broadcast', { event: 'style_created' }, (payload) => {
           handleIncomingStyleCreate(payload.payload);
         });
@@ -69,6 +72,7 @@ export function useLiveLayerStyleUpdates(): UseLiveLayerStyleUpdatesReturn {
           }
         });
 
+        if (lifecycle.cancelled) return;
         channelRef.current = channel;
       } catch (error) {
         console.error('[LIVE-STYLE] Failed to initialize:', error);
@@ -78,10 +82,8 @@ export function useLiveLayerStyleUpdates(): UseLiveLayerStyleUpdatesReturn {
     initializeChannel();
 
     return () => {
-      if (channelRef.current) {
-        channelRef.current.unsubscribe();
-        channelRef.current = null;
-      }
+      lifecycle.teardown();
+      channelRef.current = null;
       isConnectedRef.current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

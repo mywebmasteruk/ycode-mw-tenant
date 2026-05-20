@@ -7,7 +7,7 @@
  * Allows creating, applying, editing, detaching, and deleting styles
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
@@ -84,7 +84,23 @@ export default function LayerStylesPanel({
       : 'block';
 
   // Filter styles to show matching group (handles legacy group compatibility)
-  const filteredStyles = styles.filter((s) => isStyleGroupCompatible(s.group, currentGroup));
+  const filteredStyles = useMemo(
+    () => styles.filter((s) => isStyleGroupCompatible(s.group, currentGroup)),
+    [styles, currentGroup]
+  );
+
+  // The SelectItem list doesn't depend on the currently selected layer — only
+  // on the available styles for this style group. Memoizing the JSX keeps the
+  // existing `SelectItem` instances stable across layer-selection re-renders,
+  // so an open dropdown doesn't redo 61+ items every click.
+  const styleItems = useMemo(
+    () => filteredStyles.map((style) => (
+      <SelectItem key={style.id} value={style.id}>
+        {style.name}
+      </SelectItem>
+    )),
+    [filteredStyles]
+  );
 
   // Get the current text style when in text style mode
   const currentTextStyle: TextStyle | undefined = isTextStyleMode && layer?.textStyles
@@ -389,11 +405,7 @@ export default function LayerStylesPanel({
                       </Empty>
                     ) : (
                       <SelectGroup>
-                        {filteredStyles.map((style) => (
-                          <SelectItem key={style.id} value={style.id}>
-                            {style.name}
-                          </SelectItem>
-                        ))}
+                        {styleItems}
                       </SelectGroup>
                     )}
                   </SelectContent>

@@ -24,6 +24,7 @@ import { useEditorStore } from '@/stores/useEditorStore';
 import { usePagesStore } from '@/stores/usePagesStore';
 import { useCollectionsStore } from '@/stores/useCollectionsStore';
 import { useLocalisationStore } from '@/stores/useLocalisationStore';
+
 import { buildSlugPath, buildDynamicPageUrl, buildLocalizedSlugPath, buildLocalizedDynamicPageUrl } from '@/lib/page-utils';
 
 // 5. Types
@@ -84,10 +85,33 @@ export default function HeaderBar({
   const router = useRouter();
   const pathname = usePathname();
   const pageDropdownRef = useRef<HTMLDivElement>(null);
-  const { currentPageCollectionItemId, currentPageId: storeCurrentPageId, isPreviewMode, setPreviewMode, openFileManager, setKeyboardShortcutsOpen, setActiveSidebarTab, lastDesignUrl, setLastDesignUrl, previewReturnUrl, previewReturnTab, setPreviewReturn } = useEditorStore();
-  const { folders, pages: storePages } = usePagesStore();
-  const { items, fields, collections, selectedCollectionId: storeSelectedCollectionId, setSelectedCollectionId } = useCollectionsStore();
-  const { locales, selectedLocaleId, setSelectedLocaleId, translations, loadTranslations } = useLocalisationStore();
+  const currentPageCollectionItemId = useEditorStore((s) => s.currentPageCollectionItemId);
+  const storeCurrentPageId = useEditorStore((s) => s.currentPageId);
+  const isPreviewMode = useEditorStore((s) => s.isPreviewMode);
+  const setPreviewMode = useEditorStore((s) => s.setPreviewMode);
+  const openFileManager = useEditorStore((s) => s.openFileManager);
+  const setKeyboardShortcutsOpen = useEditorStore((s) => s.setKeyboardShortcutsOpen);
+  const setActiveSidebarTab = useEditorStore((s) => s.setActiveSidebarTab);
+  const lastDesignUrl = useEditorStore((s) => s.lastDesignUrl);
+  const setLastDesignUrl = useEditorStore((s) => s.setLastDesignUrl);
+  const previewReturnUrl = useEditorStore((s) => s.previewReturnUrl);
+  const previewReturnTab = useEditorStore((s) => s.previewReturnTab);
+  const setPreviewReturn = useEditorStore((s) => s.setPreviewReturn);
+
+  const folders = usePagesStore((s) => s.folders);
+  const storePages = usePagesStore((s) => s.pages);
+
+  const items = useCollectionsStore((s) => s.items);
+  const fields = useCollectionsStore((s) => s.fields);
+  const collections = useCollectionsStore((s) => s.collections);
+  const storeSelectedCollectionId = useCollectionsStore((s) => s.selectedCollectionId);
+  const setSelectedCollectionId = useCollectionsStore((s) => s.setSelectedCollectionId);
+
+  const locales = useLocalisationStore((s) => s.locales);
+  const selectedLocaleId = useLocalisationStore((s) => s.selectedLocaleId);
+  const setSelectedLocaleId = useLocalisationStore((s) => s.setSelectedLocaleId);
+  const translations = useLocalisationStore((s) => s.translations);
+  const loadTranslations = useLocalisationStore((s) => s.loadTranslations);
   const { navigateToLayers, navigateToCollection, navigateToCollections, updateQueryParams, routeType } = useEditorUrl();
 
   // Optimistic nav button state - set immediately on click, cleared when URL catches up

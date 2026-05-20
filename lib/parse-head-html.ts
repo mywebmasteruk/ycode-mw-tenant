@@ -38,6 +38,25 @@ function extractInnerHtml(full: string, tag: string): string {
   return m ? m[1] : '';
 }
 
+const STYLE_BLOCK_REGEX = /<style[^>]*>([\s\S]*?)<\/style\s*>/gi;
+
+/**
+ * Concatenates the inner CSS of every `<style>` block in an HTML string.
+ * Used by the builder canvas to live-preview user-defined CSS variables
+ * declared in custom head code, without executing any `<script>` tags.
+ */
+export function extractStyleBlockContents(html: string | null | undefined): string {
+  if (!html) return '';
+  const parts: string[] = [];
+  STYLE_BLOCK_REGEX.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = STYLE_BLOCK_REGEX.exec(html)) !== null) {
+    const inner = match[1].trim();
+    if (inner) parts.push(inner);
+  }
+  return parts.join('\n');
+}
+
 /**
  * Renders global head HTML as React elements for direct placement inside
  * the root layout's <head>. Bypasses next/script to avoid self.__next_s

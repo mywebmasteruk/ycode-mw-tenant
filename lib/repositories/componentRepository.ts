@@ -7,12 +7,16 @@
  */
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
-import type { Component, Layer } from '@/types';
+import type { Component, ComponentVariant, Layer } from '@/types';
 import { generateComponentContentHash } from '../hash-utils';
 import { deleteTranslationsInBulk, markTranslationsIncomplete } from '@/lib/repositories/translationRepository';
 import { extractLayerContentMap } from '../localisation-utils';
+<<<<<<< HEAD
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
+=======
+import { generateId } from '../utils';
+>>>>>>> upstream/main
 
 /**
  * Input data for creating a new component
@@ -21,6 +25,16 @@ export interface CreateComponentData {
   name: string;
   layers: Layer[];
   variables?: any[]; // Component variables for exposed properties
+  variants?: ComponentVariant[]; // Optional explicit variants; defaults to a single "Default"
+}
+
+/**
+ * Build a variants array from a layers tree. Used when seeding a new component
+ * or when persisting a `variants` change so the legacy `layers` column always
+ * mirrors `variants[0].layers`.
+ */
+function defaultVariantsFromLayers(layers: Layer[]): ComponentVariant[] {
+  return [{ id: generateId('cmpvar'), name: 'Default', layers }];
 }
 
 /**
@@ -135,21 +149,39 @@ export async function createComponent(
     throw new Error('Failed to initialize Supabase client');
   }
 
+<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
 
+=======
+  // Variants are the source of truth; seed a "Default" variant from `layers`
+  // when none was provided so older callers keep working.
+  const variants: ComponentVariant[] = componentData.variants && componentData.variants.length > 0
+    ? componentData.variants
+    : defaultVariantsFromLayers(componentData.layers);
+  const primaryLayers = variants[0]?.layers ?? componentData.layers;
+
+  // Calculate content hash — includes every variant so non-primary variant
+  // edits are detected by `getUnpublishedComponents`.
+>>>>>>> upstream/main
   const contentHash = generateComponentContentHash({
     name: componentData.name,
-    layers: componentData.layers,
+    layers: primaryLayers,
     variables: componentData.variables,
+    variants,
   });
 
   const insertData: any = {
     name: componentData.name,
-    layers: componentData.layers,
+    layers: primaryLayers,
+    variants,
     content_hash: contentHash,
     is_published: false,
   };
 
+<<<<<<< HEAD
+=======
+  // Include variables if provided
+>>>>>>> upstream/main
   if (componentData.variables?.length) {
     insertData.variables = componentData.variables;
   }
@@ -170,11 +202,17 @@ export async function createComponent(
 }
 
 /**
- * Update a component and recalculate content hash
+ * Update a component and recalculate content hash.
+ *
+ * `variants` is the source of truth for the layer trees. When `variants` is
+ * provided, the legacy `layers` column is mirrored to `variants[0].layers` so
+ * any reader that has not been migrated to variants still works. When only
+ * `layers` is provided, `variants[0].layers` is updated in place and the rest
+ * of the variants are preserved.
  */
 export async function updateComponent(
   id: string,
-  updates: Partial<Pick<Component, 'name' | 'layers' | 'variables'>>
+  updates: Partial<Pick<Component, 'name' | 'layers' | 'variables' | 'variants'>>
 ): Promise<Component> {
   const client = await getSupabaseAdmin();
   if (!client) {
@@ -188,12 +226,40 @@ export async function updateComponent(
     throw new Error('Component not found');
   }
 
+<<<<<<< HEAD
   if (updates.layers !== undefined) {
     const oldContentMap = extractLayerContentMap(current.layers || [], 'component', id);
     const newContentMap = extractLayerContentMap(updates.layers, 'component', id);
 
     const removedKeys = Object.keys(oldContentMap).filter(key => !(key in newContentMap));
 
+=======
+  // Reconcile variants and layers so they stay in sync regardless of which one
+  // the caller updated.
+  const currentVariants: ComponentVariant[] = current.variants && current.variants.length > 0
+    ? current.variants
+    : defaultVariantsFromLayers(current.layers || []);
+
+  let finalVariants: ComponentVariant[] = currentVariants;
+  if (updates.variants !== undefined) {
+    finalVariants = updates.variants.length > 0
+      ? updates.variants
+      : defaultVariantsFromLayers([]);
+  } else if (updates.layers !== undefined) {
+    finalVariants = currentVariants.map((v, i) => (i === 0 ? { ...v, layers: updates.layers! } : v));
+  }
+  const finalLayers = finalVariants[0]?.layers ?? (updates.layers ?? current.layers ?? []);
+
+  // Detect removed and changed layer content for translation bookkeeping.
+  // We only consider the primary variant layers because translations for the
+  // other variants will be tracked through their own update events.
+  const oldPrimaryLayers = current.layers || [];
+  if (oldPrimaryLayers !== finalLayers) {
+    const oldContentMap = extractLayerContentMap(oldPrimaryLayers, 'component', id);
+    const newContentMap = extractLayerContentMap(finalLayers, 'component', id);
+
+    const removedKeys = Object.keys(oldContentMap).filter(key => !(key in newContentMap));
+>>>>>>> upstream/main
     const changedKeys = Object.keys(newContentMap).filter(
       key => key in oldContentMap && oldContentMap[key] !== newContentMap[key]
     );
@@ -201,12 +267,16 @@ export async function updateComponent(
     if (removedKeys.length > 0) {
       await deleteTranslationsInBulk('component', id, removedKeys);
     }
+<<<<<<< HEAD
 
+=======
+>>>>>>> upstream/main
     if (changedKeys.length > 0) {
       await markTranslationsIncomplete('component', id, changedKeys);
     }
   }
 
+<<<<<<< HEAD
   const finalData = {
     name: updates.name !== undefined ? updates.name : current.name,
     layers: updates.layers !== undefined ? updates.layers : current.layers,
@@ -214,11 +284,25 @@ export async function updateComponent(
   };
 
   const contentHash = generateComponentContentHash(finalData);
+=======
+  // Recalculate content hash from the final, merged data.
+  const finalName = updates.name !== undefined ? updates.name : current.name;
+  const finalVariables = updates.variables !== undefined ? updates.variables : current.variables;
+  const contentHash = generateComponentContentHash({
+    name: finalName,
+    layers: finalLayers,
+    variables: finalVariables,
+    variants: finalVariants,
+  });
+>>>>>>> upstream/main
 
   let query = client
     .from('components')
     .update({
-      ...updates,
+      ...(updates.name !== undefined ? { name: updates.name } : {}),
+      ...(updates.variables !== undefined ? { variables: updates.variables } : {}),
+      layers: finalLayers,
+      variants: finalVariants,
       content_hash: contentHash,
       updated_at: new Date().toISOString(),
     })
@@ -290,6 +374,7 @@ export async function publishComponent(draftComponentId: string): Promise<Compon
       id: draftComponent.id,
       name: draftComponent.name,
       layers: draftComponent.layers,
+      variants: draftComponent.variants,
       variables: draftComponent.variables,
       content_hash: draftComponent.content_hash,
       is_published: true,
@@ -310,11 +395,12 @@ export async function publishComponent(draftComponentId: string): Promise<Compon
 
 /**
  * Publish multiple components in batch
- * Uses batch upsert for efficiency
+ * Only upserts components whose content_hash actually changed.
+ * Returns the IDs of components that were modified.
  */
-export async function publishComponents(componentIds: string[]): Promise<{ count: number }> {
+export async function publishComponents(componentIds: string[]): Promise<{ count: number; changedComponentIds: string[] }> {
   if (componentIds.length === 0) {
-    return { count: 0 };
+    return { count: 0, changedComponentIds: [] };
   }
 
   const client = await getSupabaseAdmin();
@@ -339,9 +425,10 @@ export async function publishComponents(componentIds: string[]): Promise<{ count
   }
 
   if (!draftComponents || draftComponents.length === 0) {
-    return { count: 0 };
+    return { count: 0, changedComponentIds: [] };
   }
 
+<<<<<<< HEAD
   const componentsToUpsert = draftComponents.map(draft => ({
     id: draft.id,
     name: draft.name,
@@ -354,16 +441,55 @@ export async function publishComponents(componentIds: string[]): Promise<{ count
   }));
 
   const { error: upsertError } = await client
+=======
+  // Fetch existing published versions to compare hashes
+  const { data: publishedComponents } = await client
+>>>>>>> upstream/main
     .from('components')
-    .upsert(componentsToUpsert, {
-      onConflict: 'id,is_published',
-    });
+    .select('id, content_hash')
+    .in('id', draftComponents.map(d => d.id))
+    .eq('is_published', true);
 
-  if (upsertError) {
-    throw new Error(`Failed to publish components: ${upsertError.message}`);
+  const publishedHashById = new Map<string, string>();
+  if (publishedComponents) {
+    for (const pub of publishedComponents) {
+      if (pub.content_hash) publishedHashById.set(pub.id, pub.content_hash);
+    }
   }
 
-  return { count: componentsToUpsert.length };
+  // Only upsert components that are new or have changed
+  const componentsToUpsert = draftComponents
+    .filter(draft => {
+      const pubHash = publishedHashById.get(draft.id);
+      return !pubHash || pubHash !== draft.content_hash;
+    })
+    .map(draft => ({
+      id: draft.id,
+      name: draft.name,
+      layers: draft.layers,
+      variants: draft.variants,
+      variables: draft.variables,
+      content_hash: draft.content_hash,
+      is_published: true,
+      updated_at: new Date().toISOString(),
+    }));
+
+  if (componentsToUpsert.length > 0) {
+    const { error: upsertError } = await client
+      .from('components')
+      .upsert(componentsToUpsert, {
+        onConflict: 'id,is_published',
+      });
+
+    if (upsertError) {
+      throw new Error(`Failed to publish components: ${upsertError.message}`);
+    }
+  }
+
+  return {
+    count: componentsToUpsert.length,
+    changedComponentIds: componentsToUpsert.map(c => c.id),
+  };
 }
 
 /**
@@ -647,18 +773,53 @@ export async function softDeleteComponent(id: string): Promise<SoftDeleteResult>
 
   const affectedEntities = await findEntitiesUsingComponent(id);
 
+<<<<<<< HEAD
   for (const entity of affectedEntities) {
     if (entity.type === 'page') {
       let pageUpdateQuery = client
+=======
+  // Detach component from all affected page_layers and recompute hashes
+  const { generatePageLayersHash } = await import('@/lib/hash-utils');
+
+  for (const entity of affectedEntities) {
+    if (entity.type === 'page') {
+      // Fetch existing generated_css to keep hash consistent
+      const { data: existing } = await client
+        .from('page_layers')
+        .select('generated_css')
+        .eq('id', entity.id)
+        .eq('is_published', false)
+        .single();
+
+      const contentHash = generatePageLayersHash({
+        layers: entity.newLayers,
+        generated_css: existing?.generated_css || null,
+      });
+
+      const { error: updateError } = await client
+>>>>>>> upstream/main
         .from('page_layers')
         .update({
           layers: entity.newLayers,
+          content_hash: contentHash,
           updated_at: new Date().toISOString(),
         })
+<<<<<<< HEAD
         .eq('id', entity.id);
       pageUpdateQuery = applyTenantEq(pageUpdateQuery, tenantId);
 
       const { error: updateError } = await pageUpdateQuery;
+=======
+        .eq('id', entity.id)
+        // CRITICAL: page_layers has composite PK (id, is_published). Without
+        // this filter, the UPDATE writes the new layers + draft content_hash
+        // onto the published row too. Two failure modes:
+        //   1. Published row carries new layers but stale generated_css —
+        //      site renders broken classes for the deleted component.
+        //   2. batchPublishPageLayers compares hashes, sees draft == published
+        //      (we just wrote it!), and skips the page on publish.
+        .eq('is_published', false);
+>>>>>>> upstream/main
 
       if (updateError) {
         console.error(`Failed to update page_layers ${entity.id}:`, updateError);

@@ -272,6 +272,59 @@ export function getAssetProxyUrl(
 }
 
 /**
+ * Default max width applied to bitmap images served to the builder canvas.
+ * Caps decoded image bitmaps so a 11k×6k hero doesn't allocate ~260 MB of
+ * RGBA per copy in the iframe.
+ */
+const EDITOR_DEFAULT_IMAGE_WIDTH = 1920;
+const EDITOR_DEFAULT_IMAGE_QUALITY = 80;
+
+/**
+ * Bitmap MIME types we want to size-cap through the proxy in the editor.
+ * SVGs are skipped (vector, no decode cost) and videos/audio aren't bitmap
+ * decoded at all.
+ */
+function isBitmapImageMime(mimeType?: string | null): boolean {
+  if (!mimeType) return false;
+  if (!mimeType.startsWith('image/')) return false;
+  if (mimeType === 'image/svg+xml') return false;
+  return true;
+}
+
+/**
+ * Build an editor-optimized URL for a bitmap image asset. Routes through the
+ * `/a/{hash}/{slug}.{ext}` proxy with `?width=&quality=` so Sharp can downscale
+ * before the browser decodes the bitmap.
+ *
+ * Returns the asset's existing `public_url` unchanged when:
+ *   - the asset isn't a bitmap image (SVG, video, document, …)
+ *   - there's no `storage_path` (external/inline asset)
+ *   - the URL has already been rewritten to the proxy by an upstream consumer
+ */
+export function getEditorImageUrl(
+  asset: {
+    id: string;
+    filename: string;
+    mime_type: string;
+    storage_path?: string | null;
+    public_url?: string | null;
+  },
+  maxWidth: number = EDITOR_DEFAULT_IMAGE_WIDTH,
+  quality: number = EDITOR_DEFAULT_IMAGE_QUALITY
+): string | null {
+  const existing = asset.public_url ?? null;
+  if (!isBitmapImageMime(asset.mime_type)) return existing;
+  if (!asset.storage_path) return existing;
+
+  const proxyBase = getAssetProxyUrl(asset);
+  if (!proxyBase) return existing;
+
+  // Avoid double-appending if `public_url` already routes through the proxy
+  // (e.g. server pre-rewrote it). Re-append width to enforce the cap.
+  return `${proxyBase}?width=${maxWidth}&quality=${quality}`;
+}
+
+/**
  * Check if a URL is an asset proxy URL (starts with /a/)
  */
 function isProxyUrl(url: string): boolean {

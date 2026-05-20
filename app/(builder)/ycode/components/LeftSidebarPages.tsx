@@ -132,8 +132,17 @@ const LeftSidebarPages = React.forwardRef<LeftSidebarPagesHandle, LeftSidebarPag
   }, [urlState.isEditing, urlState.resourceId, selectedPage, showPageSettings]);
 
   // Get store actions
-  const { createPage, updatePage, duplicatePage, deletePage, createFolder, updateFolder, duplicateFolder, deleteFolder, batchReorderPagesAndFolders } = usePagesStore();
-  const { collections, fields } = useCollectionsStore();
+  const createPage = usePagesStore((s) => s.createPage);
+  const updatePage = usePagesStore((s) => s.updatePage);
+  const duplicatePage = usePagesStore((s) => s.duplicatePage);
+  const deletePage = usePagesStore((s) => s.deletePage);
+  const createFolder = usePagesStore((s) => s.createFolder);
+  const updateFolder = usePagesStore((s) => s.updateFolder);
+  const duplicateFolder = usePagesStore((s) => s.duplicateFolder);
+  const deleteFolder = usePagesStore((s) => s.deleteFolder);
+  const batchReorderPagesAndFolders = usePagesStore((s) => s.batchReorderPagesAndFolders);
+  const collections = useCollectionsStore((s) => s.collections);
+  const fields = useCollectionsStore((s) => s.fields);
 
   // Collaboration hooks
   const livePageUpdates = useLivePageUpdates();

@@ -47,6 +47,9 @@ export interface PublishCollectionResult {
     fieldsCount: number;
     itemsCount: number;
     valuesCount: number;
+    deletedItemsCount: number;
+    deletedItemSlugs: string[];
+    renamedItemOldSlugs: string[];
   };
   timing?: {
     collections: OperationTiming;
@@ -105,6 +108,9 @@ export async function publishCollectionWithItems(
       fieldsCount: 0,
       itemsCount: 0,
       valuesCount: 0,
+      deletedItemsCount: 0,
+      deletedItemSlugs: [],
+      renamedItemOldSlugs: [],
     },
     timing: {
       collections: { durationMs: 0, count: 0 },
@@ -151,12 +157,13 @@ export async function publishCollectionWithItems(
 
       // Step 3: Publish selected items
       const itemsStart = performance.now();
-      const { itemsCount, valuesCount, itemsDurationMs, valuesDurationMs } = await publishSelectedItems(
+      const { itemsCount, valuesCount, itemsDurationMs, valuesDurationMs, renamedItemOldSlugs } = await publishSelectedItems(
         collectionId,
         itemIds
       );
       result.published.itemsCount = itemsCount;
       result.published.valuesCount = valuesCount;
+      result.published.renamedItemOldSlugs = renamedItemOldSlugs;
       result.timing!.items = {
         durationMs: itemsDurationMs,
         count: itemsCount,
@@ -167,7 +174,9 @@ export async function publishCollectionWithItems(
       };
 
       // Step 4: Clean up soft-deleted items in published version
-      await cleanupDeletedPublishedItems(collectionId);
+      const cleanup = await cleanupDeletedPublishedItems(collectionId);
+      result.published.deletedItemsCount = cleanup.deletedCount;
+      result.published.deletedItemSlugs = cleanup.deletedSlugs;
       await cleanupDeletedPublishedFields(collectionId);
     });
 
@@ -410,7 +419,7 @@ async function publishAllFields(collectionId: string): Promise<number> {
 async function publishSelectedItems(
   collectionId: string,
   itemIds?: string[]
-): Promise<{ itemsCount: number; valuesCount: number; itemsDurationMs: number; valuesDurationMs: number }> {
+): Promise<{ itemsCount: number; valuesCount: number; itemsDurationMs: number; valuesDurationMs: number; renamedItemOldSlugs: string[] }> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -428,14 +437,14 @@ async function publishSelectedItems(
   }
 
   if (itemsToPublish.length === 0) {
-    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0 };
+    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0, renamedItemOldSlugs: [] };
   }
 
   // Batch fetch all draft items to publish
   const draftItems = await getItemsByIds(itemsToPublish, false);
 
   if (draftItems.length === 0) {
-    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0 };
+    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0, renamedItemOldSlugs: [] };
   }
 
   // Separate publishable from non-publishable items
@@ -457,7 +466,7 @@ async function publishSelectedItems(
   }
 
   if (publishableItems.length === 0) {
-    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0 };
+    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0, renamedItemOldSlugs: [] };
   }
 
   // Fetch existing published items for comparison
@@ -476,10 +485,17 @@ async function publishSelectedItems(
   for (const item of publishableItems) {
     const existing = publishedItemsById.get(item.id);
 
+    // Only compare content_hash when both sides have a value — null draft
+    // hashes (pre-backfill items) would otherwise always appear "changed."
+    // Value-level comparison in publishItemValuesBatch catches real changes.
+    const hashChanged = item.content_hash != null
+      && existing?.content_hash != null
+      && existing.content_hash !== item.content_hash;
+
     const metadataChanged = !existing
       || existing.manual_order !== item.manual_order
       || existing.is_publishable !== item.is_publishable
-      || existing.content_hash !== item.content_hash;
+      || hashChanged;
 
     if (!metadataChanged) {
       itemIdsToPublishValues.push(item.id);
@@ -515,12 +531,57 @@ async function publishSelectedItems(
 
   const itemsDurationMs = Math.round(performance.now() - itemsStart);
 
+  // Snapshot old published slug values before overwriting (for rename detection)
+  const renamedItemOldSlugs: string[] = [];
+  try {
+    const { data: slugField } = await client
+      .from('collection_fields')
+      .select('id')
+      .eq('collection_id', collectionId)
+      .eq('key', 'slug')
+      .is('deleted_at', null)
+      .limit(1)
+      .single();
+
+    if (slugField) {
+      const { data: oldPublishedSlugs } = await client
+        .from('collection_item_values')
+        .select('item_id, value')
+        .eq('field_id', slugField.id)
+        .eq('is_published', true)
+        .is('deleted_at', null)
+        .in('item_id', itemIdsToPublishValues);
+
+      const { data: draftSlugs } = await client
+        .from('collection_item_values')
+        .select('item_id, value')
+        .eq('field_id', slugField.id)
+        .eq('is_published', false)
+        .is('deleted_at', null)
+        .in('item_id', itemIdsToPublishValues);
+
+      if (oldPublishedSlugs && draftSlugs) {
+        const oldByItem = new Map(oldPublishedSlugs.map(s => [s.item_id, s.value as string]));
+        const newByItem = new Map(draftSlugs.map(s => [s.item_id, s.value as string]));
+
+        for (const [itemId, oldSlug] of oldByItem) {
+          const newSlug = newByItem.get(itemId);
+          if (oldSlug && newSlug && oldSlug !== newSlug) {
+            renamedItemOldSlugs.push(oldSlug);
+          }
+        }
+      }
+    }
+  } catch {
+    // Non-fatal: slug rename detection failure doesn't block publish
+  }
+
   // Time values publishing (pass all item IDs - values comparison happens inside)
   const valuesStart = performance.now();
   const valuesCount = await publishItemValuesBatch(itemIdsToPublishValues);
   const valuesDurationMs = Math.round(performance.now() - valuesStart);
 
-  return { itemsCount: itemsToUpsert.length, valuesCount, itemsDurationMs, valuesDurationMs };
+  return { itemsCount: itemsToUpsert.length, valuesCount, itemsDurationMs, valuesDurationMs, renamedItemOldSlugs };
 }
 
 /**
@@ -680,18 +741,21 @@ async function hasValueChanges(itemId: string): Promise<boolean> {
 }
 
 /**
- * Clean up soft-deleted items in both draft and published versions
- * Uses batch DELETE for efficiency
- * If a draft item is soft-deleted, permanently remove both draft and published versions
+ * Clean up soft-deleted items in both draft and published versions.
+ * Snapshots published slug values before deletion so the caller can
+ * invalidate stale cached dynamic-page URLs.
+ *
+ * @returns Number of deleted items and their former published slug values
  */
-async function cleanupDeletedPublishedItems(collectionId: string): Promise<void> {
+async function cleanupDeletedPublishedItems(
+  collectionId: string,
+): Promise<{ deletedCount: number; deletedSlugs: string[] }> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  // Get all soft-deleted items from draft (with pagination for >1000 items)
   const deletedDraftItems = await getAllItemsByCollectionId(
     collectionId,
     false,
@@ -699,14 +763,48 @@ async function cleanupDeletedPublishedItems(collectionId: string): Promise<void>
   );
 
   if (deletedDraftItems.length === 0) {
-    return;
+    return { deletedCount: 0, deletedSlugs: [] };
   }
 
-  // Extract item IDs
   const deletedItemIds = deletedDraftItems.map(item => item.id);
   const tenantId = await resolveEffectiveTenantId();
 
+  // Snapshot published slug values before deletion (for cache invalidation)
+  let deletedSlugs: string[] = [];
+  try {
+    const { data: slugField } = await client
+      .from('collection_fields')
+      .select('id')
+      .eq('collection_id', collectionId)
+      .eq('key', 'slug')
+      .is('deleted_at', null)
+      .limit(1)
+      .single();
+
+    if (slugField) {
+      const allSlugValues: Array<{ value: unknown }> = [];
+      for (let i = 0; i < deletedItemIds.length; i += 500) {
+        const batch = deletedItemIds.slice(i, i + 500);
+        const { data } = await client
+          .from('collection_item_values')
+          .select('value')
+          .eq('field_id', slugField.id)
+          .eq('is_published', true)
+          .is('deleted_at', null)
+          .in('item_id', batch);
+        if (data) allSlugValues.push(...data);
+      }
+
+      deletedSlugs = allSlugValues
+        .map(sv => sv.value as string)
+        .filter(Boolean);
+    }
+  } catch {
+    // Non-fatal: proceed with deletion even if slug snapshot fails
+  }
+
   // Batch hard delete published versions (CASCADE will delete values)
+<<<<<<< HEAD
   let delPubItems = client
     .from('collection_items')
     .delete()
@@ -723,6 +821,28 @@ async function cleanupDeletedPublishedItems(collectionId: string): Promise<void>
     .eq('is_published', false);
   delDraftItems = applyTenantEq(delDraftItems, tenantId);
   await delDraftItems;
+=======
+  for (let i = 0; i < deletedItemIds.length; i += 500) {
+    const batch = deletedItemIds.slice(i, i + 500);
+    await client
+      .from('collection_items')
+      .delete()
+      .in('id', batch)
+      .eq('is_published', true);
+  }
+
+  // Batch hard delete draft versions (CASCADE will delete values)
+  for (let i = 0; i < deletedItemIds.length; i += 500) {
+    const batch = deletedItemIds.slice(i, i + 500);
+    await client
+      .from('collection_items')
+      .delete()
+      .in('id', batch)
+      .eq('is_published', false);
+  }
+
+  return { deletedCount: deletedItemIds.length, deletedSlugs };
+>>>>>>> upstream/main
 }
 
 /**
