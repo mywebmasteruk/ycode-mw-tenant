@@ -53,6 +53,7 @@ interface CollectionsActions {
   loadItems: (collectionId: string, page?: number, limit?: number, sortBy?: string, sortOrder?: string) => Promise<void>;
   loadPublishedItems: (collectionId: string) => Promise<void>;
   getDropdownItems: (collectionId: string) => Promise<Array<{ id: string; label: string }>>;
+  searchAndMergeItems: (collectionId: string, query: string, limit?: number) => Promise<Array<{ id: string; label: string }>>;
   createItem: (collectionId: string, values: Record<string, any>, statusAction?: StatusAction) => Promise<CollectionItemWithValues>;
   updateItem: (collectionId: string, itemId: string, values: Record<string, any>) => Promise<void>;
   deleteItem: (collectionId: string, itemId: string) => Promise<void>;
@@ -1213,40 +1214,73 @@ export const useCollectionsStore = create<CollectionsStore>((set, get) => ({
   getDropdownItems: async (collectionId: string) => {
     try {
       const state = get();
-
-      // Fields and items are ALWAYS preloaded before UI renders
-      // No defensive loading needed - guaranteed to be available
       const collectionFields = state.fields[collectionId] || [];
       const items = state.items[collectionId] || [];
 
-      // Find the name field (field with key = 'name')
       const nameField = collectionFields.find(field => field.key === 'name');
-
       if (!nameField) {
         console.warn(`Name field not found for collection ${collectionId}. Available fields:`, collectionFields.map(f => ({ id: f.id, key: f.key, name: f.name })));
       }
 
-      // Map items to { id, label } format
-      const itemsWithLabels = items.map(item => {
-        let label = `Item ${item.id.slice(0, 8)}`;
-
-        if (nameField) {
-          const nameValue = item.values?.[nameField.id];
-          if (nameValue !== null && nameValue !== undefined && String(nameValue).trim() !== '') {
-            label = String(nameValue);
-          }
-        }
-
-        return {
-          id: item.id,
-          label,
-        };
-      });
-
-      return itemsWithLabels;
+      return items.map(item => ({ id: item.id, label: getCollectionItemLabel(item, collectionFields) }));
     } catch (error) {
       console.error('Failed to get dropdown items:', error);
       return [];
     }
   },
+
+  searchAndMergeItems: async (collectionId: string, query: string, limit = 50) => {
+    try {
+      const response = await collectionsApi.getItems(collectionId, {
+        search: query,
+        limit,
+        includeAssets: true,
+      });
+
+      if (response.error) throw new Error(response.error);
+
+      const fetched = response.data?.items || [];
+
+      if (response.data?.referencedAssets?.length) {
+        useAssetsStore.getState().addAssetsToCache(response.data.referencedAssets);
+      }
+
+      // Merge fetched items into the store (dedupe by id) so the canvas can
+      // resolve them for slug/preview rendering when the user picks an item
+      // that wasn't part of the initial preload.
+      set(state => {
+        const existing = state.items[collectionId] || [];
+        const existingIds = new Set(existing.map(item => item.id));
+        const newItems = fetched.filter(item => !existingIds.has(item.id));
+        if (newItems.length === 0) return state;
+        return {
+          items: {
+            ...state.items,
+            [collectionId]: [...existing, ...newItems],
+          },
+        };
+      });
+
+      const fields = get().fields[collectionId] || [];
+      return fetched.map(item => ({ id: item.id, label: getCollectionItemLabel(item, fields) }));
+    } catch (error) {
+      console.error('Failed to search collection items:', error);
+      return [];
+    }
+  },
 }));
+
+/**
+ * Resolve a human-readable label for a collection item using the `name` field
+ * when present, falling back to a short id-based placeholder.
+ */
+function getCollectionItemLabel(item: CollectionItemWithValues, fields: CollectionField[]): string {
+  const nameField = fields.find(field => field.key === 'name');
+  if (nameField) {
+    const nameValue = item.values?.[nameField.id];
+    if (nameValue !== null && nameValue !== undefined && String(nameValue).trim() !== '') {
+      return String(nameValue);
+    }
+  }
+  return `Item ${item.id.slice(0, 8)}`;
+}
