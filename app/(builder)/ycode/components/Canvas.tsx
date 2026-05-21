@@ -23,9 +23,12 @@ import { CanvasPortalProvider } from '@/lib/canvas-portal-context';
 import { cn } from '@/lib/utils';
 import { loadSwiperCss } from '@/lib/slider-utils';
 import { resolveReferenceFieldsSync } from '@/lib/collection-utils';
+import { extractStyleBlockContents } from '@/lib/parse-head-html';
 import { useEditorStore } from '@/stores/useEditorStore';
 import { useFontsStore } from '@/stores/useFontsStore';
 import { useColorVariablesStore } from '@/stores/useColorVariablesStore';
+import { usePagesStore } from '@/stores/usePagesStore';
+import { useSettingsStore } from '@/stores/useSettingsStore';
 
 import { injectTranslatedText } from '@/lib/localisation-utils';
 
@@ -58,8 +61,6 @@ interface CanvasProps {
   pageCollectionFields?: CollectionField[];
   /** Assets map */
   assets: Record<string, Asset>;
-  /** Collection layer data by layer ID */
-  collectionLayerData: Record<string, CollectionItemWithValues[]>;
   /** Page ID */
   pageId: string;
   /** Callback when a layer is clicked */
@@ -278,7 +279,7 @@ function CanvasContent({
  * Canvas Component
  * Uses an embedded iframe with Tailwind Browser CDN for style generation
  */
-export default function Canvas({
+const Canvas = React.memo(function Canvas({
   layers,
   components,
   selectedLayerId,
@@ -291,7 +292,6 @@ export default function Canvas({
   pageCollectionItem,
   pageCollectionFields,
   assets,
-  collectionLayerData,
   pageId,
   onLayerClick,
   onLayerUpdate,
@@ -328,8 +328,6 @@ export default function Canvas({
 
   // State
   const [iframeReady, setIframeReady] = useState(false);
-  const [internalHoveredLayerId, setInternalHoveredLayerId] = useState<string | null>(null);
-  const effectiveHoveredLayerId = hoveredLayerId ?? internalHoveredLayerId;
 
   // Resolve component instances in layers
   const { layers: resolvedLayers, componentMap } = useMemo(() => {
@@ -365,8 +363,11 @@ export default function Canvas({
   }, [resolvedLayers, currentLocale, translations, pageId, editingComponentId]);
 
   // Enrich page collection item data with reference field dotted keys
-  // so variables like "refFieldId.targetFieldId" resolve on canvas
-  const enrichedPageCollectionItemData = useMemo(() => {
+  // so variables like "refFieldId.targetFieldId" resolve on canvas.
+  // Stabilize the reference: collectionItems gets a new ref whenever ANY collection changes,
+  // but this output only depends on the page's specific collection — prevent unnecessary
+  // root.render() calls in the iframe which are very expensive (~2-3s per full re-render).
+  const enrichedPageCollectionItemDataRaw = useMemo(() => {
     const values = pageCollectionItem?.values;
     if (!values || !pageCollectionFields?.length) return values || null;
     return resolveReferenceFieldsSync(
@@ -376,6 +377,17 @@ export default function Canvas({
       collectionFields
     );
   }, [pageCollectionItem?.values, pageCollectionFields, collectionItems, collectionFields]);
+
+  const enrichedPageCollectionItemDataRef = useRef(enrichedPageCollectionItemDataRaw);
+  const enrichedPageCollectionItemDataKeyRef = useRef('');
+  const enrichedPageCollectionItemData = useMemo(() => {
+    const key = JSON.stringify(enrichedPageCollectionItemDataRaw);
+    if (key !== enrichedPageCollectionItemDataKeyRef.current) {
+      enrichedPageCollectionItemDataKeyRef.current = key;
+      enrichedPageCollectionItemDataRef.current = enrichedPageCollectionItemDataRaw;
+    }
+    return enrichedPageCollectionItemDataRef.current;
+  }, [enrichedPageCollectionItemDataRaw]);
 
   // Collect layer IDs that should be hidden on canvas (display: hidden with on-load)
   const editorHiddenLayerIds = useMemo(() => {
@@ -403,7 +415,10 @@ export default function Canvas({
     onLayerClick?.(targetLayerId, event);
   }, [componentMap, editingComponentId, onLayerClick]);
 
-  // Handle hover
+  // Handle hover. We only forward the resolved id to the parent, which writes
+  // it into the editor store. `SelectionOverlay` reads the store directly to
+  // paint the outline, so we don't need any React state here — avoiding a
+  // Canvas re-render on every hover.
   const handleLayerHover = useCallback((layerId: string | null) => {
     // Resolve component root for hover (same logic as click)
     let resolvedLayerId = layerId;
@@ -417,7 +432,6 @@ export default function Canvas({
       }
     }
 
-    setInternalHoveredLayerId(resolvedLayerId);
     onLayerHover?.(resolvedLayerId);
   }, [componentMap, editingComponentId, onLayerHover]);
 
@@ -540,6 +554,47 @@ export default function Canvas({
     styleEl.textContent = colorVarCss;
   }, [iframeReady, colorVarCss]);
 
+  // Inject user-defined custom CSS from `<style>` blocks in head custom code
+  // so `:root { --x: ... }` variables (and any other CSS) live-preview in the
+  // canvas — matching the legacy `#custom-css-style` injection in IFrame.vue.
+  // Page-editing context: global head + current page head custom code.
+  // Component-editing context: global head only (no page bound to the canvas).
+  // Scripts and other head HTML are intentionally ignored to keep the canvas
+  // sandbox safe; full execution still happens on the published/preview site
+  // via PageRenderer + CustomCodeInjector.
+  const globalCustomCodeHead = useSettingsStore(
+    (state) => state.settingsByKey['custom_code_head'] as string | null
+  );
+  const pageCustomCodeHead = usePagesStore((state) => {
+    if (!pageId || editingComponentId) return null;
+    const page = state.pages.find((p) => p.id === pageId);
+    return page?.settings?.custom_code?.head || null;
+  });
+
+  const customHeadCss = useMemo(() => {
+    const segments: string[] = [];
+    const globalCss = extractStyleBlockContents(globalCustomCodeHead);
+    if (globalCss) segments.push(globalCss);
+    const pageCss = extractStyleBlockContents(pageCustomCodeHead);
+    if (pageCss) segments.push(pageCss);
+    return segments.join('\n');
+  }, [globalCustomCodeHead, pageCustomCodeHead]);
+
+  useEffect(() => {
+    if (!iframeReady || !iframeRef.current) return;
+    const iframeDoc = iframeRef.current.contentDocument;
+    if (!iframeDoc) return;
+
+    const STYLE_ID = 'ycode-custom-head-css';
+    let styleEl = iframeDoc.getElementById(STYLE_ID) as HTMLStyleElement | null;
+    if (!styleEl) {
+      styleEl = iframeDoc.createElement('style');
+      styleEl.id = STYLE_ID;
+      iframeDoc.head.appendChild(styleEl);
+    }
+    styleEl.textContent = customHeadCss;
+  }, [iframeReady, customHeadCss]);
+
   // Render content into iframe
   useEffect(() => {
     if (!iframeReady || !rootRef.current) return;
@@ -548,7 +603,7 @@ export default function Canvas({
       <CanvasContent
         layers={localizedLayers}
         selectedLayerId={selectedLayerId}
-        hoveredLayerId={effectiveHoveredLayerId}
+        hoveredLayerId={hoveredLayerId}
         pageId={pageId}
         pageCollectionItemId={pageCollectionItem?.id}
         pageCollectionItemData={enrichedPageCollectionItemData}
@@ -607,8 +662,7 @@ export default function Canvas({
                              target.tagName === 'TEXTAREA' ||
                              target.isContentEditable;
 
-      // Delete/Backspace for layer deletion
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedLayerId && !isInputFocused) {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && useEditorStore.getState().selectedLayerId && !isInputFocused) {
         e.preventDefault();
         onDeleteLayer?.();
         return;
@@ -693,7 +747,7 @@ export default function Canvas({
 
     doc.addEventListener('keydown', handleKeyDown);
     return () => doc.removeEventListener('keydown', handleKeyDown);
-  }, [iframeReady, selectedLayerId, onDeleteLayer, onResetZoom, onZoomIn, onZoomOut, onZoomToFit, onAutofit, onUndo, onRedo]);
+  }, [iframeReady, onDeleteLayer, onResetZoom, onZoomIn, onZoomOut, onZoomToFit, onAutofit, onUndo, onRedo]);
 
   // Handle any click inside the iframe (capture phase to run before stopPropagation)
   useEffect(() => {
@@ -850,7 +904,7 @@ export default function Canvas({
     doc.addEventListener('wheel', handleWheel, { passive: false, capture: true });
 
     return () => {
-      doc.removeEventListener('wheel', handleWheel);
+      doc.removeEventListener('wheel', handleWheel, { capture: true });
     };
   }, [iframeReady, onZoomGesture]);
 
@@ -865,4 +919,13 @@ export default function Canvas({
       tabIndex={-1}
     />
   );
-}
+}, (prev, next) => {
+  const keys = Object.keys(next) as Array<keyof CanvasProps>;
+  for (const key of keys) {
+    if (key === 'selectedLayerId' || key === 'hoveredLayerId') continue;
+    if (prev[key] !== next[key]) return false;
+  }
+  return true;
+});
+
+export default Canvas;

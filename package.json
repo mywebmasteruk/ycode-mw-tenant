@@ -1,6 +1,6 @@
 {
   "name": "ycode",
-  "version": "1.6.1",
+  "version": "1.10.0",
   "description": "Visual website builder you can self-host",
   "license": "MIT",
   "private": false,
@@ -83,6 +83,7 @@
     "@tiptap/pm": "^3.10.5",
     "@tiptap/react": "^3.10.7",
     "@tiptap/starter-kit": "^3.10.7",
+    "@vercel/functions": "^3.5.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "gsap": "^3.13.0",

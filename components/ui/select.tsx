@@ -187,7 +187,12 @@ function SelectLabel({
   )
 }
 
-function SelectItem({
+// Memoized so the dozens of right-sidebar `<Select>`s (which keep their items
+// mounted in a hidden DocumentFragment even when closed, for Radix keyboard
+// typeahead) don't re-render every item on every layer-selection cascade.
+// Most call sites pass primitive `value` + string `children`, so the shallow
+// prop compare bails cheaply.
+const SelectItem = React.memo(function SelectItem({
   className,
   children,
   ...props
@@ -218,7 +223,7 @@ function SelectItem({
       </span>
     </SelectPrimitive.Item>
   )
-}
+});
 
 function SelectSeparator({
   className,

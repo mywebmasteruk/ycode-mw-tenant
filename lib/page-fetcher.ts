@@ -12,6 +12,7 @@ import { getCollectionVariable, resolveFieldValue, evaluateVisibility, getLayerH
 import { isFieldVariable, isAssetVariable, createDynamicTextVariable, createDynamicRichTextVariable, createAssetVariable, getDynamicTextContent, getVariableStringValue, getAssetId, resolveDesignStyles } from '@/lib/variable-utils';
 import { generateImageSrcset, getImageSizes, getOptimizedImageUrl, getAssetProxyUrl, DEFAULT_ASSETS, collectLayerAssetIds } from '@/lib/asset-utils';
 import { resolveComponents, applyComponentOverrides } from '@/lib/resolve-components';
+import { getComponentVariantLayers } from '@/lib/component-variant-utils';
 import { isTiptapDoc, hasBlockElementsWithResolver } from '@/lib/tiptap-utils';
 import { castValue } from '@/lib/collection-utils';
 import { DEFAULT_TEXT_STYLES } from '@/lib/text-format-utils';
@@ -97,6 +98,8 @@ export interface PageData {
   locale?: Locale | null; // Current locale (if detected from URL)
   availableLocales?: Locale[]; // All active locales for locale switcher
   translations?: Record<string, Translation>; // Translations for locale-aware URL generation
+  /** Per-page CSS generated from this page's layers + resolved components. */
+  generatedCss?: string | null;
 }
 
 /**
@@ -111,6 +114,7 @@ export function slimPageData(data: PageData): PageData {
     ...data,
     pageLayers: { layers: data.pageLayers.layers || [] } as PageLayers,
     components: data.components.map(({ layers, ...rest }) => ({ ...rest, layers: [] }) as Component),
+    generatedCss: data.generatedCss,
   };
 }
 
@@ -666,6 +670,7 @@ async function fetchPageByPathInternal(
               locale: detectedLocale,
               availableLocales: availableLocales as Locale[] || [],
               translations,
+              generatedCss: pageLayers?.generated_css || null,
             };
           }
         }
@@ -731,6 +736,7 @@ async function fetchPageByPathInternal(
       locale: detectedLocale,
       availableLocales: availableLocales as Locale[] || [],
       translations,
+      generatedCss: pageLayers?.generated_css || null,
     };
   } catch (error) {
     console.error('Failed to fetch page:', error);
@@ -862,7 +868,7 @@ export const fetchHomepage = cache(async function fetchHomepage(
   preloadedComponents?: Component[],
   preResolvedTenantId?: string,
   translations?: Record<string, Translation>
-): Promise<Pick<PageData, 'page' | 'pageLayers' | 'components' | 'locale' | 'availableLocales' | 'translations'> | null> {
+): Promise<Pick<PageData, 'page' | 'pageLayers' | 'components' | 'locale' | 'availableLocales' | 'translations' | 'generatedCss'> | null> {
   try {
     const supabase = await getSupabaseAdmin();
 
@@ -930,10 +936,11 @@ export const fetchHomepage = cache(async function fetchHomepage(
         ...pageLayers,
         layers: resolvedLayers,
       },
-      components, // Layers are pre-resolved; components passed for rich-text embedded rendering
+      components,
       locale: null,
       availableLocales: availableLocales as Locale[] || [],
       translations: translations || {},
+      generatedCss: pageLayers?.generated_css || null,
     };
   } catch (error) {
     return null;
@@ -1647,12 +1654,16 @@ async function resolveTiptapComponentCollections(
     // Prevent circular resolution (component embedding itself)
     if (!ancestorComponentIds?.has(componentId)) {
       const comp = components.find(c => c.id === componentId);
-      if (comp?.layers?.length) {
+      // Pick the variant the rich-text node is bound to (falls back to the
+      // first/Default variant when no variant is selected or the requested
+      // one was deleted).
+      const compVariantLayers = comp ? getComponentVariantLayers(comp, node.attrs.componentVariantId) : [];
+      if (comp && compVariantLayers.length) {
         const childAncestors = new Set(ancestorComponentIds);
         childAncestors.add(componentId);
 
         const overrides = node.attrs.componentOverrides ?? undefined;
-        const withOverrides = applyComponentOverrides(comp.layers, overrides, comp.variables);
+        const withOverrides = applyComponentOverrides(compVariantLayers, overrides, comp.variables);
         const withComponents = resolveComponents(withOverrides, components, comp.variables, overrides);
         const withCollections = await resolveCollectionLayers(withComponents, isPublished, undefined, undefined, translations);
 

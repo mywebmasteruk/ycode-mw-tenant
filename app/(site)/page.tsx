@@ -1,5 +1,6 @@
 import { redirect, permanentRedirect } from 'next/navigation';
 import { unstable_cache } from 'next/cache';
+import { addCacheTag } from '@vercel/functions';
 import Link from 'next/link';
 import { cache } from 'react';
 import { fetchHomepage, fetchErrorPage, splitPageData, reassemblePageData, slimPageData } from '@/lib/page-fetcher';
@@ -113,11 +114,12 @@ async function fetchCachedGlobalSettings() {
 }
 
 async function fetchCachedRedirects(): Promise<RedirectType[] | null> {
+  const { effectiveTid, keySuffix } = await getTenantCacheContext();
   try {
     return await unstable_cache(
       async () => getSettingByKey('redirects') as Promise<RedirectType[] | null>,
-      ['data-for-redirects'],
-      { tags: ['all-pages'], revalidate: false }
+      ['data-for-redirects', keySuffix],
+      { tags: [tenantAllPagesTag(effectiveTid)], revalidate: false }
     )();
   } catch {
     return null;
@@ -154,6 +156,14 @@ async function fetchCachedErrorPage(errorCode: 401) {
 }
 
 export default async function Home() {
+  // MASJIDWEB_SEAM: tenant-aware cache tags — see docs/masjidweb-core-seams.md#tier-4
+  const { effectiveTid } = await getTenantCacheContext();
+  await addCacheTag([
+    tenantAllPagesTag(effectiveTid),
+    tenantRouteTag(effectiveTid, '/'),
+  ]);
+  // MASJIDWEB_SEAM_END
+
   // Check for redirects targeting the homepage
   const redirects = await fetchCachedRedirects();
   if (redirects && Array.isArray(redirects)) {
@@ -191,6 +201,9 @@ export default async function Home() {
 
   // Load all global settings early so error pages also get global custom code
   const globalSettings = await fetchCachedGlobalSettings();
+
+  // Per-page CSS with fallback to global published_css
+  const cssForPage = data.generatedCss || globalSettings.publishedCss || undefined;
 
   // Check password protection for homepage.
   // First evaluate without cookies() so non-protected pages can stay cacheable.
@@ -253,7 +266,7 @@ export default async function Home() {
       page={data.page}
       layers={data.pageLayers.layers || []}
       components={data.components}
-      generatedCss={globalSettings.publishedCss || undefined}
+      generatedCss={cssForPage}
       colorVariablesCss={globalSettings.colorVariablesCss || undefined}
       locale={data.locale}
       availableLocales={data.availableLocales}

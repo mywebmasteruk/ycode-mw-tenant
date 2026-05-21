@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { runResync } from '@/lib/apps/webflow/migration-service';
 import { noCache } from '@/lib/api-response';
+import { clearAllCache, getAllPublishedRoutes, warmRoutes } from '@/lib/services/cacheService';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -22,6 +23,23 @@ export async function POST(request: NextRequest) {
     }
 
     const result = await runResync(importId);
+
+    // Re-sync calls publishItem on every Webflow-live item, mutating published
+    // rows outside the normal publish flow. Mirror the migrate route: full
+    // purge + background warm so the CDN reflects the synced content.
+    try {
+      await clearAllCache();
+      const routes = await getAllPublishedRoutes();
+      const warmResult = await warmRoutes(routes, request);
+      if (warmResult) {
+        console.log(
+          `[Cache] webflow sync: warming ${warmResult.warmed}${warmResult.total > warmResult.warmed ? ` of ${warmResult.total}` : ''} route(s) in background`,
+        );
+      }
+    } catch (cacheError) {
+      console.error('[Cache] webflow sync: invalidation failed:', cacheError);
+    }
+
     return noCache({ data: result });
   } catch (error) {
     console.error('Error re-syncing Webflow import:', error);

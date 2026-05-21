@@ -27,9 +27,11 @@ interface CountConfigContext {
 async function loadCountFieldContexts(
   parentCollectionId: string,
   isPublished: boolean,
+  parentFields?: CollectionField[],
+  fieldsById?: Map<string, CollectionField>,
 ): Promise<CountConfigContext[]> {
-  const parentFields = await getFieldsByCollectionId(parentCollectionId, isPublished);
-  const countFields = parentFields.filter((f) => f.type === 'count');
+  const fields = parentFields ?? await getFieldsByCollectionId(parentCollectionId, isPublished);
+  const countFields = fields.filter((f) => f.type === 'count');
   if (countFields.length === 0) return [];
 
   const contexts: CountConfigContext[] = [];
@@ -41,7 +43,7 @@ async function loadCountFieldContexts(
     // Source field metadata is published-version agnostic for our purposes —
     // we only need its type/reference_collection_id, which doesn't change
     // between draft and published. Looking up the draft version is enough.
-    const sourceField = await getFieldById(cfg.fieldId, false);
+    const sourceField = fieldsById?.get(cfg.fieldId) ?? await getFieldById(cfg.fieldId, false);
     if (!sourceField) continue;
     if (sourceField.collection_id !== cfg.collectionId) continue;
     if (sourceField.type !== 'reference' && sourceField.type !== 'multi_reference') continue;
@@ -111,16 +113,26 @@ async function buildCountMap(
  * load. Counts always reflect every non-deleted child item (drafts +
  * published + staged for publish) regardless of this flag.
  *
+ * Pass `parentFields` / `fieldsById` to skip redundant field fetches when
+ * the caller has already loaded fields (e.g. the batch items endpoint).
+ *
  * Safe to call when the collection has no `count` fields - it short-circuits.
  */
 export async function enrichItemsWithCountValues(
   items: CollectionItemWithValues[],
   parentCollectionId: string,
   isPublished: boolean = false,
+  parentFields?: CollectionField[],
+  fieldsById?: Map<string, CollectionField>,
 ): Promise<void> {
   if (items.length === 0) return;
 
-  const contexts = await loadCountFieldContexts(parentCollectionId, isPublished);
+  const contexts = await loadCountFieldContexts(
+    parentCollectionId,
+    isPublished,
+    parentFields,
+    fieldsById,
+  );
   if (contexts.length === 0) return;
 
   for (const { countField, sourceField } of contexts) {

@@ -122,7 +122,7 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
   const [seoDescription, setSeoDescription] = useState('');
   const [seoImage, setSeoImage] = useState<string | FieldVariable | null>(null);
   const [seoNoindex, setSeoNoindex] = useState(false);
-  const { openFileManager } = useEditorStore();
+  const openFileManager = useEditorStore((state) => state.openFileManager);
   const leftSidebarWidth = useEditorStore((state) => state.leftSidebarWidth);
 
   const nameInputRef = useRef<HTMLInputElement>(null);

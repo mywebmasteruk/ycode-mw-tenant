@@ -60,7 +60,8 @@ const BG_IMAGE_PROPS = ['backgroundImage', 'backgroundSize', 'backgroundPosition
 const isTextLayer = isTextContentLayer;
 
 const BackgroundsControls = memo(function BackgroundsControls({ layer, onLayerUpdate, activeTextStyleKey, fieldGroups, allFields, collections }: BackgroundsControlsProps) {
-  const { activeBreakpoint, activeUIState } = useEditorStore();
+  const activeBreakpoint = useEditorStore((s) => s.activeBreakpoint);
+  const activeUIState = useEditorStore((s) => s.activeUIState);
   const openFileManager = useEditorStore((state) => state.openFileManager);
   const { updateDesignProperty, debouncedUpdateDesignProperty, getDesignProperty } = useDesignSync({
     layer,

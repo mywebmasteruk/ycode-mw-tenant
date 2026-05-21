@@ -2,6 +2,7 @@ import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 import { tenantHasCollectionAccess } from '@/lib/masjidweb/tenant-query';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getKnexClient } from '@/lib/knex-client';
 import { SUPABASE_QUERY_LIMIT } from '@/lib/supabase-constants';
 import type { CollectionItem, CollectionItemWithValues } from '@/types';
 import { randomUUID } from 'crypto';
@@ -271,25 +272,21 @@ export async function getItemsByCollectionId(
 }
 
 /**
- * Enrich draft items with computed status values for the Status field.
- * Injects `{ is_publishable, is_published, is_modified }` JSON into each item's
- * values map under the status field's ID, matching the old project's format.
+ * Fetch the published-counterpart content hash for a set of draft item IDs.
+ * Backfills any rows missing a hash so subsequent calls are cheap. Exposed
+ * so callers (e.g. the batch endpoint) can fetch once for many collections.
  */
-export async function enrichItemsWithStatus(
-  items: CollectionItemWithValues[],
-  collectionId: string,
-  statusFieldId: string | null,
-): Promise<void> {
-  if (!statusFieldId || items.length === 0) return;
+export async function fetchPublishedHashMap(
+  itemIds: string[],
+): Promise<Map<string, string | null>> {
+  const publishedHashMap = new Map<string, string | null>();
+  if (itemIds.length === 0) return publishedHashMap;
 
   const client = await getSupabaseAdmin();
   if (!client) throw new Error('Supabase client not configured');
 
-  const itemIds = items.map(item => item.id);
-
   const tenantId = await resolveEffectiveTenantId();
 
-  // Fetch published counterparts (id + content_hash) in one query
   let publishedRows: Array<{ id: string; content_hash: string | null }> | null = null;
   try {
     let pubQ = client
@@ -313,9 +310,9 @@ export async function enrichItemsWithStatus(
     console.error('Network error fetching published items for status:', err);
   }
 
-  const publishedHashMap = new Map<string, string | null>(
-    (publishedRows || []).map(row => [row.id, row.content_hash])
-  );
+  for (const row of publishedRows || []) {
+    publishedHashMap.set(row.id, row.content_hash);
+  }
 
   // Backfill published items that have null content_hash
   const itemsMissingHash = (publishedRows || []).filter(row => row.content_hash == null);
@@ -338,8 +335,30 @@ export async function enrichItemsWithStatus(
     await Promise.all(backfillPromises);
   }
 
+  return publishedHashMap;
+}
+
+/**
+ * Enrich draft items with computed status values for the Status field.
+ * Injects `{ is_publishable, is_published, is_modified }` JSON into each item's
+ * values map under the status field's ID, matching the old project's format.
+ *
+ * Pass `publishedHashMap` (e.g. from a single batch fetch across collections)
+ * to skip the per-call DB round-trip.
+ */
+export async function enrichItemsWithStatus(
+  items: CollectionItemWithValues[],
+  collectionId: string,
+  statusFieldId: string | null,
+  publishedHashMap?: Map<string, string | null>,
+): Promise<void> {
+  if (!statusFieldId || items.length === 0) return;
+
+  const hashMap = publishedHashMap
+    ?? await fetchPublishedHashMap(items.map(item => item.id));
+
   for (const item of items) {
-    const publishedHash = publishedHashMap.get(item.id);
+    const publishedHash = hashMap.get(item.id);
     const hasPublishedVersion = publishedHash !== undefined;
     const isModified = hasPublishedVersion
       && item.content_hash != null
@@ -619,6 +638,89 @@ export async function getItemIdsByFieldValue(
   }
 
   return validItems?.map(i => i.id) || [];
+}
+
+/**
+ * Sort + paginate items by a field value at the DB level using a LEFT JOIN.
+ * Avoids fetching every item for the collection: only the requested page
+ * is materialized with full values. Items with no value for the sort field
+ * appear last (ASC) or first (DESC) so the relative ordering matches what
+ * a client-side sort would produce.
+ *
+ * Pass `knownFieldTypes` to skip the extra `collection_fields` lookup when
+ * the caller has already loaded the field schema.
+ */
+export async function getItemsSortedByField(
+  collection_id: string,
+  sortFieldId: string,
+  sortOrder: 'asc' | 'desc' = 'asc',
+  is_published: boolean = false,
+  limit: number = 25,
+  offset: number = 0,
+  search?: string,
+  knownFieldTypes?: Record<string, string>,
+): Promise<{ items: CollectionItemWithValues[], total: number }> {
+  const knex = await getKnexClient();
+
+  const safeSortOrder = sortOrder === 'desc' ? 'DESC' : 'ASC';
+  const nullsPosition = safeSortOrder === 'ASC' ? 'NULLS LAST' : 'NULLS FIRST';
+
+  let searchItemIds: string[] | null = null;
+  if (search?.trim()) {
+    const searchTerm = `%${search.trim()}%`;
+    const matchRows = await knex('collection_item_values')
+      .distinct('item_id')
+      .where('is_published', is_published)
+      .whereNull('deleted_at')
+      .andWhereILike('value', searchTerm);
+
+    if (matchRows.length === 0) return { items: [], total: 0 };
+    searchItemIds = matchRows.map((r: { item_id: string }) => r.item_id);
+  }
+
+  let baseQuery = knex('collection_items as ci')
+    .leftJoin('collection_item_values as civ', function () {
+      this.on('civ.item_id', 'ci.id')
+        .andOn('civ.is_published', knex.raw('?', [is_published]))
+        .andOn('civ.field_id', knex.raw('?', [sortFieldId]))
+        .andOn(knex.raw('civ.deleted_at IS NULL'));
+    })
+    .where('ci.collection_id', collection_id)
+    .andWhere('ci.is_published', is_published)
+    .whereNull('ci.deleted_at');
+
+  if (is_published) {
+    baseQuery = baseQuery.andWhere('ci.is_publishable', true);
+  }
+  if (searchItemIds) {
+    baseQuery = baseQuery.whereIn('ci.id', searchItemIds);
+  }
+
+  const [countResult, rows] = await Promise.all([
+    baseQuery.clone().count('ci.id as count').first(),
+    baseQuery.clone()
+      .select('ci.*')
+      .orderByRaw(`civ.value ${safeSortOrder} ${nullsPosition}`)
+      .orderBy('ci.manual_order', 'asc')
+      .limit(limit)
+      .offset(offset),
+  ]);
+
+  const total = Number(countResult?.count) || 0;
+
+  if (rows.length === 0) {
+    return { items: [], total };
+  }
+
+  const itemIds = rows.map((r: CollectionItem) => r.id);
+  const valuesByItem = await getValuesByItemIds(itemIds, is_published, knownFieldTypes);
+
+  const items: CollectionItemWithValues[] = rows.map((row: CollectionItem) => ({
+    ...row,
+    values: valuesByItem[row.id] || {},
+  }));
+
+  return { items, total };
 }
 
 /**

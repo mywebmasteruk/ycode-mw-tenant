@@ -1,7 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSettingByKey, setSetting } from '@/lib/repositories/settingsRepository';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
-import { clearAllCache } from '@/lib/services/cacheService';
+import { clearAllCache, getAllPublishedRoutes, warmRoutes } from '@/lib/services/cacheService';
+
+/**
+ * Setting keys that don't affect public-page rendering and therefore should
+ * NOT trigger a cache nuke when updated.
+ *
+ * - `draft_css`: builder-only preview CSS. Public pages serve `published_css`.
+ *   Saved on every edit, so invalidating here would purge every page on every
+ *   keystroke and undo selective invalidation entirely.
+ * - `email`: SMTP credentials for form submission backend. Not consumed by
+ *   public page renders.
+ *
+ * All other keys (redirects, favicon_url, ga_measurement_id, published_css,
+ * color variables, etc.) are read by public pages and DO require invalidation.
+ */
+const DRAFT_ONLY_SETTING_KEYS = new Set(['draft_css', 'email']);
 
 /**
  * GET /ycode/api/settings/[key]
@@ -56,7 +71,28 @@ export async function PUT(
 
     await setSetting(key, value);
 
-    await clearAllCache(await resolveEffectiveTenantId());
+    // Skip cache invalidation for draft/internal settings so builder
+    // autosaves don't purge the public CDN cache on every edit.
+    if (!DRAFT_ONLY_SETTING_KEYS.has(key)) {
+      // MASJIDWEB_SEAM: tenant-scoped cache clear — see docs/masjidweb-core-seams.md#tier-4
+      await clearAllCache(await resolveEffectiveTenantId());
+      // MASJIDWEB_SEAM_END
+
+      // Prime the cache so the first visit to any public page after this
+      // settings change doesn't pay the cold-cache cost. Capped inside
+      // warmRoutes; long-tail routes self-warm on first real visit.
+      try {
+        const routes = await getAllPublishedRoutes();
+        const warmResult = await warmRoutes(routes, request);
+        if (warmResult) {
+          console.log(
+            `[Cache] settings (${key}): warming ${warmResult.warmed}${warmResult.total > warmResult.warmed ? ` of ${warmResult.total}` : ''} route(s) in background`,
+          );
+        }
+      } catch {
+        // Non-fatal: warming is an optimization
+      }
+    }
 
     return NextResponse.json({
       data: { key, value },

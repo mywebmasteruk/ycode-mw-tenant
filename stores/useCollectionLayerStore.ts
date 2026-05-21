@@ -36,6 +36,7 @@ interface CollectionLayerActions {
     filters?: Array<{ fieldId: string; operator: string; value: string }>
   ) => Promise<void>;
   fetchReferencedCollectionItems: (collectionId: string) => Promise<void>;
+  fetchReferencedCollectionsBatch: (collectionIds: string[]) => Promise<void>;
   clearLayerData: (layerId: string) => void;
   clearAllLayerData: () => void;
   updateItemInLayerData: (itemId: string, values: Record<string, string>) => void;
@@ -90,6 +91,52 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
     }
   },
 
+  /**
+   * Fetch reference-display items for many collections in a single round-trip.
+   * Dedupes against already-loaded/in-flight collections so it's safe to call
+   * with the full set of referenced IDs on every canvas re-render.
+   */
+  fetchReferencedCollectionsBatch: async (collectionIds: string[]) => {
+    const { referencedItems, referencedLoading } = get();
+
+    const toFetch = collectionIds.filter(
+      (id) => !referencedItems[id] && !referencedLoading[id],
+    );
+    if (toFetch.length === 0) return;
+
+    set((state) => {
+      const nextLoading = { ...state.referencedLoading };
+      for (const id of toFetch) nextLoading[id] = true;
+      return { referencedLoading: nextLoading };
+    });
+
+    try {
+      const response = await collectionsApi.getReferencedItemsBatch(toFetch, 100);
+
+      if (response.error || !response.data?.items) {
+        throw new Error(response.error || 'Empty batch reference response');
+      }
+
+      const batchItems = response.data.items;
+      set((state) => {
+        const nextReferenced = { ...state.referencedItems };
+        const nextLoading = { ...state.referencedLoading };
+        for (const id of toFetch) {
+          nextReferenced[id] = batchItems[id]?.items || [];
+          nextLoading[id] = false;
+        }
+        return { referencedItems: nextReferenced, referencedLoading: nextLoading };
+      });
+    } catch (error) {
+      console.error('[CollectionLayerStore] Error fetching referenced items batch:', error);
+      set((state) => {
+        const nextLoading = { ...state.referencedLoading };
+        for (const id of toFetch) nextLoading[id] = false;
+        return { referencedLoading: nextLoading };
+      });
+    }
+  },
+
   // Fetch data for a specific layer
   fetchLayerData: async (
     layerId: string,
@@ -100,7 +147,7 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
     offset?: number,
     filters?: Array<{ fieldId: string; operator: string; value: string }>
   ) => {
-    const { layerData, loading, layerConfig } = get();
+    const { loading, layerConfig } = get();
 
     // Skip for virtual collections (multi-asset)
     if (collectionId === MULTI_ASSET_COLLECTION_ID) {
@@ -112,7 +159,9 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
       return;
     }
 
-    // Check if we already have data with the same config
+    // Check if we already fetched with the same config.
+    // `layerConfig[layerId]` is only set after a successful fetch, so its presence
+    // signals "already fetched" regardless of whether the result was empty.
     const existingConfig = layerConfig[layerId];
     const filtersMatch = JSON.stringify(existingConfig?.filters) === JSON.stringify(filters);
     const configMatches = existingConfig &&
@@ -123,8 +172,9 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
       existingConfig.offset === offset &&
       filtersMatch;
 
-    // Skip if we have data and config matches
-    if (layerData[layerId]?.length > 0 && configMatches) {
+    // Skip if config matches — prevents refetching when a collection legitimately
+    // returns an empty array (otherwise the layer would loop fetching forever).
+    if (configMatches) {
       return;
     }
 

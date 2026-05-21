@@ -13,6 +13,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import { useCollaborationPresenceStore, getResourceLockKey } from '@/stores/useCollaborationPresenceStore';
 import { useAuthStore } from '@/stores/useAuthStore';
 import { createClient } from '@/lib/supabase-browser';
+import { createChannelLifecycle } from '@/lib/realtime-channel';
 
 export interface UseResourceLockOptions {
   resourceType: string; // e.g., 'layer', 'collection_item'
@@ -32,7 +33,7 @@ export function useResourceLock({
   resourceType,
   channelName,
 }: UseResourceLockOptions): UseResourceLockReturn {
-  const { user } = useAuthStore();
+  const user = useAuthStore((state) => state.user);
   const currentUserId = useCollaborationPresenceStore((state) => state.currentUserId);
   const currentUserColor = useCollaborationPresenceStore((state) => state.currentUserColor);
   const storeAcquireLock = useCollaborationPresenceStore((state) => state.acquireResourceLock);
@@ -59,11 +60,14 @@ export function useResourceLock({
       return;
     }
     
+    const lifecycle = createChannelLifecycle();
+
     const initializeChannel = async () => {
       try {
         const supabase = await createClient();
         const channel = supabase.channel(channelName);
-        
+        if (!lifecycle.track(channel, supabase)) return;
+
         // Listen for lock changes from other users
         channel.on('broadcast', { event: `${resourceType}_lock_acquired` }, (payload) => {
           const { resourceId, userId, userEmail, userColor } = payload.payload;
@@ -161,19 +165,18 @@ export function useResourceLock({
           }
         });
         
+        if (lifecycle.cancelled) return;
         channelRef.current = channel;
       } catch (error) {
         console.error(`Failed to initialize ${resourceType} lock channel:`, error);
       }
     };
-    
+
     initializeChannel();
-    
+
     return () => {
-      if (channelRef.current) {
-        channelRef.current.unsubscribe();
-        channelRef.current = null;
-      }
+      lifecycle.teardown();
+      channelRef.current = null;
     };
   // Note: We use hasUser (boolean) instead of user (object) to avoid reinit on object reference changes.
   // The handlers use refs to get the latest values.

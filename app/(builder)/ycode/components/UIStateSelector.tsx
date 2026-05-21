@@ -9,7 +9,8 @@ interface UIStateSelectorProps {
 }
 
 export default function UIStateSelector({ selectedLayer }: UIStateSelectorProps) {
-  const { activeUIState, setActiveUIState } = useEditorStore();
+  const activeUIState = useEditorStore((s) => s.activeUIState);
+  const setActiveUIState = useEditorStore((s) => s.setActiveUIState);
 
   // Determine which states are applicable for the current layer
   const isDisabledApplicable = () => {

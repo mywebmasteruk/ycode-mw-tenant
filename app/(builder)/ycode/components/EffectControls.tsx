@@ -33,7 +33,8 @@ interface EffectControlsProps {
 }
 
 const EffectControls = memo(function EffectControls({ layer, onLayerUpdate, activeTextStyleKey }: EffectControlsProps) {
-  const { activeBreakpoint, activeUIState } = useEditorStore();
+  const activeBreakpoint = useEditorStore((s) => s.activeBreakpoint);
+  const activeUIState = useEditorStore((s) => s.activeUIState);
   const showTextStyleControls = useEditorStore((state) => state.showTextStyleControls());
   const { updateDesignProperty, debouncedUpdateDesignProperty, getDesignProperty } = useDesignSync({
     layer,

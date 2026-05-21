@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
-import { revalidatePath } from 'next/cache';
 import { getKnexClient } from '@/lib/knex-client';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { STORAGE_BUCKET } from '@/lib/asset-constants';
+import { clearAllCache } from '@/lib/services/cacheService';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -68,8 +68,14 @@ export async function POST() {
 
     console.log('[POST /ycode/api/devtools/reset-db] All tables dropped successfully');
 
-    revalidatePath('/', 'layout');
-    console.log('[POST /ycode/api/devtools/reset-db] Cache invalidated');
+    // Purge CDN + data caches so the public site stops serving the dropped
+    // content. No warming — there's nothing to render after a reset.
+    try {
+      await clearAllCache();
+      console.log('[POST /ycode/api/devtools/reset-db] Cache invalidated');
+    } catch (cacheError) {
+      console.error('[POST /ycode/api/devtools/reset-db] Cache invalidation failed:', cacheError);
+    }
 
     return NextResponse.json({
       data: { message: 'All public tables and storage buckets have been deleted' }

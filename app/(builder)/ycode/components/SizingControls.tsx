@@ -30,7 +30,8 @@ interface SizingControlsProps {
 }
 
 const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: SizingControlsProps) {
-  const { activeBreakpoint, activeUIState } = useEditorStore();
+  const activeBreakpoint = useEditorStore((s) => s.activeBreakpoint);
+  const activeUIState = useEditorStore((s) => s.activeUIState);
   const { updateDesignProperty, debouncedUpdateDesignProperty, getDesignProperty } = useDesignSync({
     layer,
     onLayerUpdate,
@@ -304,9 +305,11 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
   };
 
   // Get store values
-  const { currentPageId, editingComponentId } = useEditorStore();
-  const { draftsByPageId } = usePagesStore();
-  const { componentDrafts } = useComponentsStore();
+  const currentPageId = useEditorStore((s) => s.currentPageId);
+  const editingComponentId = useEditorStore((s) => s.editingComponentId);
+  const editingComponentVariantId = useEditorStore((s) => s.editingComponentVariantId);
+  const draftsByPageId = usePagesStore((s) => s.draftsByPageId);
+  const componentDrafts = useComponentsStore((s) => s.componentDrafts);
 
   // Check if parent layer has grid display
   const parentHasGrid = useMemo(() => {
@@ -314,7 +317,11 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
 
     let layers: Layer[] = [];
     if (editingComponentId) {
-      layers = componentDrafts[editingComponentId] || [];
+      const variantDrafts = componentDrafts[editingComponentId];
+      const variantId = (editingComponentVariantId && variantDrafts?.[editingComponentVariantId])
+        ? editingComponentVariantId
+        : (variantDrafts ? Object.keys(variantDrafts)[0] : null);
+      layers = (variantId && variantDrafts) ? variantDrafts[variantId] || [] : [];
     } else if (currentPageId) {
       const draft = draftsByPageId[currentPageId];
       layers = draft ? draft.layers : [];

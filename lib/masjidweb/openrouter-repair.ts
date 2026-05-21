@@ -24,6 +24,8 @@ export function stripCodeFences(text: string): string {
   if (fenced) return fenced[1].trim();
   const inline = trimmed.match(/```(?:[\w-]+)?\s*\n([\s\S]*?)```/);
   if (inline) return inline[1].trim();
+  const leadingFence = trimmed.match(/^```(?:[\w-]+)?\s*\n([\s\S]*)$/);
+  if (leadingFence) return leadingFence[1].trim();
   return trimmed;
 }
 

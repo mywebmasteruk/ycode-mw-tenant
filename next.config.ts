@@ -85,7 +85,7 @@ const nextConfig: NextConfig = {
           {
             key: 'Cache-Control',
             // `private` keeps shared caches (Netlify Edge, other CDNs) from storing HTML, so
-            // a publish + revalidateTag is visible on the next load — no edge TTL / “stale” window.
+            // a publish + revalidateTag is visible on the next load — no edge TTL / "stale" window.
             // Tenant-scoped Netlify-Cache-Tag + purge still helps internal invalidation when
             // NETLIFY_PURGE_API_TOKEN is set. `/a/*` assets stay `public, immutable` (rule above).
             value: 'private, max-age=0, must-revalidate',
