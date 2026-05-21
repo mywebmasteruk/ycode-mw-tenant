@@ -65,6 +65,16 @@ function buildSystemPrompt(): string {
   ].join('\n');
 }
 
+async function resolvePackageLockConflict(): Promise<void> {
+  console.log('Regenerating package-lock.json from package.json…');
+  run('npm install --package-lock-only --ignore-scripts');
+  run('git add package-lock.json');
+  if (!runAllowFailure('git diff --cached --quiet')) {
+    run('git commit -m "fix(ai): regenerate package-lock.json after merge"');
+    run('git push origin HEAD');
+  }
+}
+
 async function resolveConflictFile(
   apiKey: string,
   model: string,
@@ -81,6 +91,10 @@ async function resolveConflictFile(
     return;
   }
   if (original.length > MAX_FILE_CHARS) {
+    if (filePath === 'package-lock.json') {
+      await resolvePackageLockConflict();
+      return;
+    }
     throw new Error(`File too large for automated repair (${filePath})`);
   }
 

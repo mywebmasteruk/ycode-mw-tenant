@@ -1,4 +1,3 @@
-```typescript
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 import { tenantHasCollectionAccess } from '@/lib/masjidweb/tenant-query';
@@ -288,7 +287,6 @@ export async function fetchPublishedHashMap(
 
   const tenantId = await resolveEffectiveTenantId();
 
-  // Fetch published counterparts (id + content_hash) in one query
   let publishedRows: Array<{ id: string; content_hash: string | null }> | null = null;
   try {
     let pubQ = client
@@ -1679,3 +1677,62 @@ export async function publishSingleItem(itemId: string): Promise<void> {
   const draftFields = await getFieldsByCollectionId(
     draftItem.collection_id,
     false,
+    { includeSystemFields: true },
+  );
+  if (draftFields.length > 0) {
+    const fieldsToUpsert = draftFields.map(f => {
+      const rowTid =
+        tenantId ?? (f as { tenant_id?: string | null }).tenant_id ?? undefined;
+      const row: Record<string, unknown> = {
+        id: f.id,
+        name: f.name,
+        key: f.key,
+        type: f.type,
+        default: f.default,
+        fillable: f.fillable,
+        order: f.order,
+        collection_id: f.collection_id,
+        reference_collection_id: f.reference_collection_id,
+        hidden: f.hidden,
+        is_computed: f.is_computed,
+        data: f.data,
+        is_published: true,
+        created_at: f.created_at,
+        updated_at: now,
+      };
+      if (rowTid) {
+        row.tenant_id = rowTid;
+      }
+      return row;
+    });
+    await client
+      .from('collection_fields')
+      .upsert(fieldsToUpsert, { onConflict: 'id,is_published' });
+  }
+
+  const itemTid =
+    tenantId ?? (draftItem as { tenant_id?: string | null }).tenant_id ?? undefined;
+
+  const itemUpsert: Record<string, unknown> = {
+    id: draftItem.id,
+    collection_id: draftItem.collection_id,
+    manual_order: draftItem.manual_order,
+    is_publishable: true,
+    is_published: true,
+    content_hash: draftItem.content_hash,
+    created_at: draftItem.created_at,
+    updated_at: now,
+  };
+  if (itemTid) {
+    itemUpsert.tenant_id = itemTid;
+  }
+
+  // Upsert published item row
+  await client
+    .from('collection_items')
+    .upsert(itemUpsert, { onConflict: 'id,is_published' });
+
+  // Copy draft values to published via existing publishValues utility
+  const { publishValues } = await import('@/lib/repositories/collectionItemValueRepository');
+  await publishValues(itemId);
+}

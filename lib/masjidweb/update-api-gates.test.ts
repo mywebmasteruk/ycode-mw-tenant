@@ -1,3 +1,4 @@
+import packageJson from '../../package.json';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -35,14 +36,17 @@ describe('update API tenant gates', () => {
 
   it('allows update checks for template tenants', async () => {
     mocks.requireTemplateTenantForUpdates.mockResolvedValue(null);
-    mocks.checkForUpdates.mockResolvedValue({ available: false, currentVersion: '0.13.0' });
+    mocks.checkForUpdates.mockResolvedValue({
+      available: false,
+      currentVersion: packageJson.version,
+    });
 
     const response = await getCheck();
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body).toEqual({ available: false, currentVersion: '0.13.0' });
-    expect(mocks.checkForUpdates).toHaveBeenCalledWith('0.13.0');
+    expect(body).toEqual({ available: false, currentVersion: packageJson.version });
+    expect(mocks.checkForUpdates).toHaveBeenCalledWith(packageJson.version);
   });
 
   it('blocks release history before fetching GitHub releases when tenant is not template', async () => {
@@ -76,7 +80,7 @@ describe('update API tenant gates', () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body.currentVersion).toBe('0.13.0');
+    expect(body.currentVersion).toBe(packageJson.version);
     expect(body.releases).toHaveLength(1);
     expect(mocks.fetch).toHaveBeenCalledTimes(1);
   });
