@@ -1,0 +1,154 @@
+# After a safe Ycode core update is merged to main, wait for Netlify production
+# and post a GitHub summary + PR comment. GitHub emails repo watchers who enable
+# Actions notifications when this workflow finishes (success or failure).
+#
+# Skips ordinary pushes to main that are not safe-ycode-update merge commits.
+
+name: Core update production deploy
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: core-update-deploy-notify-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  notify-when-live:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: read
+    steps:
+      - name: Detect safe Ycode core update merge
+        id: gate
+        env:
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          set -euo pipefail
+          msg="${COMMIT_MESSAGE:-}"
+          if ! echo "$msg" | grep -qE 'Merge pull request #[0-9]+ from .*/safe-ycode-update/'; then
+            echo "is_core_update=false" >> "$GITHUB_OUTPUT"
+            echo "Not a safe-ycode-update merge — skipping deploy notification."
+            exit 0
+          fi
+          pr_number="$(echo "$msg" | sed -n 's/^Merge pull request #\([0-9][0-9]*\).*/\1/p')"
+          echo "is_core_update=true" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
+          echo "Safe Ycode core update merge detected (PR #${pr_number})."
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.is_core_update == 'true'
+
+      - name: Read builder package version
+        if: steps.gate.outputs.is_core_update == 'true'
+        id: pkg
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for Netlify production deploy
+        if: steps.gate.outputs.is_core_update == 'true'
+        id: netlify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 1800))
+          production_url=""
+          netlify_state="pending"
+
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            payload="$(gh api "repos/${REPO}/commits/${SHA}/status")"
+            netlify_state="$(echo "$payload" | jq -r '
+              [.statuses[]
+               | select(.context | test("netlify"; "i"))
+               | select(.context | test("deploy-preview"; "i") | not)
+              ]
+              | if length == 0 then "pending"
+                elif any(.state == "failure" or .state == "error") then "failure"
+                elif any(.state == "success") then "success"
+                else "pending"
+                end
+            ')"
+            production_url="$(echo "$payload" | jq -r '
+              [.statuses[]
+               | select(.context | test("netlify"; "i"))
+               | select(.context | test("deploy-preview"; "i") | not)
+               | select(.state == "success")
+              ][0].target_url // empty
+            ')"
+
+            echo "[$(date -u +%H:%M:%S)] Netlify production status: ${netlify_state}"
+            if [ "$netlify_state" = "success" ]; then
+              echo "state=success" >> "$GITHUB_OUTPUT"
+              echo "url=${production_url}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$netlify_state" = "failure" ]; then
+              echo "state=failure" >> "$GITHUB_OUTPUT"
+              echo "url=${production_url}" >> "$GITHUB_OUTPUT"
+              echo "::error::Netlify production deploy failed for ${SHA}"
+              exit 1
+            fi
+            sleep 30
+          done
+
+          echo "state=timeout" >> "$GITHUB_OUTPUT"
+          echo "::error::Timed out waiting for Netlify production deploy (30 minutes)."
+          exit 1
+
+      - name: Write job summary
+        if: steps.gate.outputs.is_core_update == 'true' && steps.netlify.outputs.state == 'success'
+        env:
+          PR_NUMBER: ${{ steps.gate.outputs.pr_number }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+          DEPLOY_URL: ${{ steps.netlify.outputs.url }}
+          SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "## Ycode core update — production deploy complete"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| PR | #${PR_NUMBER} |"
+            echo "| Version | \`${VERSION}\` |"
+            echo "| Commit | \`${SHA:0:12}\` |"
+            echo "| Netlify | ${DEPLOY_URL:-see Netlify dashboard} |"
+            echo ""
+            echo "Tenant subdomains now serve this build. If something looks wrong, use **Maintenance → Recovery** on the admin dashboard (restore previous live build or full rollback when a checkpoint exists)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on merged pull request
+        if: steps.gate.outputs.is_core_update == 'true' && steps.netlify.outputs.state == 'success'
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.gate.outputs.pr_number }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+          DEPLOY_URL: ${{ steps.netlify.outputs.url }}
+        with:
+          script: |
+            const prNumber = Number.parseInt(process.env.PR_NUMBER || '', 10);
+            if (!Number.isFinite(prNumber) || prNumber < 1) return;
+            const version = process.env.VERSION || 'unknown';
+            const deployUrl = process.env.DEPLOY_URL || '';
+            const sha = context.sha.slice(0, 12);
+            const body = [
+              '### Ycode core update — production deploy complete',
+              '',
+              `- **Version:** \`${version}\``,
+              `- **Commit:** \`${sha}\``,
+              deployUrl ? `- **Netlify:** ${deployUrl}` : '- **Netlify:** check the site deploys tab',
+              '',
+              'Live tenant builder traffic is on this build. If rollback is needed, use **Maintenance → Recovery** on the admin dashboard.',
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });

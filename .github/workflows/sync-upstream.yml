@@ -147,6 +147,10 @@ jobs:
             pr_number="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --json number --jq '.[0].number')"
           fi
 
+          if [ "$MERGE_STATUS" = "0" ]; then
+            gh pr ready "$pr_number" --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+          fi
+
           gh pr edit "$pr_number" --repo "$GITHUB_REPOSITORY" --add-label "safe-ycode-update"
           if [ "$MERGE_STATUS" != "0" ] || grep -q "Status: high" /tmp/update-safety-report.md; then
             gh pr edit "$pr_number" --repo "$GITHUB_REPOSITORY" --add-label "needs-developer-review,tenant-sensitive-update"

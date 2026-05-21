@@ -4,6 +4,8 @@ This repository is a MasjidWeb production fork of Ycode. It contains MasjidWeb-s
 
 Do not apply upstream Ycode updates directly to `main`, and do not use one-click "Sync fork" for production without review.
 
+**Operator workflow (prepare → preview → approve → full rollback):** see [CORE_UPDATE_WORKFLOW.md](../../masjidweb-backend/docs/CORE_UPDATE_WORKFLOW.md) in the admin backend repo.
+
 ## Current in-app update behavior
 
 The builder update screen is informational only:

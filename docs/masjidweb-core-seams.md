@@ -4,7 +4,7 @@ This document is the **contract** for how MasjidWeb customizes Ycode while keepi
 
 **Goal:** tenant isolation stays correct; upstream Ycode updates stay **repeatable** by re-applying a **known, small set** of patterns instead of rediscovering drift on every merge.
 
-**Related:** [core-update-process.md](./core-update-process.md), backend [UPSTREAM_MERGE_HOTSPOTS.md](../../masjidweb-backend/docs/UPSTREAM_MERGE_HOTSPOTS.md), [TENANCY.md](../../masjidweb-backend/docs/TENANCY.md).
+**Related:** [core-update-process.md](./core-update-process.md), [CORE_UPDATE_WORKFLOW.md](../../masjidweb-backend/docs/CORE_UPDATE_WORKFLOW.md), backend [UPSTREAM_MERGE_HOTSPOTS.md](../../masjidweb-backend/docs/UPSTREAM_MERGE_HOTSPOTS.md), [TENANCY.md](../../masjidweb-backend/docs/TENANCY.md).
 
 ---
 
