@@ -378,16 +378,15 @@ function FileGridItem({
                         dangerouslySetInnerHTML={{ __html: content }}
                       />
                     ) : imageUrl ? (
-                      // Image URL
+                      // Image URL — small images stay at natural size and are centered;
+                      // larger ones are constrained to fit the container.
                       <>
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
-                          className="relative w-full h-full object-contain pointer-events-none rounded-md z-10"
+                          className="relative max-w-full max-h-full object-contain pointer-events-none rounded-md z-10"
                           src={getOptimizedImageUrl(imageUrl)}
                           alt={name}
                           loading="lazy"
-                          width={110}
-                          height={110}
                         />
                       </>
                     ) : null}
@@ -430,11 +429,9 @@ function FileGridItem({
                     <>
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
-                        className="relative w-full h-full object-contain pointer-events-none opacity-40 z-10"
+                        className="relative max-w-full max-h-full object-contain pointer-events-none opacity-40 z-10"
                         src={URL.createObjectURL(file)}
                         alt={name}
-                        width={110}
-                        height={110}
                       />
                       <div className="absolute inset-0 flex items-center justify-center bg-background/20 z-20">
                         <Spinner className="size-10 opacity-60" />
