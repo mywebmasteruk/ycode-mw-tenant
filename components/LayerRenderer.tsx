@@ -22,7 +22,7 @@ import { DEFAULT_ASSETS, ASSET_CATEGORIES, isAssetOfType } from '@/lib/asset-uti
 import { parseMultiAssetFieldValue, buildAssetVirtualValues } from '@/lib/multi-asset-utils';
 import { parseMultiReferenceValue, resolveReferenceFieldsSync } from '@/lib/collection-utils';
 import { MULTI_ASSET_COLLECTION_ID } from '@/lib/collection-field-utils';
-import { generateImageSrcset, getImageSizes, getOptimizedImageUrl } from '@/lib/asset-utils';
+import { buildImageSizes, generateImageSrcset, getOptimizedImageUrl, parseImageDimension } from '@/lib/asset-utils';
 import { useEditorStore } from '@/stores/useEditorStore';
 import { toast } from 'sonner';
 import { resolveInlineVariablesFromData } from '@/lib/inline-variables';
@@ -607,45 +607,49 @@ const LayerItemImpl: React.FC<{
   const textVariable = layer.variables?.text;
   let useSpanForParagraphs = false;
 
-  if (!isSimpleTextLayer) {
-    const restrictiveBlockTags = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'span', 'a', 'button'];
-    const isRestrictiveTag = restrictiveBlockTags.includes(htmlTag);
+  const restrictiveBlockTags = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'span', 'a', 'button'];
+  const isRestrictiveTag = restrictiveBlockTags.includes(htmlTag);
 
-    if (isRestrictiveTag) {
-      let hasLists = false;
+  if (isRestrictiveTag) {
+    let hasLists = false;
 
-      if (textVariable?.type === 'dynamic_rich_text') {
-        hasLists = hasBlockElementsWithInlineVariables(
-          textVariable as any,
-          collectionLayerData,
-          pageCollectionItemData || undefined
-        );
-      }
+    if (textVariable?.type === 'dynamic_rich_text') {
+      hasLists = hasBlockElementsWithInlineVariables(
+        textVariable as any,
+        collectionLayerData,
+        pageCollectionItemData || undefined
+      );
+    }
 
-      // Also check resolved component variable value for block elements
-      if (!hasLists) {
-        const componentVariables = parentComponentVariables || editingComponentVariables;
-        const linkedVariableId = (textVariable as any)?.id;
-        if (linkedVariableId && componentVariables) {
-          const variableDef = componentVariables.find(v => v.id === linkedVariableId);
-          const overrideCategory = variableDef?.type === 'rich_text' ? 'rich_text' : 'text';
-          const overrideValue = parentComponentOverrides?.[overrideCategory]?.[linkedVariableId];
-          const valueToCheck = overrideValue ?? variableDef?.default_value;
-          if (valueToCheck && 'type' in valueToCheck && valueToCheck.type === 'dynamic_rich_text') {
-            hasLists = hasBlockElementsWithInlineVariables(
-              valueToCheck as any,
-              collectionLayerData,
-              pageCollectionItemData || undefined
-            );
-          }
+    // Also check resolved component variable value for block elements
+    if (!hasLists) {
+      const componentVariables = parentComponentVariables || editingComponentVariables;
+      const linkedVariableId = (textVariable as any)?.id;
+      if (linkedVariableId && componentVariables) {
+        const variableDef = componentVariables.find(v => v.id === linkedVariableId);
+        const overrideCategory = variableDef?.type === 'rich_text' ? 'rich_text' : 'text';
+        const overrideValue = parentComponentOverrides?.[overrideCategory]?.[linkedVariableId];
+        const valueToCheck = overrideValue ?? variableDef?.default_value;
+        if (valueToCheck && 'type' in valueToCheck && valueToCheck.type === 'dynamic_rich_text') {
+          hasLists = hasBlockElementsWithInlineVariables(
+            valueToCheck as any,
+            collectionLayerData,
+            pageCollectionItemData || undefined
+          );
         }
       }
+    }
 
-      if (hasLists) {
-        htmlTag = 'div';
-      } else if (textVariable?.type === 'dynamic_rich_text' || (textVariable as any)?.id) {
-        useSpanForParagraphs = true;
-      }
+    if (hasLists) {
+      // Block-level expansion (lists, tables, embedded components) cannot live
+      // inside <p>/<h*>/<span>; switch the wrapper to a <div> regardless of
+      // whether this is a simple text layer or a richText layer.
+      htmlTag = 'div';
+    } else if (!isSimpleTextLayer && (textVariable?.type === 'dynamic_rich_text' || (textVariable as any)?.id)) {
+      // For non-simple-text layers with rich-text content but no block
+      // expansion, render paragraphs as <span class="block"> to keep them
+      // valid inside the existing wrapper.
+      useSpanForParagraphs = true;
     }
   }
 
@@ -2168,9 +2172,11 @@ const LayerItemImpl: React.FC<{
       // Use default image if URL is empty or invalid
       const finalImageUrl = imageUrl && imageUrl.trim() !== '' ? imageUrl : DEFAULT_ASSETS.IMAGE;
 
-      // Resolve intrinsic dimensions: explicit attributes > asset record > URL reverse-lookup
-      let imgWidth = layer.attributes?.width != null ? String(layer.attributes.width) : undefined;
-      let imgHeight = layer.attributes?.height != null ? String(layer.attributes.height) : undefined;
+      // Resolve intrinsic dimensions: explicit attributes > asset record > URL reverse-lookup.
+      // Zero/invalid attribute values are ignored so the asset fallback still runs
+      // (e.g. when a layer stores width="0" from an older bug or manual edit).
+      let imgWidth: string | undefined = parseImageDimension(layer.attributes?.width as string | number | undefined)?.toString();
+      let imgHeight: string | undefined = parseImageDimension(layer.attributes?.height as string | number | undefined)?.toString();
 
       if (!imgWidth || !imgHeight) {
         const assetId = isAssetVariable(imageVariable) ? getAssetId(imageVariable) : undefined;
@@ -2204,17 +2210,14 @@ const LayerItemImpl: React.FC<{
       // download a more appropriately sized variant on desktop. Falls back
       // to `100vw` when width is unknown.
       const explicitSizes = (layer.attributes?.sizes as string | undefined)?.trim();
-      const widthForSizes = imgWidth && /^\d+(\.\d+)?(px)?$/i.test(imgWidth)
-        ? imgWidth.replace(/px$/i, '')
-        : null;
-      const sizes = explicitSizes
-        || (widthForSizes ? `(max-width: 768px) 100vw, ${widthForSizes}px` : getImageSizes());
+      const intrinsicWidth = parseImageDimension(imgWidth);
+      const intrinsicHeight = parseImageDimension(imgHeight);
+      const sizes = explicitSizes || buildImageSizes(intrinsicWidth);
 
       // Pass intrinsic width so srcset descriptors don't exceed the source's
       // natural size (the proxy won't upscale; mismatched descriptors break
       // browser intrinsic-dimension math and shrink the rendered image).
-      const intrinsicWidthForSrcset = widthForSizes ? parseInt(widthForSizes, 10) : null;
-      const srcset = generateImageSrcset(finalImageUrl, undefined, undefined, intrinsicWidthForSrcset);
+      const srcset = generateImageSrcset(finalImageUrl, undefined, undefined, intrinsicWidth);
 
       const imageProps: Record<string, any> = {
         ...elementProps,
@@ -2223,8 +2226,12 @@ const LayerItemImpl: React.FC<{
         decoding: 'async',
       };
 
-      if (imgWidth) imageProps.width = imgWidth;
-      if (imgHeight) imageProps.height = imgHeight;
+      // Set only positive intrinsic values; otherwise drop any `width="0"`/
+      // `height="0"` that leaked in via normalizedAttributes.
+      if (intrinsicWidth) imageProps.width = intrinsicWidth;
+      else delete imageProps.width;
+      if (intrinsicHeight) imageProps.height = intrinsicHeight;
+      else delete imageProps.height;
       if (effectiveLoading) imageProps.loading = effectiveLoading;
       if (isLcpCandidate) imageProps.fetchPriority = 'high';
 

@@ -97,6 +97,16 @@ export default function GeneralSettingsPage() {
   const [fileManagerOpen, setFileManagerOpen] = useState(false);
   const [fileManagerMode, setFileManagerMode] = useState<'favicon' | 'webclip'>('favicon');
 
+  // Stable category filter — favicon accepts both raster images and SVG icons.
+  // Memoized to avoid creating a new array on every render, which would cause
+  // the file manager to reload its asset list in a loop.
+  const fileManagerCategory = useMemo(
+    () => fileManagerMode === 'favicon'
+      ? [ASSET_CATEGORIES.IMAGES, ASSET_CATEGORIES.ICONS]
+      : ASSET_CATEGORIES.IMAGES,
+    [fileManagerMode],
+  );
+
   // Assets store for getting asset details
   const assetsById = useAssetsStore((state) => state.assetsById);
   const addAssetsToCache = useAssetsStore((state) => state.addAssetsToCache);
@@ -212,17 +222,21 @@ export default function GeneralSettingsPage() {
       return false;
     }
 
-    // Validate dimensions
-    if (!asset.width || !asset.height) {
-      toast.error(`Unable to determine image dimensions`);
-      return false;
-    }
+    // SVGs scale without quality loss; skip dimension checks entirely
+    const isSvg = asset.mime_type === 'image/svg+xml';
 
-    if (asset.width < minSize || asset.height < minSize) {
-      toast.error(`${label} must be at least ${minSize}x${minSize} pixels`, {
-        description: `Selected image is ${asset.width}x${asset.height} pixels`,
-      });
-      return false;
+    if (!isSvg) {
+      if (!asset.width || !asset.height) {
+        toast.error(`Unable to determine image dimensions`);
+        return false;
+      }
+
+      if (asset.width < minSize || asset.height < minSize) {
+        toast.error(`${label} must be at least ${minSize}x${minSize} pixels`, {
+          description: `Selected image is ${asset.width}x${asset.height} pixels`,
+        });
+        return false;
+      }
     }
 
     // Set the asset ID
@@ -771,7 +785,7 @@ export default function GeneralSettingsPage() {
         onOpenChange={setFileManagerOpen}
         onAssetSelect={handleAssetSelect}
         assetId={fileManagerMode === 'favicon' ? faviconAssetId || null : webClipAssetId || null}
-        category={ASSET_CATEGORIES.IMAGES}
+        category={fileManagerCategory}
       />
 
       {/* Reset Project Confirmation Dialog */}

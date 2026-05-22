@@ -54,6 +54,7 @@ import { CollectionFieldSelector } from './CollectionFieldSelector';
 import SelectionOverlay from '@/components/SelectionOverlay';
 import RichTextLinkPopover from './RichTextLinkPopover';
 import PageSelector from './PageSelector';
+import CollectionItemSelector from './CollectionItemSelector';
 import RichTextEditorSheet from './RichTextEditorSheet';
 
 // 6. Utils
@@ -644,6 +645,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
   const isPreviewMode = useEditorStore((state) => state.isPreviewMode);
   const activeSidebarTab = useEditorStore((state) => state.activeSidebarTab);
   const activeInteractionTriggerLayerId = useEditorStore((state) => state.activeInteractionTriggerLayerId);
+  const activeInteractionTargetLayerIds = useEditorStore((state) => state.activeInteractionTargetLayerIds);
   const richTextSheetLayerId = useEditorStore((state) => state.richTextSheetLayerId);
   const closeRichTextSheet = useEditorStore((state) => state.closeRichTextSheet);
   const activeSublayerIndex = useEditorStore((state) => state.activeSublayerIndex);
@@ -710,7 +712,6 @@ const CenterCanvas = React.memo(function CenterCanvas({
     setReportedContentWidth(0);
   }, [editingComponentId]);
 
-  const getDropdownItems = useCollectionsStore((state) => state.getDropdownItems);
   const collectionItemsFromStore = useCollectionsStore((state) => state.items);
   const collectionsFromStore = useCollectionsStore((state) => state.collections);
   const collectionFieldsFromStore = useCollectionsStore((state) => state.fields);
@@ -737,9 +738,6 @@ const CenterCanvas = React.memo(function CenterCanvas({
     if (editingComponentVariantId && drafts[editingComponentVariantId]) return editingComponentVariantId;
     return Object.keys(drafts)[0] || null;
   }, [editingComponentId, editingComponentVariantId, componentDrafts]);
-  const [collectionItems, setCollectionItems] = useState<Array<{ id: string; label: string }>>([]);
-  const [collectionItemSearch, setCollectionItemSearch] = useState('');
-
   // Get editing component's variables for default value display
   // Depends on `components` array to react to variable changes
   const editingComponentVariables = useMemo(() => {
@@ -747,7 +745,6 @@ const CenterCanvas = React.memo(function CenterCanvas({
     const component = components.find(c => c.id === editingComponentId);
     return component?.variables;
   }, [editingComponentId, components]);
-  const [isLoadingItems, setIsLoadingItems] = useState(false);
 
   // Undo/Redo hook - tracks versions for the current entity (page or component)
   const undoRedoEntityType = editingComponentId ? 'component' : 'page_layers';
@@ -1997,34 +1994,6 @@ const CenterCanvas = React.memo(function CenterCanvas({
     setupPreviewMeasurement();
   }, [setupPreviewMeasurement]);
 
-  // Load collection items when dynamic page is selected
-  useEffect(() => {
-    if (!collectionId || !currentPage?.is_dynamic) {
-      setCollectionItems([]);
-      setIsLoadingItems(false);
-      return;
-    }
-
-    const loadItems = async () => {
-      setIsLoadingItems(true);
-      try {
-        const itemsWithLabels = await getDropdownItems(collectionId);
-        setCollectionItems(itemsWithLabels);
-        // Auto-select first item if none selected
-        if (!currentPageCollectionItemId && itemsWithLabels.length > 0) {
-          setCurrentPageCollectionItemId(itemsWithLabels[0].id);
-        }
-      } catch (error) {
-        console.error('Failed to load collection items:', error);
-      } finally {
-        setIsLoadingItems(false);
-      }
-    };
-
-    loadItems();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [collectionId, currentPage?.is_dynamic, getDropdownItems]);
-
   // Get return page for component edit mode
   const returnToPage = useMemo(() => {
     return returnToPageId ? pages.find(p => p.id === returnToPageId) : null;
@@ -2182,64 +2151,11 @@ const CenterCanvas = React.memo(function CenterCanvas({
 
             {/* Collection item selector for dynamic pages */}
             {currentPage?.is_dynamic && collectionId && (
-              <Select
-                value={currentPageCollectionItemId || ''}
-                onValueChange={(value) => {
-                  setCurrentPageCollectionItemId(value);
-                  setCollectionItemSearch('');
-                }}
-                onOpenChange={(open) => {
-                  if (!open) setCollectionItemSearch('');
-                }}
-                disabled={isLoadingItems || collectionItems.length === 0}
-              >
-                <SelectTrigger className="w-24 justify-between" size="sm">
-                  {isLoadingItems ? (
-                    <Spinner className="size-3" />
-                  ) : (
-                    <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <span className="shrink-0">
-                            <Icon name="database" className="size-3 opacity-50" />
-                          </span>
-                        </TooltipTrigger>
-                        <TooltipContent>Collection item</TooltipContent>
-                      </Tooltip>
-                      <span className="truncate">
-                        {collectionItems.find(item => item.id === currentPageCollectionItemId)?.label || 'Select item'}
-                      </span>
-                    </div>
-                  )}
-                </SelectTrigger>
-
-                <SelectContent
-                  searchable
-                  searchValue={collectionItemSearch}
-                  onSearchChange={setCollectionItemSearch}
-                  searchPlaceholder="Search items..."
-                  align="start"
-                  className="w-72"
-                >
-                  {(() => {
-                    const filtered = collectionItems.filter(item =>
-                      item.label.toLowerCase().includes(collectionItemSearch.toLowerCase())
-                    );
-                    if (filtered.length === 0) {
-                      return (
-                        <div className="px-2 py-4 text-center text-xs text-muted-foreground">
-                          {collectionItemSearch ? 'No items found' : 'No items available'}
-                        </div>
-                      );
-                    }
-                    return filtered.map((item) => (
-                      <SelectItem key={item.id} value={item.id}>
-                        {item.label}
-                      </SelectItem>
-                    ));
-                  })()}
-                </SelectContent>
-              </Select>
+              <CollectionItemSelector
+                collectionId={collectionId}
+                value={currentPageCollectionItemId}
+                onValueChange={setCurrentPageCollectionItemId}
+              />
             )}
           </div>
         )}
@@ -2685,7 +2601,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
                         onCanvasClick={handleCanvasClick}
                         onComponentEdit={handleCanvasComponentEdit}
                         editingComponentVariables={editingComponentVariables}
-                        disableEditorHiddenLayers={!!activeInteractionTriggerLayerId}
+                        forceVisibleLayerIds={activeInteractionTriggerLayerId ? activeInteractionTargetLayerIds : undefined}
                         zoom={zoom}
                         referenceViewportHeight={defaultCanvasHeight}
                       />

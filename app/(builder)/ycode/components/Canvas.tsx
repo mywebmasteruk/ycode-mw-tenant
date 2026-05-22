@@ -105,8 +105,8 @@ interface CanvasProps {
   onComponentEdit?: (componentId: string, instanceLayerId: string) => void;
   /** Component variables when editing a component (for default value display) */
   editingComponentVariables?: ComponentVariable[];
-  /** Disable editor hidden layers (e.g., when Interactions panel is active) */
-  disableEditorHiddenLayers?: boolean;
+  /** Layer IDs to force-show even if they have display:hidden apply_styles */
+  forceVisibleLayerIds?: string[];
   /** Current canvas zoom percentage (100 = 100%) */
   zoom?: number;
   /** Fixed viewport height for stable measurement of content using vh/svh/dvh units */
@@ -314,7 +314,7 @@ const Canvas = React.memo(function Canvas({
   onCanvasClick,
   onComponentEdit,
   editingComponentVariables,
-  disableEditorHiddenLayers = false,
+  forceVisibleLayerIds,
   zoom = 100,
   referenceViewportHeight,
   currentLocale,
@@ -390,10 +390,14 @@ const Canvas = React.memo(function Canvas({
   }, [enrichedPageCollectionItemDataRaw]);
 
   // Collect layer IDs that should be hidden on canvas (display: hidden with on-load)
+  // Exclude layers that are force-visible (targets of the active interaction)
   const editorHiddenLayerIds = useMemo(() => {
-    if (disableEditorHiddenLayers) return undefined;
-    return collectEditorHiddenLayerIds(resolvedLayers);
-  }, [resolvedLayers, disableEditorHiddenLayers]);
+    const hiddenMap = collectEditorHiddenLayerIds(resolvedLayers);
+    if (forceVisibleLayerIds && forceVisibleLayerIds.length > 0) {
+      forceVisibleLayerIds.forEach(id => hiddenMap.delete(id));
+    }
+    return hiddenMap;
+  }, [resolvedLayers, forceVisibleLayerIds]);
 
   // Handle layer click with component resolution
   const handleLayerClick = useCallback((layerId: string, event?: React.MouseEvent) => {
