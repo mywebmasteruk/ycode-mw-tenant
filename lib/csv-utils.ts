@@ -356,6 +356,51 @@ export interface ParsedCSV {
 }
 
 /**
+ * Escape a single CSV field (RFC 4180): wraps in quotes when needed and
+ * doubles internal quote characters.
+ */
+function escapeCSVField(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  const str = String(value);
+  if (/[",\r\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+/**
+ * Convert an array of objects into a CSV string. The provided headers
+ * define both the column order and the keys read from each row.
+ */
+export function rowsToCSV<T extends Record<string, unknown>>(
+  headers: string[],
+  rows: T[]
+): string {
+  const headerLine = headers.map(escapeCSVField).join(',');
+  const dataLines = rows.map((row) =>
+    headers.map((header) => escapeCSVField(row[header])).join(',')
+  );
+  return [headerLine, ...dataLines].join('\n');
+}
+
+/**
+ * Trigger a browser download for the given CSV string. No-op on the server.
+ */
+export function downloadCSV(csv: string, filename: string): void {
+  if (typeof window === 'undefined') return;
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+/**
  * Parse CSV text into headers and rows.
  * Handles quoted fields, escaped quotes, and multi-line values inside quotes.
  */

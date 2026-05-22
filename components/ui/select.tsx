@@ -8,6 +8,7 @@ import { cva, type VariantProps } from 'class-variance-authority'
 import { cn } from '@/lib/utils'
 import Icon from '@/components/ui/icon';
 import { Input } from '@/components/ui/input';
+import { Spinner } from '@/components/ui/spinner';
 
 function Select({
   ...props
@@ -108,12 +109,14 @@ function SelectContent({
   searchValue,
   onSearchChange,
   searchPlaceholder,
+  searchLoading,
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Content> & {
   searchable?: boolean;
   searchValue?: string;
   onSearchChange?: (value: string) => void;
   searchPlaceholder?: string;
+  searchLoading?: boolean;
 }) {
   const searchInputRef = React.useRef<HTMLInputElement>(null);
   const isSearchFocusedRef = React.useRef(false);
@@ -139,22 +142,28 @@ function SelectContent({
             onPointerDown={(e) => e.stopPropagation()}
             onPointerUp={(e) => e.stopPropagation()}
           >
-            <Input
-              ref={searchInputRef}
-              size="xs"
-              placeholder={searchPlaceholder || 'Search...'}
-              value={searchValue}
-              onChange={(e) => onSearchChange?.(e.target.value)}
-              onKeyDown={(e) => e.stopPropagation()}
-              onFocus={() => { isSearchFocusedRef.current = true; }}
-              onBlur={() => {
-                requestAnimationFrame(() => {
-                  if (isSearchFocusedRef.current) {
-                    searchInputRef.current?.focus();
-                  }
-                });
-              }}
-            />
+            <div className="relative">
+              <Input
+                ref={searchInputRef}
+                size="xs"
+                placeholder={searchPlaceholder || 'Search...'}
+                value={searchValue}
+                onChange={(e) => onSearchChange?.(e.target.value)}
+                onKeyDown={(e) => e.stopPropagation()}
+                onFocus={() => { isSearchFocusedRef.current = true; }}
+                onBlur={() => {
+                  requestAnimationFrame(() => {
+                    if (isSearchFocusedRef.current) {
+                      searchInputRef.current?.focus();
+                    }
+                  });
+                }}
+                className={cn(searchLoading && 'pr-7')}
+              />
+              {searchLoading && (
+                <Spinner className="absolute right-2 top-1/2 -translate-y-1/2 size-3.5" />
+              )}
+            </div>
           </div>
         )}
         <SelectScrollUpButton />
