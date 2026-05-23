@@ -2300,6 +2300,12 @@ const LayerItemImpl: React.FC<{
         elementProps.name = layer.settings?.id || layer.id;
       }
 
+      // Drop null/undefined value so the select can fall back to defaultValue
+      // (React warns about a null value prop on <select>).
+      if ('value' in elementProps && elementProps.value == null) {
+        delete elementProps.value;
+      }
+
       // In edit mode, keep value controlled (canvas selects aren't interactive)
       // so the rendered selection reflects default changes in real time.
       // In preview/published, convert to defaultValue so the field is uncontrolled
