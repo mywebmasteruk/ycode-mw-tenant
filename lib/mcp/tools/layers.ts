@@ -640,6 +640,50 @@ COMMON USES:
   );
 
   server.tool(
+    'update_form_settings',
+    `Configure how a form layer handles submissions.
+
+success_action: "message" (default) shows the form's alert child; "redirect" sends the visitor to redirect_url.
+email_notification: when enabled, each submission emails the configured address. Requires SMTP set up in site settings.
+redirect_url: used when success_action is "redirect". Accepts an internal path "/thank-you" or an external URL.`,
+    {
+      page_id: z.string().describe('The page ID'),
+      layer_id: z.string().describe('The form layer ID'),
+      success_action: z.enum(['message', 'redirect']).optional(),
+      redirect_url: z.string().optional()
+        .describe('For success_action "redirect": the URL to send the user to.'),
+      email_notification: z.object({
+        enabled: z.boolean(),
+        to: z.string().describe('Email address that receives a notification on each submission'),
+        subject: z.string().optional().describe('Subject line of the notification email'),
+      }).optional(),
+    },
+    async ({ page_id, layer_id, success_action, redirect_url, email_notification }) => {
+      const layers = await getPageLayers(page_id);
+      const layer = findLayerById(layers, layer_id);
+      if (!layer) {
+        return { content: [{ type: 'text' as const, text: `Error: Layer "${layer_id}" not found.` }], isError: true };
+      }
+
+      const updated = updateLayerById(layers, layer_id, (l) => {
+        const settings = { ...l.settings };
+        const existingForm = (settings.form || {}) as Record<string, unknown>;
+        const nextForm: Record<string, unknown> = { ...existingForm };
+        if (success_action !== undefined) nextForm.success_action = success_action;
+        if (email_notification !== undefined) nextForm.email_notification = email_notification;
+        if (redirect_url !== undefined) {
+          nextForm.redirect_url = { type: 'dynamic_text', data: { content: redirect_url } };
+        }
+        settings.form = nextForm as typeof settings.form;
+        return { ...l, settings };
+      });
+
+      await savePageLayers(page_id, updated);
+      return { content: [{ type: 'text' as const, text: `Updated form settings for "${layer.customName || layer.name}"` }] };
+    },
+  );
+
+  server.tool(
     'export_layer_html',
     `Render a layer (and its descendants) to a self-contained HTML string with Tailwind
 classes preserved. Useful for copying a section, sharing markup, or seeding another
