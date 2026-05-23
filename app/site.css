@@ -42,6 +42,20 @@
   }
 }
 
+/* Force inline SVG fill/stroke attributes (even on nested nodes) to inherit
+   the icon layer's text color — matches the legacy `<i>` wrapper behavior so
+   migrated icons with hard-coded colors still tint with `text-*` utilities.
+   Note: must not blanket-apply `fill: currentColor` to the root <svg>, since
+   that would override `fill="none"` and solid-fill stroke-only icons. */
+[data-icon] [fill]:not([fill="none"]) {
+  fill: currentColor;
+}
+
+[data-icon] [stroke]:not([stroke="none"]),
+[data-icon] [stroke-width] {
+  stroke: currentColor;
+}
+
 /* Custom dropdown chevron for native <select> elements on published pages.
    The native arrow is removed by the inline `ycode-form-reset` styles in
    PageRenderer.tsx; this rule restores a consistent chevron. */

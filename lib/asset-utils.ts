@@ -385,8 +385,14 @@ export function getOptimizedImageUrl(
 
   try {
     if (isProxyUrl(url)) {
-      const separator = url.includes('?') ? '&' : '?';
-      return `${url}${separator}width=${width}&quality=${quality}`;
+      // Use URL parsing against a dummy base so we can `.set()` rather than
+      // append — the store may have already rewritten `public_url` to include
+      // its own `width`/`quality`, and naive concatenation would emit them
+      // twice (e.g. `?width=1920&quality=80&width=200&quality=80`).
+      const proxyUrl = new URL(url, 'http://localhost');
+      proxyUrl.searchParams.set('width', width.toString());
+      proxyUrl.searchParams.set('quality', quality.toString());
+      return `${proxyUrl.pathname}${proxyUrl.search}`;
     }
 
     const urlObj = new URL(url);

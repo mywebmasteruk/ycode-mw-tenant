@@ -1666,6 +1666,11 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
                             <div className="bg-input rounded-lg w-full aspect-[1.91/1] flex items-center justify-center overflow-hidden relative">
                               {isSeoImageFieldVariable(seoImage) ? null : (() => {
                                 const imageUrl = seoImageAsset?.public_url;
+                                // `unoptimized`: the assets store already
+                                // rewrites `public_url` to our `/a/...` proxy
+                                // URL with resize params, so we don't want
+                                // Next's optimizer (and its `localPatterns`
+                                // gate) to re-process it.
                                 return imageUrl ? (
                                   <Image
                                     className="object-cover"
@@ -1673,6 +1678,7 @@ const PageSettingsPanel = React.forwardRef<PageSettingsPanelHandle, PageSettings
                                     alt="Social preview"
                                     fill
                                     sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
+                                    unoptimized
                                   />
                                 ) : null;
                               })()}
