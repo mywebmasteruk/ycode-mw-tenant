@@ -33,7 +33,7 @@ import { getLinkSettingsFromMark } from '@/lib/tiptap-extensions/rich-text-link'
 import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
 import { resolveInlineVariables, resolveInlineVariablesFromData } from '@/lib/inline-variables';
 import { formatFieldValue } from '@/lib/cms-variables-utils';
-import { buildLayerTranslationKey, getTranslationByKey, hasValidTranslationValue, getTranslationValue, injectTranslatedText, applyCmsTranslations } from '@/lib/localisation-utils';
+import { buildLayerTranslationKey, getTranslationByKey, hasValidTranslationValue, getTranslationValue, injectTranslatedText, applyCmsTranslations, translateComponentOverrides } from '@/lib/localisation-utils';
 import { formatDateFieldsInItemValues } from '@/lib/date-format-utils';
 import { getSettingByKey } from '@/lib/repositories/settingsRepository';
 import { parseMultiAssetFieldValue, buildAssetVirtualValues } from '@/lib/multi-asset-utils';
@@ -219,6 +219,7 @@ export async function loadTranslationsForLocale(
       return { locale: null, translations: {} };
     }
 
+<<<<<<< HEAD
     // Fetch all translations for this locale
     // NOTE: translations table has no tenant_id column; isolation is via locale_id (locales are tenant-scoped)
     const { data: translations } = await supabase
@@ -227,9 +228,32 @@ export async function loadTranslationsForLocale(
       .eq('locale_id', locale.id)
       .eq('is_published', isPublished)
       .is('deleted_at', null);
+=======
+    // Fetch all translations for this locale. Supabase caps PostgREST
+    // responses at 1000 rows by default — projects with more translations
+    // were silently truncated, causing entire layers to render in the
+    // source language on SSR while the editor (which fetches via its own
+    // paginated API) showed them correctly. Page through explicit ranges.
+    const PAGE_SIZE = 1000;
+    const translations: Translation[] = [];
+    for (let from = 0; ; from += PAGE_SIZE) {
+      const { data: page, error } = await supabase
+        .from('translations')
+        .select('*')
+        .eq('locale_id', locale.id)
+        .eq('is_published', isPublished)
+        .is('deleted_at', null)
+        .range(from, from + PAGE_SIZE - 1);
+>>>>>>> upstream/main
 
-    if (!translations) {
-      return { locale, translations: {} };
+      if (error) {
+        console.error('Failed to fetch translations page:', error);
+        break;
+      }
+
+      if (!page || page.length === 0) break;
+      translations.push(...(page as Translation[]));
+      if (page.length < PAGE_SIZE) break;
     }
 
     // Build translations map keyed by translatable key
@@ -591,8 +615,13 @@ async function fetchPageByPathInternal(
               values: enhancedItemValues,
             };
 
-            // First, resolve components so collection layers inside components are available
-            const layersWithComponents = resolveComponents(pageLayers?.layers || [], components);
+            // Translate component-instance override values first, so the translated
+            // values are what `resolveComponents` propagates into the rendered tree.
+            const localizedRawLayers = detectedLocale && translations && Object.keys(translations).length > 0
+              ? translateComponentOverrides(pageLayers?.layers || [], matchingPage.id, translations, { includeIncomplete: !isPublished })
+              : pageLayers?.layers || [];
+
+            const layersWithComponents = resolveComponents(localizedRawLayers, components);
 
             // Inject dynamic page collection data into layers (including expanded component layers)
             // This resolves inline variables like "Name → Location" on the page
@@ -709,8 +738,13 @@ async function fetchPageByPathInternal(
       return null;
     }
 
-    // First, resolve components so collection layers inside components are available
-    const layersWithComponents = resolveComponents(pageLayers?.layers || [], components);
+    // Translate component-instance override values before resolving components,
+    // so per-instance translations propagate correctly through the override pipeline.
+    const localizedRawLayers = detectedLocale && translations && Object.keys(translations).length > 0
+      ? translateComponentOverrides(pageLayers?.layers || [], matchingPage.id, translations, { includeIncomplete: !isPublished })
+      : pageLayers?.layers || [];
+
+    const layersWithComponents = resolveComponents(localizedRawLayers, components);
 
     let resolvedLayers = layersWithComponents.length > 0
       ? await resolveCollectionLayers(layersWithComponents, isPublished, undefined, paginationContext, translations, undefined, timezone)
@@ -915,8 +949,13 @@ export const fetchHomepage = cache(async function fetchHomepage(
       return null;
     }
 
-    // First, resolve components so collection layers inside components are available
-    const layersWithComponents = resolveComponents(pageLayers?.layers || [], components);
+    // Translate component-instance override values before resolving components
+    // so per-instance translations are applied through the override pipeline.
+    const localizedRawLayers = translations && Object.keys(translations).length > 0
+      ? translateComponentOverrides(pageLayers?.layers || [], homepage.id, translations, { includeIncomplete: !isPublished })
+      : pageLayers?.layers || [];
+
+    const layersWithComponents = resolveComponents(localizedRawLayers, components);
 
     // Resolve collection layers server-side (for both draft and published)
     let resolvedLayers = layersWithComponents.length > 0
@@ -3513,7 +3552,7 @@ async function injectCollectionDataForHtml(
  * @param isPublished - Whether to fetch published (true) or draft (false) assets
  * @param components - Available components, needed to resolve assets from rich-text embedded components
  */
-async function resolveAllAssets(
+export async function resolveAllAssets(
   layers: Layer[],
   isPublished: boolean = true,
   components?: Component[],
@@ -3694,7 +3733,7 @@ function resolveRichTextImageAssets(
 /**
  * Build a map of layerId -> anchor value (attributes.id) for O(1) anchor resolution
  */
-function buildAnchorMap(layers: Layer[]): Record<string, string> {
+export function buildAnchorMap(layers: Layer[]): Record<string, string> {
   const map: Record<string, string> = {};
 
   const traverse = (layerList: Layer[]) => {
@@ -4005,7 +4044,7 @@ function makeAssetMapResolver(
  * Convert a Layer to HTML string
  * Handles common layer types and their attributes
  */
-function layerToHtml(
+export function layerToHtml(
   layer: Layer,
   collectionItemId?: string,
   pages?: Page[],

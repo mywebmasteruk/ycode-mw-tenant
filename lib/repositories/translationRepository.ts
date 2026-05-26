@@ -13,7 +13,9 @@ import { getSupabaseAdmin } from '@/lib/supabase-server';
 import type { Translation, CreateTranslationData, UpdateTranslationData } from '@/types';
 
 /**
- * Get all translations for a locale (draft by default)
+ * Get all translations for a locale (draft by default). Pages through the
+ * 1000-row PostgREST default so projects with large catalogues don't get
+ * silently truncated.
  */
 export async function getTranslationsByLocale(
   localeId: string,
@@ -25,19 +27,29 @@ export async function getTranslationsByLocale(
     throw new Error('Supabase not configured');
   }
 
-  const { data, error } = await client
-    .from('translations')
-    .select('*')
-    .eq('locale_id', localeId)
-    .eq('is_published', isPublished)
-    .is('deleted_at', null)
-    .order('created_at', { ascending: true });
+  const PAGE_SIZE = 1000;
+  const results: Translation[] = [];
 
-  if (error) {
-    throw new Error(`Failed to fetch translations: ${error.message}`);
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await client
+      .from('translations')
+      .select('*')
+      .eq('locale_id', localeId)
+      .eq('is_published', isPublished)
+      .is('deleted_at', null)
+      .order('created_at', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+
+    if (error) {
+      throw new Error(`Failed to fetch translations: ${error.message}`);
+    }
+
+    if (!data || data.length === 0) break;
+    results.push(...(data as Translation[]));
+    if (data.length < PAGE_SIZE) break;
   }
 
-  return data || [];
+  return results;
 }
 
 /**
