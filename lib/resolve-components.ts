@@ -358,13 +358,17 @@ export function applyComponentOverrides(
 
       // Only apply if it's a text variable (has 'type' property, not ImageSettingsValue)
       if (valueToApply && 'type' in valueToApply) {
-        // Apply the value to this layer's text variable
+        // Apply the value to this layer's text variable. Mark layers whose
+        // text came from an instance override so `injectTranslatedText`
+        // doesn't clobber the (already page-scope-translated) override value
+        // with the component-scope default translation.
         updatedLayer = {
           ...updatedLayer,
           variables: {
             ...updatedLayer.variables,
             text: valueToApply as any,
           },
+          ...(overrideValue !== undefined ? { _textFromOverride: true } as any : {}),
         };
       }
     }
@@ -398,6 +402,7 @@ export function applyComponentOverrides(
             ...(imageValue.height && { height: imageValue.height }),
             ...(imageValue.loading && { loading: imageValue.loading }),
           },
+          ...(overrideValue !== undefined ? { _imageFromOverride: true } as any : {}),
         };
       }
     }

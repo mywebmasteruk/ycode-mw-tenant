@@ -18,6 +18,7 @@ import {
   runWithEffectiveTenantId,
 } from '@/lib/masjidweb/effective-tenant-id';
 import { findAffectedPages } from '@/lib/repositories/pageLayersRepository';
+import { dispatchSitePublishedEvent } from '@/lib/services/webhookService';
 import { getAllDraftPages, hardDeleteSoftDeletedPages } from '@/lib/repositories/pageRepository';
 import { publishComponents, getUnpublishedComponents, hardDeleteSoftDeletedComponents } from '@/lib/repositories/componentRepository';
 import { publishLayerStyles, getUnpublishedLayerStyles, hardDeleteSoftDeletedLayerStyles } from '@/lib/repositories/layerStyleRepository';
@@ -786,8 +787,57 @@ export async function POST(request: NextRequest) {
     }
   };
 
+<<<<<<< HEAD
   if (headerTenantId) {
     return runWithEffectiveTenantId(headerTenantId, runPublish);
+=======
+    // Save published timestamp to settings
+    try {
+      result.published_at_setting = await savePublishedAt(publishedAt);
+    } catch {
+      // Silently handle - non-fatal
+    }
+
+    // Dispatch the site.published webhook event. The dispatcher is the only
+    // path that delivers to user-configured webhooks for this event type
+    // (advertised in the Integrations → Webhooks UI), so without this call
+    // any "Site Published" subscription silently never fires. Wrapped so
+    // webhook failures never block the publish response.
+    try {
+      await dispatchSitePublishedEvent({
+        pages_count: result.changes.pages,
+        collections_count: result.changes.collectionItems,
+      });
+    } catch {
+      // Silently handle — webhook failures must not break a successful publish
+    }
+
+    // Calculate total duration
+    stats.totalDurationMs = Math.round(performance.now() - startTime);
+
+    const totalPublished =
+      result.changes.folders +
+      result.changes.pages +
+      result.changes.collectionItems +
+      result.changes.components +
+      result.changes.layerStyles +
+      result.changes.assetFolders +
+      result.changes.assets +
+      result.changes.locales +
+      result.changes.translations;
+
+    return noCache({
+      data: result,
+      message: `Published a total of ${totalPublished} item(s) successfully`,
+    });
+  } catch (error) {
+    stats.totalDurationMs = Math.round(performance.now() - startTime);
+
+    return noCache(
+      { error: error instanceof Error ? error.message : 'Failed to publish' },
+      500
+    );
+>>>>>>> upstream/main
   }
   return runPublish();
 }
