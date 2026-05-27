@@ -6,6 +6,7 @@ import type { IconProps } from '@/components/ui/icon';
 import type { Page, PageFolder, PageSettings, FieldVariable, Translation, Locale } from '../types';
 import { getTranslatableKey } from './locale-runtime';
 import { getTiptapTextContent } from '@/lib/text-format-utils';
+import { buildPasswordFormSubtree } from '@/lib/password-form-template';
 
 /**
  * Reserved slugs that cannot be used at the root level (null parent folder)
@@ -1358,7 +1359,15 @@ export interface ErrorPageConfig {
 
 /**
  * Default error pages configuration
- * Used for seeding database and creating new error pages
+ * Used for seeding database and creating new error pages.
+ *
+ * The 401 page ships with a password-protected form layer
+ * (`settings.form.form_type === 'password_protected'`). At runtime,
+ * `LayerRendererPublic` detects this marker and wires its submit handler to
+ * `/api/page-auth/verify` instead of the standard form-submissions endpoint.
+ * The form/input/button layers are marked `restrictions: { copy: false, delete: false }`
+ * so the structure cannot be removed (only restyled). If the form is missing on
+ * an existing 401 page, `PageRenderer` falls back to the hardcoded `PasswordForm`.
  */
 export const DEFAULT_ERROR_PAGES: ErrorPageConfig[] = [
   {
@@ -1382,39 +1391,59 @@ export const DEFAULT_ERROR_PAGES: ErrorPageConfig[] = [
             id: 'layer-1762789137823-g2cdo46ld',
             name: 'section',
             design: {
-              layout: { display: 'Flex', isActive: true, flexDirection: 'column' },
-              sizing: { height: '100vh', isActive: true },
-              spacing: { isActive: true, paddingTop: '3rem', paddingBottom: '3rem' },
+              layout: { display: 'Flex', isActive: true, flexDirection: 'column', alignItems: 'center', justifyContent: 'center' },
+              sizing: { isActive: true, minHeight: '100vh' },
+              spacing: { isActive: true, paddingTop: '4rem', paddingBottom: '4rem', paddingLeft: '1rem', paddingRight: '1rem' },
             },
-            classes: 'flex flex-col gap-[1rem] py-[3rem] h-[100vh]',
+            classes: 'flex flex-col items-center justify-center min-h-[100vh] px-[1rem] py-[4rem]',
             children: [
               {
                 id: 'layer-1762789141753-zpz5jyobc',
                 name: 'div',
                 design: {
-                  sizing: { height: '100vh', isActive: true, maxWidth: '80rem' },
-                  spacing: { isActive: true, marginLeft: 'auto', marginRight: 'auto', paddingLeft: '1rem', paddingRight: '1rem' },
+                  layout: { isActive: true, display: 'Flex', flexDirection: 'column', alignItems: 'center', gap: '16' },
+                  sizing: { isActive: true, width: '100%', maxWidth: '32rem' },
+                  typography: { isActive: true, textAlign: 'center' },
                 },
-                classes: 'max-w-[80rem] mx-auto px-[1rem] h-[100vh]',
+                classes: 'w-full max-w-[32rem] flex flex-col items-center text-center gap-[16px]',
                 children: [
                   {
-                    id: 'layer-1762789168560-icft8ynp5',
+                    id: 'layer-1762789150900-pw-icon',
+                    name: 'icon',
+                    settings: { tag: 'div' },
+                    design: {
+                      sizing: { isActive: true, width: '32', height: '32' },
+                      typography: { isActive: true, color: '#9ca3af' },
+                    },
+                    classes: 'text-[#9ca3af] w-[32px] h-[32px]',
+                    children: [],
+                    customName: 'Lock icon',
+                    variables: {
+                      icon: {
+                        src: {
+                          type: 'static_text',
+                          data: {
+                            content: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+                          },
+                        },
+                      },
+                    },
+                  },
+                  {
+                    id: 'layer-1762789150930-pw-text-block',
                     name: 'div',
                     design: {
-                      layout: { gap: '6', display: 'flex', isActive: true, alignItems: 'center', flexDirection: 'column', justifyContent: 'center' },
-                      sizing: { height: '100%', isActive: true },
-                      typography: { isActive: true, textAlign: 'center' },
+                      layout: { isActive: true, display: 'Flex', flexDirection: 'column', gap: '0.5rem', alignItems: 'center' },
+                      sizing: { isActive: true, width: '100%' },
                     },
-                    classes: 'items-center text-center h-full flex flex-col justify-center gap-[6px]',
+                    classes: 'w-full flex flex-col items-center gap-[0.5rem]',
                     children: [
                       {
                         id: 'layer-1762789150944-5qezgblbe',
                         name: 'heading',
-                        settings: {
-                          tag: 'h1',
-                        },
+                        settings: { tag: 'h1' },
                         design: {
-                          typography: { color: '#111827', fontSize: '30', isActive: true, fontWeight: '700' },
+                          typography: { isActive: true, color: '#111827', fontSize: '30', fontWeight: '700' },
                         },
                         classes: 'font-[700] text-[#111827] text-[30px]',
                         children: [],
@@ -1424,58 +1453,35 @@ export const DEFAULT_ERROR_PAGES: ErrorPageConfig[] = [
                           text: {
                             type: 'dynamic_rich_text',
                             data: {
-                              content: getTiptapTextContent('401')
-                            }
-                          }
+                              content: getTiptapTextContent('Password protected'),
+                            },
+                          },
                         },
                       },
                       {
                         id: 'layer-1762789197005-7z2wy597y',
                         name: 'text',
-                        settings: {
-                          tag: 'p',
-                        },
+                        settings: { tag: 'p' },
                         design: {
-                          typography: { fontSize: '12', color: '#111827', isActive: true },
+                          typography: { isActive: true, fontSize: '12', color: '#111827' },
                         },
                         classes: 'text-[12px] text-[#111827]',
                         children: [],
-                        customName: 'Text',
+                        customName: 'Subtitle',
                         restrictions: { editText: true },
                         variables: {
                           text: {
                             type: 'dynamic_rich_text',
                             data: {
-                              content: getTiptapTextContent('Password protected')
-                            }
-                          }
-                        },
-                      },
-                      {
-                        id: 'layer-1762789197006-7z2wy597z',
-                        name: 'text',
-                        settings: {
-                          tag: 'p',
-                        },
-                        design: {
-                          typography: { fontSize: '12', color: '#111827', isActive: true },
-                        },
-                        classes: 'text-[12px] text-[#111827]',
-                        children: [],
-                        customName: 'Text',
-                        restrictions: { editText: true },
-                        variables: {
-                          text: {
-                            type: 'dynamic_rich_text',
-                            data: {
-                              content: getTiptapTextContent('Enter the password to access this page.')
-                            }
-                          }
+                              content: getTiptapTextContent('To access this page, please enter the required password below.'),
+                            },
+                          },
                         },
                       },
                     ],
-                    customName: 'Container',
+                    customName: 'Text block',
                   },
+                  buildPasswordFormSubtree(),
                 ],
                 customName: 'Container',
               },

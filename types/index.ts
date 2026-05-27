@@ -167,7 +167,19 @@ export interface DesignProperties {
   transitions?: TransitionsDesign;
 }
 
+export type FormType = 'standard' | 'password_protected';
+
+export type PasswordProtectionContext = {
+  pageId?: string;
+  folderId?: string;
+  redirectUrl: string;
+  isPublished: boolean;
+};
+
 export interface FormSettings {
+  // 'password_protected' wires the form to the page-auth verify endpoint and gates access to
+  // password-protected pages; 'standard' (default) submits to /ycode/api/form-submissions.
+  form_type?: FormType;
   success_action?: 'message' | 'redirect'; // What happens on successful submission (default: 'message')
   success_message?: string; // Message shown on successful submission (deprecated - now uses alert child)
   error_message?: string; // Message shown on failed submission (deprecated - now uses alert child)
@@ -328,7 +340,7 @@ export interface InteractionTween {
 
 export type ApplyStyles = 'on-load' | 'on-trigger';
 
-export type TweenPropertyKey = 'x' | 'y' | 'rotation' | 'scale' | 'skewX' | 'skewY' | 'autoAlpha' | 'display' | 'width' | 'height' | 'backgroundColor';
+export type TweenPropertyKey = 'x' | 'y' | 'rotation' | 'scale' | 'skewX' | 'skewY' | 'autoAlpha' | 'display' | 'width' | 'height' | 'backgroundColor' | 'filterBlur' | 'filterBrightness' | 'filterGrayscale';
 
 export type InteractionApplyStyles = Partial<Record<TweenPropertyKey, ApplyStyles>>;
 
@@ -460,6 +472,11 @@ export interface Layer {
     collectionLayerClasses?: string[];
     collectionLayerTag?: string;
     isPublished?: boolean;
+    // Full collection layer (sans children) used by the client to rebuild
+    // proper item wrappers (anchor/link/attribute) when injecting filtered
+    // or load-more items. Without this, the wrapper would be a plain <div>
+    // and lose link/action behavior.
+    collectionLayer?: Omit<Layer, 'children'>;
   };
 }
 
@@ -1307,6 +1324,18 @@ export interface CollectionPaginationMeta {
   mode?: 'pages' | 'load_more'; // Pagination mode
   itemIds?: string[]; // For multi-reference filtering in load_more mode
   layerTemplate?: Layer[]; // Layer template for rendering new items in load_more mode
+  // Full collection layer (sans children) — used by load-more (and filter)
+  // to rebuild proper item wrappers (link/action/attributes) when items are
+  // re-rendered client-side.
+  collectionLayer?: Omit<Layer, 'children'>;
+  // Whether SSR rendered this collection from published data. The client
+  // must fetch load-more items from the same source so draft previews
+  // don't accidentally append published rows (or vice versa).
+  isPublished?: boolean;
+  // Sort applied by SSR — load-more must mirror it or offset-based
+  // paging will return overlapping (duplicate) items.
+  sortBy?: string;
+  sortOrder?: 'asc' | 'desc';
 }
 
 // Conditional Visibility Types

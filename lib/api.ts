@@ -208,6 +208,7 @@ export const publishApi = {
     components: number;
     layerStyles: number;
     assets: number;
+    translations: number;
     total: number;
   }>> {
     return apiRequest('/ycode/api/publish/preview');

@@ -3,7 +3,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
 import { useFilterStore } from '@/stores/useFilterStore';
 import type { ConditionalVisibility, Layer } from '@/types';
-import { isDatePreset, resolveDateFilterValue } from '@/lib/collection-field-utils';
+import { isDateFieldType, isDatePreset, resolveDateFilterValue } from '@/lib/collection-field-utils';
 
 interface FilterableCollectionProps {
   children: React.ReactNode;
@@ -20,9 +20,35 @@ interface FilterableCollectionProps {
   collectionLayerClasses?: string[];
   collectionLayerTag?: string;
   isPublished?: boolean;
+  /** Preview mode forces server-rendered links to use the `/ycode/preview` prefix. */
+  isPreview?: boolean;
+  /** Item ID of the dynamic-page collection being rendered (for `current-page` link keywords). */
+  pageCollectionItemId?: string;
+  /** Ordered ids of the dynamic page's collection — powers `next-item` / `previous-item` link keywords. */
+  pageCollectionSortedItemIds?: string[];
+  /** Full collection layer (sans children) — lets the server rebuild proper item wrappers (link/action/attributes). */
+  collectionLayer?: Omit<Layer, 'children'>;
 }
 
 const FC_FILTERED_ATTR = 'data-fc-filtered';
+
+/**
+ * Browser custom event dispatched after collection HTML is appended/replaced
+ * client-side. AnimationInitializer / SliderInitializer listen for it so they
+ * can bind animations and sliders to the freshly injected DOM nodes.
+ */
+export interface ItemsInjectedDetail {
+  collectionLayerId: string;
+  layerTemplate: Layer[];
+  itemIds: string[];
+  append: boolean;
+  /** Full collection layer (sans children) — when present, initializers
+   * rebuild the full layer tree per item (so animations on the wrapper
+   * itself are bound), matching SSR. */
+  collectionLayer?: Omit<Layer, 'children'>;
+}
+
+export const ITEMS_INJECTED_EVENT = 'ycode:items-injected';
 
 export default function FilterableCollection({
   children,
@@ -39,6 +65,10 @@ export default function FilterableCollection({
   collectionLayerClasses,
   collectionLayerTag,
   isPublished = true,
+  isPreview = false,
+  pageCollectionItemId,
+  pageCollectionSortedItemIds,
+  collectionLayer,
 }: FilterableCollectionProps) {
   const markerRef = useRef<HTMLSpanElement>(null);
   const ssrChildrenRef = useRef<Element[]>([]);
@@ -97,7 +127,7 @@ export default function FilterableCollection({
     parent.querySelectorAll(`[${FC_FILTERED_ATTR}]`).forEach(el => el.remove());
   }, [getParent]);
 
-  const injectFilteredHTML = useCallback((html: string, append: boolean) => {
+  const injectFilteredHTML = useCallback((html: string, append: boolean, itemIds: string[]) => {
     const parent = getParent();
     if (!parent) return;
     if (!append) {
@@ -111,7 +141,9 @@ export default function FilterableCollection({
       if (child instanceof Element) child.setAttribute(FC_FILTERED_ATTR, '');
       parent.appendChild(child);
     }
-  }, [getParent, hideSSR, clearFilteredDOM]);
+    const detail: ItemsInjectedDetail = { collectionLayerId, layerTemplate, itemIds, append, collectionLayer };
+    window.dispatchEvent(new CustomEvent<ItemsInjectedDetail>(ITEMS_INJECTED_EVENT, { detail }));
+  }, [getParent, hideSSR, clearFilteredDOM, collectionLayerId, layerTemplate, collectionLayer]);
 
   // Capture SSR children on mount (before paint) and hide if pending
   useLayoutEffect(() => {
@@ -119,7 +151,7 @@ export default function FilterableCollection({
     const parent = markerRef.current.parentElement;
     if (!parent) return;
     ssrChildrenRef.current = Array.from(parent.children).filter(
-      el => el !== markerRef.current
+      el => el !== markerRef.current && !(el as HTMLElement).hasAttribute('data-collection-marker')
     );
     if (pendingFirstEvalRef.current) {
       hideSSR();
@@ -230,7 +262,7 @@ export default function FilterableCollection({
         }
 
         let resolvedOperator: string = condition.operator;
-        if (condition.fieldType === 'date' && isDatePreset(value)) {
+        if (isDateFieldType(condition.fieldType) && isDatePreset(value)) {
           const resolved = resolveDateFilterValue(condition.operator, value, value2);
           if (!resolved) continue;
           resolvedOperator = resolved.operator;
@@ -536,6 +568,10 @@ export default function FilterableCollection({
         published: isPublished,
         collectionLayerClasses,
         collectionLayerTag,
+        isPreview,
+        pageCollectionItemId,
+        pageCollectionSortedItemIds,
+        collectionLayer,
       }),
       signal: controller.signal,
     })
@@ -556,7 +592,8 @@ export default function FilterableCollection({
           return;
         }
 
-        injectFilteredHTML(data.html ?? '', append);
+        const responseItemIds: string[] = Array.isArray(data.itemIds) ? data.itemIds : [];
+        injectFilteredHTML(data.html ?? '', append, responseItemIds);
 
         const total = data.total ?? 0;
         const count = data.count ?? 0;
@@ -586,7 +623,7 @@ export default function FilterableCollection({
           abortRef.current = null;
         }
       });
-  }, [collectionId, collectionLayerId, layerTemplate, effectiveSortBy, effectiveSortOrder, limit, paginationMode, updateEmptyStateElements, injectFilteredHTML, collectionLayerClasses, collectionLayerTag, isPublished]);
+  }, [collectionId, collectionLayerId, layerTemplate, effectiveSortBy, effectiveSortOrder, limit, paginationMode, updateEmptyStateElements, injectFilteredHTML, collectionLayerClasses, collectionLayerTag, isPublished, isPreview, pageCollectionItemId, pageCollectionSortedItemIds, collectionLayer]);
 
   const fetchFilteredRef = useRef(fetchFiltered);
   useEffect(() => { fetchFilteredRef.current = fetchFiltered; }, [fetchFiltered]);
@@ -652,6 +689,17 @@ export default function FilterableCollection({
       const wrapper = getSsrPaginationWrapper();
       if (wrapper) wrapper.style.display = '';
       updateEmptyStateElements(-1);
+
+      // Notify initializers (animations, sliders) that injected items are
+      // gone so they can drop any extras for this collection.
+      const clearDetail: ItemsInjectedDetail = {
+        collectionLayerId,
+        layerTemplate,
+        itemIds: [],
+        append: false,
+        collectionLayer,
+      };
+      window.dispatchEvent(new CustomEvent<ItemsInjectedDetail>(ITEMS_INJECTED_EVENT, { detail: clearDetail }));
       return;
     }
 
@@ -719,7 +767,10 @@ export default function FilterableCollection({
   // Zero DOM footprint: invisible marker + direct children
   return (
     <>
-      <span ref={markerRef} style={{ display: 'none' }} />
+      <span
+        ref={markerRef} data-collection-marker=""
+        style={{ display: 'none' }}
+      />
       {children}
     </>
   );

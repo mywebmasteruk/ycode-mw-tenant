@@ -10,8 +10,8 @@ import { getCmsFieldBinding } from '@/lib/tiptap-utils';
 import { applyComponentOverrides } from '@/lib/resolve-components';
 import { getComponentVariantLayers } from '@/lib/component-variant-utils';
 import { resolveFieldFromSources } from '@/lib/cms-variables-utils';
-import { isDatePreset, resolveDateFilterValue } from '@/lib/collection-field-utils';
-import { parseMultiReferenceValue } from '@/lib/collection-utils';
+import { compareDateFilter, isDateFieldType, isDatePreset, resolveDateFilterValue } from '@/lib/collection-field-utils';
+import { parseMultiReferenceValue, normalizeBooleanValue } from '@/lib/collection-utils';
 import { getInheritedValue } from '@/lib/tailwind-class-mapper';
 import cloneDeep from 'lodash/cloneDeep';
 import { layerHasLink, hasLinkInTree, hasRichTextLinks } from '@/lib/link-utils';
@@ -119,6 +119,24 @@ export function canCopyLayer(layer: Layer): boolean {
  */
 export function canDeleteLayer(layer: Layer): boolean {
   return layer.restrictions?.delete !== false;
+}
+
+/**
+ * Recursively check if a layer tree contains a password-protected form layer.
+ * Used by PageRenderer to decide whether to inject the hardcoded PasswordForm
+ * fallback when the 401 page has been customised without a password form.
+ */
+export function hasPasswordFormLayer(layers: Layer[] | undefined | null): boolean {
+  if (!layers || layers.length === 0) return false;
+  for (const layer of layers) {
+    if (layer.name === 'form' && layer.settings?.form?.form_type === 'password_protected') {
+      return true;
+    }
+    if (layer.children && hasPasswordFormLayer(layer.children)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -1976,7 +1994,7 @@ function evaluateCondition(
     let effectiveOperator = condition.operator;
     const fieldType = condition.fieldType || 'text';
 
-    if (fieldType === 'date' && isDatePreset(compareValue)) {
+    if (isDateFieldType(fieldType) && isDatePreset(compareValue)) {
       const resolved = resolveDateFilterValue(effectiveOperator, compareValue, compareValue2);
       if (resolved) {
         effectiveOperator = resolved.operator as typeof effectiveOperator;
@@ -1992,16 +2010,28 @@ function evaluateCondition(
       // Text operators
       case 'is':
         if (fieldType === 'boolean') {
-          return value.toLowerCase() === compareValue.toLowerCase();
+          // Booleans may be stored as 'true'/'false', '1'/'0', or '' (depending
+          // on import source — UI, Airtable sync, CSV, etc.). Normalize both
+          // sides so the comparison is source-agnostic.
+          return normalizeBooleanValue(value) === normalizeBooleanValue(compareValue);
         }
         if (fieldType === 'number') {
           return parseFloat(value) === parseFloat(compareValue);
         }
+        if (isDateFieldType(fieldType)) {
+          return compareDateFilter(value, 'is', compareValue);
+        }
         return value === compareValue;
 
       case 'is_not':
+        if (fieldType === 'boolean') {
+          return normalizeBooleanValue(value) !== normalizeBooleanValue(compareValue);
+        }
         if (fieldType === 'number') {
           return parseFloat(value) !== parseFloat(compareValue);
+        }
+        if (isDateFieldType(fieldType)) {
+          return !compareDateFilter(value, 'is', compareValue);
         }
         return value !== compareValue;
 
@@ -2030,25 +2060,15 @@ function evaluateCondition(
       case 'gte':
         return parseFloat(value) >= parseFloat(compareValue);
 
-      // Date operators
-      case 'is_before': {
-        const dateValue = new Date(value);
-        const compareDateValue = new Date(compareValue);
-        return dateValue < compareDateValue;
-      }
+      // Date operators (day-aware: `YYYY-MM-DD` filter values span the full UTC day)
+      case 'is_before':
+        return compareDateFilter(value, 'is_before', compareValue);
 
-      case 'is_after': {
-        const dateValue = new Date(value);
-        const compareDateValue = new Date(compareValue);
-        return dateValue > compareDateValue;
-      }
+      case 'is_after':
+        return compareDateFilter(value, 'is_after', compareValue);
 
-      case 'is_between': {
-        const dateValue = new Date(value);
-        const startDate = new Date(compareValue);
-        const endDate = new Date(compareValue2 ?? '');
-        return dateValue >= startDate && dateValue <= endDate;
-      }
+      case 'is_between':
+        return compareDateFilter(value, 'is_between', compareValue, compareValue2);
 
       case 'is_not_empty':
         return isPresent;
