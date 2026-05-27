@@ -8,13 +8,15 @@
  * to prevent flickering. This component only handles animation triggers.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { SplitText } from 'gsap/SplitText';
 
-import { buildGsapProps, addTweenToTimeline, createSplitTextAnimation, generateInitialAnimationCSS, setColorVariableResolver } from '@/lib/animation-utils';
+import { ITEMS_INJECTED_EVENT, type ItemsInjectedDetail } from '@/components/FilterableCollection';
+import { buildGsapProps, addTweenToTimeline, createSplitTextAnimation, generateInitialAnimationCSS, getEffectiveApplyStyle, setColorVariableResolver } from '@/lib/animation-utils';
 import { getCurrentBreakpoint } from '@/lib/breakpoint-utils';
+import { remapLayerIdsForCollectionItem } from '@/lib/collection-utils';
 import { useColorVariablesStore } from '@/stores/useColorVariablesStore';
 import type { Layer, LayerInteraction, Breakpoint } from '@/types';
 
@@ -76,8 +78,12 @@ function collectHiddenLayerInfo(interactions: CollectedInteraction[]): Map<strin
     const breakpoints = interaction.timeline?.breakpoints || null;
 
     (interaction.tweens || []).forEach((tween) => {
-      // Check if this tween has display: hidden with on-load apply style
-      if (tween.from?.display === 'hidden' && tween.apply_styles?.display === 'on-load') {
+      // Hide if display:hidden with effective on-load mode (explicit, or implicit
+      // for intro triggers like load/scroll-into-view).
+      if (
+        tween.from?.display === 'hidden' &&
+        getEffectiveApplyStyle(interaction.trigger, 'display', tween.apply_styles) === 'on-load'
+      ) {
         hiddenMap.set(tween.layer_id, breakpoints);
       }
     });
@@ -293,6 +299,61 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
   const [currentBreakpoint, setCurrentBreakpoint] = useState<Breakpoint>(() => getCurrentBreakpoint());
   const styleRef = useRef<HTMLStyleElement | null>(null);
 
+  // Tracks interaction ids whose one-shot animation (`load` or
+  // `scroll-into-view`) has already played. Keyed by interaction id, which
+  // is stable across effect re-runs for the same logical element:
+  // - Page-level layers keep their original id.
+  // - Filter/load-more items get `-fc-${itemId}` appended, so the same item
+  //   re-injected later (e.g. filter toggled) keeps the same id and is
+  //   skipped — no replay.
+  // Cleared on breakpoint changes since `resetAnimationStates` restores
+  // initial styles and animations need to re-run for the new breakpoint.
+  const playedOneShotInteractionsRef = useRef<Set<string>>(new Set());
+
+  // Extra layers built from collection items injected client-side (filter
+  // refetch, load-more). Indexed by collection layer id so a filter
+  // deactivation can drop just that collection's extras. Each value uses the
+  // `-fc-${itemId}` suffix that mirrors the server-side filter renderer.
+  const [extrasByCollection, setExtrasByCollection] = useState<Record<string, Layer[]>>({});
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<ItemsInjectedDetail>).detail;
+      const { collectionLayerId, layerTemplate, itemIds, append, collectionLayer } = detail || {};
+      if (!collectionLayerId || !collectionLayer || !layerTemplate) return;
+
+      setExtrasByCollection(prev => {
+        // Empty itemIds = filter deactivated, drop this collection's extras.
+        if (!append && (!itemIds || itemIds.length === 0)) {
+          if (!(collectionLayerId in prev)) return prev;
+          const next = { ...prev };
+          delete next[collectionLayerId];
+          return next;
+        }
+        // Rebuild the full collection layer per item so interactions on the
+        // wrapper itself are bound, then remap ids once.
+        const newLayers: Layer[] = itemIds.map(itemId => {
+          const fullLayer: Layer = { ...collectionLayer, children: layerTemplate };
+          return remapLayerIdsForCollectionItem(fullLayer, `-fc-${itemId}`);
+        });
+        if (append) {
+          return {
+            ...prev,
+            [collectionLayerId]: [...(prev[collectionLayerId] || []), ...newLayers],
+          };
+        }
+        return { ...prev, [collectionLayerId]: newLayers };
+      });
+    };
+    window.addEventListener(ITEMS_INJECTED_EVENT, handler);
+    return () => window.removeEventListener(ITEMS_INJECTED_EVENT, handler);
+  }, []);
+
+  const effectiveLayers = useMemo(() => {
+    const extras = Object.values(extrasByCollection).flat();
+    return extras.length > 0 ? [...layers, ...extras] : layers;
+  }, [layers, extrasByCollection]);
+
   // Register a color variable resolver so backgroundColor tweens that
   // reference color variables (e.g. "color:var(--id)") can be resolved to a
   // concrete rgba value GSAP can interpolate.
@@ -305,7 +366,7 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
   // (e.g. components embedded in rich text whose layer IDs are namespaced differently)
   useEffect(() => {
     if (!injectInitialCSS) return;
-    const { css, hiddenLayerInfo } = generateInitialAnimationCSS(layers);
+    const { css, hiddenLayerInfo } = generateInitialAnimationCSS(effectiveLayers);
     if (css) {
       const style = document.createElement('style');
       style.textContent = css;
@@ -326,7 +387,7 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
         styleRef.current = null;
       }
     };
-  }, [injectInitialCSS, layers]);
+  }, [injectInitialCSS, effectiveLayers]);
 
   // Listen for breakpoint changes on resize
   useEffect(() => {
@@ -340,13 +401,14 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
   }, []);
 
   useEffect(() => {
-    const collectedInteractions = collectInteractions(layers);
+    const collectedInteractions = collectInteractions(effectiveLayers);
     const hiddenLayerInfo = collectHiddenLayerInfo(collectedInteractions);
     const isBreakpointChange = prevBreakpointRef.current !== null && prevBreakpointRef.current !== currentBreakpoint;
 
     // Reset animation states when breakpoint changes
     if (isBreakpointChange) {
       resetAnimationStates(collectedInteractions, hiddenLayerInfo, currentBreakpoint);
+      playedOneShotInteractionsRef.current = new Set();
     }
 
     // Update previous breakpoint reference
@@ -377,8 +439,13 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
 
       switch (trigger) {
         case 'load': {
-          // Skip if breakpoint restriction not met
           if (!shouldRunOnBreakpoint(interaction, currentBreakpoint)) break;
+          // Skip if this interaction has already played. Stops effect
+          // re-runs (caused by filter/load-more state changes) from
+          // re-playing load animations on existing elements, and also
+          // prevents re-playing for filter items that get re-injected.
+          if (playedOneShotInteractionsRef.current.has(interaction.id)) break;
+          playedOneShotInteractionsRef.current.add(interaction.id);
 
           const timeline = getTimeline();
           timeline?.play();
@@ -443,13 +510,15 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
         }
 
         case 'scroll-into-view': {
-          // Skip if breakpoint restriction not met
           if (!shouldRunOnBreakpoint(interaction, currentBreakpoint)) break;
+          // Already fired in a previous effect run — don't recreate the
+          // trigger (which would re-fire `play` if the element is still in
+          // viewport after a filter/load-more state change).
+          if (playedOneShotInteractionsRef.current.has(interaction.id)) break;
 
           const scrollStart = interaction.timeline?.scrollStart || 'top 80%';
           const toggleActions = interaction.timeline?.toggleActions || 'play none none none';
 
-          // toggleActions requires timeline upfront
           const timeline = getTimeline();
           if (!timeline) break;
 
@@ -458,6 +527,9 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
             start: scrollStart,
             toggleActions,
             animation: timeline as any,
+            onEnter: () => {
+              playedOneShotInteractionsRef.current.add(interaction.id);
+            },
           });
 
           cleanupRef.current.push(() => scrollTrigger.kill());
@@ -499,7 +571,7 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
       timelines.forEach((tl) => tl.kill());
       ScrollTrigger.getAll().forEach((st) => st.kill());
     };
-  }, [layers, currentBreakpoint]);
+  }, [effectiveLayers, currentBreakpoint]);
 
   return null;
 }

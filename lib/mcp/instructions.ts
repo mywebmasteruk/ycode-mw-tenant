@@ -40,6 +40,7 @@ Each layer has:
 - \`columns\` — 2-column flexbox layout
 - \`grid\` — 2x2 CSS Grid layout
 - \`collection\` — CMS collection list (repeats children for each item)
+- \`table\`, \`thead\`, \`tbody\`, \`tr\`, \`td\`, \`th\` — Data table elements (\`table\` ships with a header + 2 body rows)
 
 **Content** (leaf elements, no children):
 - \`text\` — Text element. Set tag via settings.tag: "h1"-"h6", "p", "span", "label"
@@ -88,7 +89,7 @@ Each layer's \`design\` object controls its appearance. Use update_layer_design 
 - justifyContent: "start" | "end" | "center" | "between" | "around" | "evenly"
 - alignItems: "start" | "end" | "center" | "baseline" | "stretch"
 - gap: CSS value ("16px", "1rem")
-- gridTemplateColumns: "1fr 1fr 1fr", "repeat(3, 1fr)"
+- gridTemplateColumns: "4" (bare integer count, normalized to repeat(N, 1fr)), "1fr 1fr 1fr", "repeat(3, 1fr)"
 
 **typography** — Text styling
 - fontSize: "16px", "48px", "1.25rem"
@@ -209,8 +210,16 @@ add_layer({ template: "richText", rich_content: [
 **Updating rich text content:**
 Use \`set_rich_text_content\` or the batch \`set_rich_text\` operation.
 
-**Supported block types:** paragraph, heading (level 1-6), blockquote, bulletList, orderedList, codeBlock, horizontalRule
+**Supported block types:** paragraph, heading (level 1-6), blockquote, bulletList, orderedList, codeBlock, horizontalRule, htmlEmbed, image, table, component
 **Inline formatting:** \`**bold**\`, \`*italic*\`, \`[link text](url)\`
+
+**Extended block examples:**
+\`\`\`
+{ type: "htmlEmbed", code: "<iframe src='https://example.com' />" }
+{ type: "image", asset_id: "<asset id>", alt: "Alt text" }
+{ type: "table", header_row: true, rows: [["Name", "Age"], ["Alice", "30"], ["Bob", "25"]] }
+{ type: "component", component_id: "<component id>" }
+\`\`\`
 
 ### Layer Content & Configuration
 
@@ -226,6 +235,13 @@ update_layer_image({ layer_id: "...", asset_id: "...", alt: "Photo description" 
 update_layer_link({ layer_id: "...", link_type: "url", url: "https://example.com", target: "_blank" })
 update_layer_link({ layer_id: "...", link_type: "page", page_id_target: "<page_id>" })
 update_layer_link({ layer_id: "...", link_type: "email", email: "hello@example.com" })
+update_layer_link({ layer_id: "...", link_type: "asset", asset_id: "<asset_id>", download: true })
+
+// Anchor link to a layer on the current page
+update_layer_link({ layer_id: "...", link_type: "url", url: "", anchor_layer_id: "<target layer id>" })
+
+// Dynamic page link pinned to a specific item
+update_layer_link({ layer_id: "...", link_type: "page", page_id_target: "<dynamic page id>", collection_item_id: "<item id>" })
 \`\`\`
 
 **Setting videos:**
@@ -248,6 +264,32 @@ update_layer_settings({ layer_id: "...", tag: "h2" })
 update_layer_settings({ layer_id: "...", slider: { autoplay: true, delay: "5", loop: "loop" } })
 \`\`\`
 
+**Configuring lightboxes bound to a CMS multi-image field:**
+\`\`\`
+update_layer_settings({ layer_id: "...", lightbox: { files_source: "cms", files_field_id: "<image field id>" } })
+\`\`\`
+
+**Configuring maps:**
+\`\`\`
+update_layer_settings({ layer_id: "...", map: { provider: "mapbox", latitude: 40.7128, longitude: -74.006, zoom: 12 } })
+\`\`\`
+
+**Binding select / checkbox / radio to a CMS collection:**
+\`\`\`
+update_layer_settings({ layer_id: "...", options_source: { collection_id: "<id>", sort_field_id: "<id>", sort_order: "asc" } })
+\`\`\`
+
+**Configuring form submission behavior:**
+\`\`\`
+update_form_settings({ layer_id: "<form layer id>", success_action: "redirect", redirect_url: "/thank-you" })
+update_form_settings({ layer_id: "<form layer id>", email_notification: { enabled: true, to: "you@example.com", subject: "New lead" } })
+\`\`\`
+
+**Exporting any layer subtree to HTML:**
+\`\`\`
+export_layer_html({ page_id: "...", layer_id: "..." })  // returns the rendered HTML with Tailwind classes
+\`\`\`
+
 **Setting HTML embed code:**
 \`\`\`
 update_layer_settings({ layer_id: "...", html_embed_code: "<div>Custom HTML</div>" })
@@ -257,6 +299,74 @@ update_layer_settings({ layer_id: "...", html_embed_code: "<div>Custom HTML</div
 \`\`\`
 update_layer_iframe({ layer_id: "...", url: "https://www.youtube.com/embed/..." })
 \`\`\`
+
+### Animations & Interactions
+
+Layers can have GSAP-powered animations triggered by user events or scroll. Use the
+preset library for ~80% of cases; drop down to \`set_layer_interactions\` for full control.
+
+**Preset families** (full catalog at \`ycode://reference/animation-presets\`):
+- **Reveal** (scroll-into-view): \`fade-in\`, \`fade-in-up/down/left/right\`, \`scale-in\`
+- **Hover** (auto-yoyo on mouseleave): \`hover-lift\`, \`hover-scale\`, \`hover-fade\`, \`hover-color\`
+- **Click**: \`click-pulse\`, \`click-shake\`
+- **Scroll-scrubbed**: \`parallax-up\`, \`parallax-down\` (tween follows scroll position)
+- **Stagger**: \`scroll-reveal-stagger\` (one tween per target, offset by \`options.stagger\`)
+- **Loop** (infinite on load): \`loop-bounce\`, \`loop-pulse\`, \`loop-spin\`
+
+**Common pattern — fade hero on scroll:**
+\`\`\`
+add_animation({ page_id, layer_id: heroId, preset: "fade-in-up", options: { distance: "60px", duration: 0.8 } })
+\`\`\`
+
+**Card grid that staggers as it scrolls in:**
+\`\`\`
+add_animation({
+  page_id, layer_id: gridId,
+  preset: "scroll-reveal-stagger",
+  targets: [card1, card2, card3, card4],
+  options: { stagger: 0.12 }
+})
+\`\`\`
+
+**Hover a card to lift it AND fade in a CTA inside it** — multi-target:
+\`\`\`
+add_animation({
+  page_id, layer_id: cardId,
+  preset: "hover-lift",
+  targets: [cardId, ctaId],  // one tween per target, same trigger
+  options: { distance: "6px" }
+})
+\`\`\`
+
+**Override the preset's trigger** (rare — most presets pick the right trigger):
+\`\`\`
+add_animation({ page_id, layer_id, preset: "fade-in", trigger: "load" })
+\`\`\`
+
+**Managing animations:**
+- \`list_layer_animations({ page_id, layer_id })\` — see what's attached
+- \`remove_layer_animation({ page_id, layer_id, interaction_id })\` — drop one
+- \`clear_layer_animations({ page_id, layer_id })\` — remove all
+
+**Escape hatch — full GSAP timeline control:**
+\`set_layer_interactions\` replaces the entire \`interactions\` array with raw shapes.
+Use when presets don't fit: custom eases per-tween, exotic timeline positions ("<", ">"),
+mixed apply_styles per property, or compositions a preset can't express.
+
+Tween value formats (see the animation-presets reference for the full table):
+- \`x/y/width/height\`: CSS length string ("100px", "5rem")
+- \`scale\`: unitless string ("1.05")
+- \`rotation\`: degrees ("45deg")
+- \`autoAlpha\`: opacity 0-100 as plain string ("0", "100") — **no % suffix**
+- \`backgroundColor\`: hex/rgb ("#ffffff")
+
+**apply_styles modes** (per-property in the \`from\` state):
+- \`on-load\`: pre-apply the from state on page load. Use for reveal animations to avoid FOUC.
+- \`on-trigger\`: only apply the from state when the trigger fires. Use for hover/click
+  so the element looks normal until interacted with.
+
+The presets pick the right \`apply_styles\` mode automatically; you only need to think
+about it when using \`set_layer_interactions\`.
 
 ### Page Settings
 
@@ -275,6 +385,37 @@ update_page_settings({ page_id: "...", custom_code: { head: "<script>...</script
 update_page_settings({ page_id: "...", auth: { enabled: true, password: "secret" } })
 \`\`\`
 
+**Homepage / dynamic / error pages:**
+\`\`\`
+update_page({ page_id: "...", is_index: true })             // mark as the homepage
+update_page({ page_id: "...", is_dynamic: true })           // turn into a CMS-driven page
+update_page({ page_id: "...", error_page: 404 })            // designate as the 404 page
+\`\`\`
+
+**Binding a dynamic page to a CMS collection:**
+\`\`\`
+update_page_settings({
+  page_id: "...",
+  cms: {
+    collection_id: "<id>",
+    slug_field_id: "<id>",
+    next_previous: { sort_by: "<field id>", sort_order: "asc" }  // controls next-item / previous-item link order
+  }
+})
+\`\`\`
+
+### Redirects
+
+URL redirects are site-wide. Old paths can be literal or regex (\`.+\` / \`.*\`); exact matches take priority.
+
+\`\`\`
+list_redirects()
+add_redirect({ old_url: "/about-us", new_url: "/about", type: "301" })
+add_redirect({ old_url: "/blog/.+", new_url: "/posts/$0" })  // regex match — entire match is $0
+update_redirect({ redirect_id: "...", type: "302" })
+delete_redirect({ redirect_id: "..." })
+\`\`\`
+
 ### Components (Reusable Elements)
 
 Components are reusable layer trees that can be instanced across pages.
@@ -287,10 +428,31 @@ Each instance shares the same structure but can override specific content via **
 
 **Variables** let each instance customize content:
 - **text** — Override text content (headings, paragraphs, button labels)
+- **rich_text** — Override rich-text content (when the linked layer is a richText layer)
 - **image** — Override image source
 - **link** — Override link destination
 - **audio/video** — Override media source
 - **icon** — Override icon
+- **variant** — Override which variant of a nested component is rendered
+
+Variables support \`placeholder\` (input hint) and \`default_value\` (applied when the instance doesn't override).
+
+### Component Variants
+
+A component can have multiple named variants ("Default", "Small", "Dark", etc.) that share variables but
+have independent layer trees. Useful for design system primitives that need a few visual flavors.
+
+\`\`\`
+list_component_variants({ component_id: "..." })
+create_component_variant({ component_id: "...", name: "Small", source_variant_id: "<variant to clone>" })
+update_component_variant({ component_id: "...", variant_id: "...", name: "Compact" })
+delete_component_variant({ component_id: "...", variant_id: "..." })  // non-primary only
+
+// Target a specific variant when modifying its tree:
+update_component_layers({ component_id: "...", variant_id: "<variant id>", operations: [...] })
+\`\`\`
+
+The primary variant (variants[0]) cannot be deleted. Omit \`variant_id\` on \`update_component_layers\` to target it.
 
 EXAMPLE: Creating a "Feature Card" component with a title and description variable:
 \`\`\`
@@ -318,7 +480,22 @@ YCode has a built-in CMS. Collections are like database tables:
 - Use create_collection_item to populate with data
 - Bind collections to layers using collectionList elements
 
-Field types: text, number, boolean, date, reference, rich-text, color, asset, status
+**Field types:**
+- text, number, boolean, date (datetime), date_only
+- reference, multi_reference
+- rich_text, color, status
+- image, audio, video, document — use \`data: { multiple: true }\` for multi-asset fields
+- link, email, phone
+- option — predefined choices via \`data: { options: [{ id, name }] }\`
+- count — computed count of related items via \`data: { count_collection_id, count_field_id }\`
+
+**Sorting & ordering:**
+\`\`\`
+create_collection({ name: "Posts", sorting: { field: "<field id>", direction: "desc" } })
+update_collection({ collection_id: "...", sorting: { field: "manual_order", direction: "manual" } })
+reorder_collection_fields({ collection_id: "...", field_ids: ["...", "...", "..."] })
+set_collection_item_order({ collection_id: "...", item_id: "...", manual_order: 0 })
+\`\`\`
 
 ### Color Variables (Design Tokens)
 
@@ -343,7 +520,8 @@ Example: \`search_google_fonts({ query: "playfair" })\` → \`add_font({ family:
 Multi-language support:
 - Use list_locales to see configured languages
 - Use create_locale with ISO 639-1 code (e.g. "fr", "de", "ja")
-- Use set_translation to translate content for a locale
+- Use set_translation to translate plain-text content for a locale
+- Use set_rich_text_translation with structured blocks for richText fields (skips hand-assembling Tiptap JSON)
 - Use batch_set_translations for bulk translations
 - Each translation targets a source (page/component/cms) + content_key
 

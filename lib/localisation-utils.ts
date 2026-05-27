@@ -771,25 +771,47 @@ export function injectTranslatedText(
     const textTranslation = getTranslationByKey(translations, textTranslationKey);
 
     const textValue = getTranslationValue(textTranslation, valueOptions);
-    if (textValue) {
-      // Preserve the original variable type (dynamic_text or dynamic_rich_text).
-      // Use the translation's stored content_type to decide whether the value is
-      // a JSON-serialized Tiptap doc or plain text — when a rich-text source has
-      // no formatting, it's stored as plain text (see classifyLayerTextForTranslation),
-      // so blindly JSON.parse-ing it would log noisy errors on every render.
-      if (layer.variables?.text?.type === 'dynamic_rich_text') {
-        if (textTranslation?.content_type === 'richtext') {
-          (variableUpdates as any).text = createDynamicRichTextVariable(textValue);
-        } else {
-          (variableUpdates as any).text = createDynamicRichTextVariableFromPlainText(textValue);
-        }
+    // Only inject when the layer actually has a text variable to translate.
+    // Stale/orphan translation rows (e.g. legacy migration artefacts that
+    // point at an ancestor div/section without `variables.text`) would
+    // otherwise materialise text content on layers that should have none,
+    // breaking layout with random strings.
+    // Skip the component-scope layer translation when:
+    // (a) this layer's text was set by an instance override — the override
+    //     value has already been translated at page scope via
+    //     `translateComponentOverrides`, and re-translating here would
+    //     clobber it with the component default; or
+    // (b) the layer has an active component-variable binding
+    //     (`variables.text.id`) — the renderer resolves the value via the
+    //     parent instance's overrides or the variable's default value, so
+    //     overwriting `variables.text` here would strip the binding id and
+    //     break that lookup chain.
+    const hasComponentVariableBinding = !!(layer.variables?.text as any)?.id;
+    if (
+      textValue
+      && layer.variables?.text
+      && !(layer as any)._textFromOverride
+      && !hasComponentVariableBinding
+    ) {
+      // Choose the injected variable type based on the translation's stored
+      // content_type, not the source layer's. A `dynamic_text` source can have
+      // a `richtext` translation (e.g. translator added a line break, or legacy
+      // migration upgraded a translation containing `<br>`) — stuffing the raw
+      // Tiptap JSON into a `dynamic_text` variable would render as literal JSON.
+      // The renderer handles `dynamic_rich_text` on simple text/heading layers
+      // by flattening paragraphs into the layer's single tag.
+      if (textTranslation?.content_type === 'richtext') {
+        (variableUpdates as any).text = createDynamicRichTextVariable(textValue);
+      } else if (layer.variables?.text?.type === 'dynamic_rich_text') {
+        // Plain-text translation for a rich-text source: avoid noisy JSON.parse.
+        (variableUpdates as any).text = createDynamicRichTextVariableFromPlainText(textValue);
       } else {
         (variableUpdates as any).text = createDynamicTextVariable(textValue);
       }
     }
 
     // 2. Inject asset translations for media layers
-    if (layer.name === 'image') {
+    if (layer.name === 'image' && !(layer as any)._imageFromOverride) {
       const imageSrcKey = buildLayerTranslationKey(pageId, `layer:${translationLayerId}:image_src`, masterComponentId);
       const imageSrcTranslation = getTranslationByKey(translations, imageSrcKey);
       const imageAltKey = buildLayerTranslationKey(pageId, `layer:${translationLayerId}:image_alt`, masterComponentId);
@@ -862,6 +884,115 @@ export function injectTranslatedText(
       ...updates,
     };
   });
+}
+
+/**
+ * Pre-resolution pass: translate text/richtext/image values stored in a
+ * page-instance layer's `componentOverrides` using page-scope override
+ * translations. Must run BEFORE `resolveComponents` so translated overrides
+ * propagate through `applyComponentOverrides` normally.
+ *
+ * Keys (page-scope):
+ *   - `layer:<instanceLayerId>:override:text:<varId>`       (string)
+ *   - `layer:<instanceLayerId>:override:rich_text:<varId>`  (Tiptap JSON string)
+ *   - `layer:<instanceLayerId>:override:image_src:<varId>`  (asset_id)
+ *   - `layer:<instanceLayerId>:override:image_alt:<varId>`  (string)
+ *
+ * Each component instance has its own translations, so different uses of the
+ * same component can be translated independently — restoring per-instance
+ * translation behaviour from the legacy editor.
+ */
+export function translateComponentOverrides(
+  layers: Layer[],
+  pageId: string,
+  translations: Record<string, Translation> | null | undefined,
+  options?: { includeIncomplete?: boolean }
+): Layer[] {
+  if (!translations || !layers || layers.length === 0) return layers;
+  const valueOptions = options?.includeIncomplete ? { includeIncomplete: true } : undefined;
+
+  const lookup = (key: string): string | undefined =>
+    getTranslationValue(translations[`page:${pageId}:${key}`], valueOptions);
+
+  const walk = (list: Layer[]): Layer[] =>
+    list.map(layer => {
+      const overrides = layer.componentOverrides;
+      const nextChildren = layer.children?.length ? walk(layer.children) : layer.children;
+      if (!overrides) {
+        return nextChildren === layer.children ? layer : { ...layer, children: nextChildren };
+      }
+
+      let mutated = false;
+      const nextOverrides: Layer['componentOverrides'] = { ...overrides };
+
+      for (const category of ['text', 'rich_text'] as const) {
+        const catOverrides = overrides[category];
+        if (!catOverrides) continue;
+        let categoryMutated = false;
+        const next: Record<string, any> = {};
+        for (const [varId, value] of Object.entries(catOverrides)) {
+          const v = lookup(`layer:${layer.id}:override:${category}:${varId}`);
+          if (v !== undefined && value && typeof value === 'object' && 'data' in (value as any)) {
+            const isRich = category === 'rich_text';
+            const content = isRich ? safeParseJson(v) : v;
+            next[varId] = { ...(value as any), data: { ...(value as any).data, content } };
+            categoryMutated = true;
+          } else {
+            next[varId] = value;
+          }
+        }
+        if (categoryMutated) {
+          nextOverrides[category] = next as any;
+          mutated = true;
+        }
+      }
+
+      const imageOverrides = overrides.image;
+      if (imageOverrides) {
+        let imageMutated = false;
+        const nextImage: Record<string, any> = {};
+        for (const [varId, value] of Object.entries(imageOverrides)) {
+          const srcAssetId = lookup(`layer:${layer.id}:override:image_src:${varId}`);
+          const altText = lookup(`layer:${layer.id}:override:image_alt:${varId}`);
+          if ((srcAssetId === undefined && altText === undefined) || !value || typeof value !== 'object') {
+            nextImage[varId] = value;
+            continue;
+          }
+          const src = (value as any).src;
+          nextImage[varId] = {
+            ...(value as any),
+            ...(srcAssetId !== undefined && src
+              ? { src: { ...src, data: { ...(src.data || {}), asset_id: srcAssetId } } }
+              : {}),
+            ...(altText !== undefined
+              ? { alt: { type: 'dynamic_text', data: { content: altText } } }
+              : {}),
+          };
+          imageMutated = true;
+        }
+        if (imageMutated) {
+          nextOverrides.image = nextImage as any;
+          mutated = true;
+        }
+      }
+
+      if (!mutated && nextChildren === layer.children) return layer;
+      return {
+        ...layer,
+        ...(mutated ? { componentOverrides: nextOverrides } : {}),
+        ...(nextChildren !== layer.children ? { children: nextChildren } : {}),
+      };
+    });
+
+  return walk(layers);
+}
+
+function safeParseJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
 }
 
 /**

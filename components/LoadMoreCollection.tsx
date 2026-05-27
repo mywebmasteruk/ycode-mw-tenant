@@ -1,21 +1,17 @@
 'use client';
 
 /**
- * LoadMoreCollection Component
+ * LoadMoreCollection
  *
- * Client component that handles "Load More" pagination for collection layers.
- * Hydrates from SSR with initial items and fetches more on button click.
- * 
- * Features:
- * - Initial items rendered via SSR
- * - "Load More" button appends pre-rendered items without page reload
- * - Loading spinner during fetch (same style as PaginatedCollection)
- * - Automatic button hide when all items loaded
- * - Works with multi-reference fields (itemIds filtering)
+ * Wires up the SSR-rendered "load more" button for a collection layer.
+ * Renders no real wrapper (only an invisible marker + the SSR children)
+ * so the parent layer's flex/grid layout is preserved, then appends
+ * server-rendered HTML for additional items as direct siblings.
  */
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import type { CollectionPaginationMeta, Layer } from '@/types';
+import { ITEMS_INJECTED_EVENT, type ItemsInjectedDetail } from '@/components/FilterableCollection';
+import type { CollectionPaginationMeta, CollectionItem, Layer } from '@/types';
 
 interface LoadMoreCollectionProps {
   children: React.ReactNode;
@@ -25,13 +21,17 @@ interface LoadMoreCollectionProps {
   layerTemplate?: Layer[];
   /** Optional: item IDs for multi-reference filtering */
   itemIds?: string[];
+  /** Preview mode forces server-rendered links to use the `/ycode/preview` prefix. */
+  isPreview?: boolean;
+  /** Item ID of the dynamic-page collection being rendered (for `current-page` link keywords). */
+  pageCollectionItemId?: string;
+  /** Ordered ids of the dynamic page's collection — powers `next-item` / `previous-item` link keywords. */
+  pageCollectionSortedItemIds?: string[];
+  /** Full collection layer (sans children) — lets the server rebuild proper item wrappers (link/action/attributes). */
+  collectionLayer?: Omit<Layer, 'children'>;
 }
 
-interface LoadMoreState {
-  loadedCount: number;
-  isLoading: boolean;
-  hasMore: boolean;
-}
+const LOAD_MORE_APPENDED_ATTR = 'data-lm-appended';
 
 export default function LoadMoreCollection({
   children,
@@ -39,130 +39,147 @@ export default function LoadMoreCollection({
   collectionLayerId,
   layerTemplate,
   itemIds,
+  isPreview = false,
+  pageCollectionItemId,
+  pageCollectionSortedItemIds,
+  collectionLayer,
 }: LoadMoreCollectionProps) {
-  const { totalItems, itemsPerPage, collectionId } = paginationMeta;
-  const containerRef = useRef<HTMLDivElement>(null);
-  const itemsContainerRef = useRef<HTMLDivElement>(null);
-  
-  const [state, setState] = useState<LoadMoreState>({
-    loadedCount: itemsPerPage,
-    isLoading: false,
-    hasMore: itemsPerPage < totalItems,
-  });
+  const { totalItems, itemsPerPage, collectionId, isPublished, sortBy, sortOrder } = paginationMeta;
+  const markerRef = useRef<HTMLSpanElement>(null);
 
-  // Fetch more items with pre-rendered HTML
+  const [loadedCount, setLoadedCount] = useState(itemsPerPage);
+  const [hasMore, setHasMore] = useState(itemsPerPage < totalItems);
+  const [isLoading, setIsLoading] = useState(false);
+
   const loadMore = useCallback(async () => {
-    if (state.isLoading || !state.hasMore) return;
-    
-    // Need layerTemplate to render items
+    if (isLoading || !hasMore) return;
+
     if (!layerTemplate || layerTemplate.length === 0) {
       console.error('LoadMoreCollection: layerTemplate is required for rendering');
       return;
     }
-    
-    setState(prev => ({ ...prev, isLoading: true }));
-    
+
+    setIsLoading(true);
+
     try {
-      // POST request with template for server-side rendering
       const response = await fetch(
         `/ycode/api/collections/${collectionId}/items/load-more`,
         {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            offset: state.loadedCount,
+            offset: loadedCount,
             limit: itemsPerPage,
-            published: true,
-            itemIds: itemIds,
-            layerTemplate: layerTemplate,
-            collectionLayerId: collectionLayerId,
+            published: isPublished !== false,
+            itemIds,
+            layerTemplate,
+            collectionLayerId,
+            sortBy,
+            sortOrder,
+            isPreview,
+            pageCollectionItemId,
+            pageCollectionSortedItemIds,
+            collectionLayer,
           }),
         }
       );
-      
+
       if (!response.ok) {
         throw new Error('Failed to load more items');
       }
-      
+
       const result = await response.json();
-      const { items, html, hasMore } = result.data;
-      
-      // Append rendered HTML to the items container
-      if (html && itemsContainerRef.current) {
-        itemsContainerRef.current.insertAdjacentHTML('beforeend', html);
+      const { items, html, hasMore: nextHasMore } = result.data;
+      const newItemIds: string[] = Array.isArray(items)
+        ? (items as CollectionItem[]).map(item => item.id)
+        : [];
+
+      const parent = markerRef.current?.parentElement;
+      if (html && parent) {
+        const temp = document.createElement('div');
+        temp.innerHTML = html;
+        while (temp.firstChild) {
+          const child = temp.firstChild;
+          if (child instanceof Element) child.setAttribute(LOAD_MORE_APPENDED_ATTR, '');
+          parent.appendChild(child);
+        }
+        if (newItemIds.length > 0) {
+          const detail: ItemsInjectedDetail = {
+            collectionLayerId,
+            layerTemplate,
+            itemIds: newItemIds,
+            append: true,
+            collectionLayer,
+          };
+          window.dispatchEvent(new CustomEvent<ItemsInjectedDetail>(ITEMS_INJECTED_EVENT, { detail }));
+        }
       }
-      
-      setState(prev => ({
-        loadedCount: prev.loadedCount + items.length,
-        isLoading: false,
-        hasMore,
-      }));
+
+      setLoadedCount(prev => prev + items.length);
+      setHasMore(nextHasMore);
     } catch (error) {
       console.error('Load more failed:', error);
-      setState(prev => ({ ...prev, isLoading: false }));
+    } finally {
+      setIsLoading(false);
     }
-  }, [state.loadedCount, state.isLoading, state.hasMore, itemsPerPage, collectionId, collectionLayerId, itemIds, layerTemplate]);
+  }, [
+    isLoading,
+    hasMore,
+    layerTemplate,
+    collectionId,
+    loadedCount,
+    itemsPerPage,
+    isPublished,
+    itemIds,
+    collectionLayerId,
+    sortBy,
+    sortOrder,
+    isPreview,
+    pageCollectionItemId,
+    pageCollectionSortedItemIds,
+    collectionLayer,
+  ]);
 
-  // Handle click events on load more button (delegated)
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
-      const button = target.closest('[data-pagination-action="load_more"]') as HTMLElement;
-      
+      const button = target.closest('[data-pagination-action="load_more"]') as HTMLElement | null;
       if (!button) return;
-      
-      const layerId = button.getAttribute('data-collection-layer-id');
-      
-      // Only handle clicks for this collection
-      if (layerId !== collectionLayerId) return;
-      
+      if (button.getAttribute('data-collection-layer-id') !== collectionLayerId) return;
       e.preventDefault();
       loadMore();
     };
-    
+
     document.addEventListener('click', handleClick);
     return () => document.removeEventListener('click', handleClick);
   }, [collectionLayerId, loadMore]);
 
-  // Update the count display and button visibility when state changes
   useEffect(() => {
-    // Update count display - use data-layer-id attribute (not id)
-    // The count element has ID format: ${collectionLayerId}-pagination-count
     const countElement = document.querySelector(
       `[data-pagination-for="${collectionLayerId}"] [data-layer-id$="-pagination-count"]`
     );
     if (countElement) {
-      countElement.textContent = `Showing ${state.loadedCount} of ${totalItems}`;
+      countElement.textContent = `Showing ${loadedCount} of ${totalItems}`;
     }
-    
-    // Hide load more button when all items are loaded
+
     const loadMoreButton = document.querySelector(
       `[data-pagination-for="${collectionLayerId}"] [data-pagination-action="load_more"]`
-    ) as HTMLElement;
+    ) as HTMLElement | null;
     if (loadMoreButton) {
-      loadMoreButton.style.display = state.hasMore ? '' : 'none';
+      loadMoreButton.style.display = hasMore ? '' : 'none';
+      loadMoreButton.toggleAttribute('disabled', isLoading);
+      loadMoreButton.style.opacity = isLoading ? '0.6' : '';
+      loadMoreButton.style.pointerEvents = isLoading ? 'none' : '';
     }
-  }, [state.loadedCount, state.hasMore, totalItems, collectionLayerId]);
+  }, [loadedCount, hasMore, totalItems, collectionLayerId, isLoading]);
 
   return (
-    <div 
-      ref={containerRef}
-      className={`relative ${state.isLoading ? 'opacity-50 pointer-events-none' : ''}`}
-      data-loadmore-collection={collectionLayerId}
-    >
-      {/* Loading overlay - same style as PaginatedCollection */}
-      {state.isLoading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-white/50 z-10">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-900" />
-        </div>
-      )}
-      
-      {/* Collection content container - SSR items + dynamically appended items */}
-      <div ref={itemsContainerRef}>
-        {children}
-      </div>
-    </div>
+    <>
+      <span
+        ref={markerRef} data-collection-marker=""
+        style={{ display: 'none' }}
+      />
+      {children}
+    </>
   );
 }
