@@ -68,6 +68,25 @@ function getElement(layerId: string): HTMLElement | null {
 }
 
 /**
+ * Pre-paint each tween's `from` state so the element rests in its intended
+ * initial appearance before the trigger fires. CSS via generateInitialAnimationCSS()
+ * only covers intro triggers (load, scroll-into-view); for hover/click we apply
+ * inline styles here so the layer's CSS default doesn't bleed through as the
+ * `to` state.
+ */
+function applyInitialFromState(interaction: LayerInteraction): void {
+  (interaction.tweens || []).forEach(tween => {
+    if (tween.splitText) return;
+    const el = getElement(tween.layer_id);
+    if (!el) return;
+    const { from } = buildGsapProps(tween);
+    if (Object.keys(from).length > 0) {
+      gsap.set(el, from);
+    }
+  });
+}
+
+/**
  * Collect info about elements that should start hidden based on interactions
  * Returns a map of layerId -> breakpoints (null means all breakpoints)
  */
@@ -316,6 +335,13 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
   // `-fc-${itemId}` suffix that mirrors the server-side filter renderer.
   const [extrasByCollection, setExtrasByCollection] = useState<Record<string, Layer[]>>({});
 
+  // Forces the bind effect to re-run when tracked DOM elements get remounted
+  // (e.g. when dynamic-imported wrappers like LoadMoreCollection finish loading
+  // and React replaces the Suspense fallback with their real subtree). Without
+  // this, gsap.set() and listeners attached on first paint die with the old
+  // nodes and the new ones never animate until the next state change.
+  const [rebindTick, setRebindTick] = useState(0);
+
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<ItemsInjectedDetail>).detail;
@@ -425,6 +451,16 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
       if (!triggerElement) return;
 
       const { trigger } = interaction;
+
+      // Intro triggers (load, scroll-into-view) get their `from` state via
+      // server-emitted CSS. For hover/click, paint the `from` state inline so
+      // the resting appearance matches the author's intent instead of the
+      // layer's CSS default.
+      if (trigger === 'hover' || trigger === 'click') {
+        if (shouldRunOnBreakpoint(interaction, currentBreakpoint)) {
+          applyInitialFromState(interaction);
+        }
+      }
 
       // Helper to get or create timeline (always lazy to avoid GSAP setting inline styles)
       // Initial styles are handled by CSS via generateInitialAnimationCSS()
@@ -562,16 +598,64 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
       }
     });
 
+    // Watch for tracked elements being remounted (e.g. dynamic chunk loading
+    // for LoadMoreCollection/FilterableCollection replaces the Suspense fallback
+    // with the real subtree). When a node carrying a tracked data-layer-id
+    // appears in the DOM, bump rebindTick to re-run this effect against the
+    // fresh nodes — re-applying gsap.set() and rebinding listeners.
+    const trackedLayerIds = new Set<string>();
+    collectedInteractions.forEach(({ triggerLayerId, interaction }) => {
+      trackedLayerIds.add(triggerLayerId);
+      (interaction.tweens || []).forEach(t => trackedLayerIds.add(t.layer_id));
+    });
+
+    let rebindTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRebind = () => {
+      if (rebindTimer) return;
+      rebindTimer = setTimeout(() => {
+        rebindTimer = null;
+        setRebindTick(t => t + 1);
+      }, 50);
+    };
+
+    const containsTrackedId = (node: Node): boolean => {
+      if (!(node instanceof Element)) return false;
+      const id = node.getAttribute('data-layer-id');
+      if (id && trackedLayerIds.has(id)) return true;
+      // Check descendants — items often nest deeply
+      const descendants = node.querySelectorAll('[data-layer-id]');
+      for (const el of descendants) {
+        const cid = el.getAttribute('data-layer-id');
+        if (cid && trackedLayerIds.has(cid)) return true;
+      }
+      return false;
+    };
+
+    const remountObserver = new MutationObserver(mutations => {
+      for (const m of mutations) {
+        if (m.type !== 'childList') continue;
+        for (const n of m.addedNodes) {
+          if (containsTrackedId(n)) {
+            scheduleRebind();
+            return;
+          }
+        }
+      }
+    });
+    remountObserver.observe(document.body, { childList: true, subtree: true });
+
     // Capture ref values for cleanup
     const cleanups = cleanupRef.current;
     const timelines = timelinesRef.current;
 
     return () => {
+      if (rebindTimer) clearTimeout(rebindTimer);
+      remountObserver.disconnect();
       cleanups.forEach((cleanup) => cleanup());
       timelines.forEach((tl) => tl.kill());
       ScrollTrigger.getAll().forEach((st) => st.kill());
     };
-  }, [effectiveLayers, currentBreakpoint]);
+  }, [effectiveLayers, currentBreakpoint, rebindTick]);
 
   return null;
 }

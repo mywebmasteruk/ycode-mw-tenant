@@ -1336,6 +1336,10 @@ export interface CollectionPaginationMeta {
   // paging will return overlapping (duplicate) items.
   sortBy?: string;
   sortOrder?: 'asc' | 'desc';
+  // Optional cap from `collectionVariable.limit` when pagination is enabled.
+  // Treated as a max total: clamps `totalItems` and stops `load_more` once
+  // reached, even if the underlying collection has more matching rows.
+  maxTotal?: number;
 }
 
 // Conditional Visibility Types

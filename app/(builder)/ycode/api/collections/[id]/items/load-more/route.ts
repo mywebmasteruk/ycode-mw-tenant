@@ -8,6 +8,7 @@ import { getAllPages } from '@/lib/repositories/pageRepository';
 import { getAllPageFolders } from '@/lib/repositories/pageFolderRepository';
 import { renderCollectionItemsToHtml, loadTranslationsForLocale } from '@/lib/page-fetcher';
 import { noCache } from '@/lib/api-response';
+import { fetchAllRows } from '@/lib/supabase-constants';
 import type { Layer, CollectionItem, CollectionItemWithValues } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -39,20 +40,24 @@ async function getAllItemIdsForCollection(
   const client = await getSupabaseAdmin();
   if (!client) throw new Error('Supabase client not configured');
 
-  let query = client
-    .from('collection_items')
-    .select('id')
-    .eq('collection_id', collectionId)
-    .eq('is_published', isPublished)
-    .is('deleted_at', null);
+  // Page past Supabase's 1000-row default cap so collections with more items
+  // report accurate `total` / `hasMore` instead of stalling at the cap.
+  // Match SSR's ordering so any `maxTotal` slice picks the same items.
+  const rows = await fetchAllRows<{ id: string }>((from, to) => {
+    let q = client
+      .from('collection_items')
+      .select('id')
+      .eq('collection_id', collectionId)
+      .eq('is_published', isPublished)
+      .is('deleted_at', null)
+      .order('manual_order', { ascending: true })
+      .order('created_at', { ascending: false })
+      .range(from, to);
+    if (isPublished) q = q.eq('is_publishable', true);
+    return q;
+  });
 
-  if (isPublished) {
-    query = query.eq('is_publishable', true);
-  }
-
-  const { data, error } = await query;
-  if (error) throw new Error(`Failed to fetch item IDs: ${error.message}`);
-  return data?.map(d => d.id) || [];
+  return rows.map(r => r.id);
 }
 
 async function getFieldValuesForItems(
@@ -123,6 +128,7 @@ export async function POST(
       isPreview = false,
       pageCollectionItemId,
       pageCollectionSortedItemIds,
+      maxTotal,
     } = body;
 
     if (!layerTemplate || !Array.isArray(layerTemplate)) {
@@ -136,10 +142,16 @@ export async function POST(
     const pageLimit = isNaN(limit) || limit < 1 ? 10 : Math.min(limit, 100);
 
     // Pool of candidate ids: either the explicit list (multi-reference filter)
-    // or every item in the collection.
-    const candidateIds = Array.isArray(itemIds) && itemIds.length > 0
+    // or every item in the collection. When SSR enforced a `maxTotal` cap
+    // (from `collection.limit` with pagination enabled), clamp the pool so
+    // `hasMore` and offset-based paging stop at the same boundary.
+    let candidateIds = Array.isArray(itemIds) && itemIds.length > 0
       ? itemIds
       : await getAllItemIdsForCollection(collectionId, published);
+
+    if (typeof maxTotal === 'number' && maxTotal > 0 && candidateIds.length > maxTotal) {
+      candidateIds = candidateIds.slice(0, maxTotal);
+    }
 
     const total = candidateIds.length;
 

@@ -1959,28 +1959,38 @@ async function buildCollectionCache(
   // Items are fetched per-collection because a single `.in('collection_id', [...])`
   // query is bounded by Supabase/PostgREST's `db-max-rows` setting (often 1000),
   // so a large collection can starve smaller ones in the same page.
+  // We chunk via `.range()` past the 1000-row cap, stopping once we hit
+  // PER_COLLECTION_LIMIT or run out of rows.
   const allCollIds = [...ids, ...refCollectionIds];
   const PER_COLLECTION_LIMIT = 5000;
+  const ITEMS_PAGE_SIZE = 1000;
 
-  const buildItemsQuery = (collectionId: string) => {
-    let q = client
-      .from('collection_items')
-      .select('*')
-      .eq('collection_id', collectionId)
-      .eq('is_published', isPublished)
-      .is('deleted_at', null)
-      .order('manual_order', { ascending: true })
-      .order('created_at', { ascending: false })
-      .limit(PER_COLLECTION_LIMIT);
-    if (isPublished) q = q.eq('is_publishable', true);
-    return q;
+  const fetchItemsForCollection = async (collectionId: string) => {
+    const all: any[] = [];
+    for (let from = 0; from < PER_COLLECTION_LIMIT; from += ITEMS_PAGE_SIZE) {
+      const to = Math.min(from + ITEMS_PAGE_SIZE - 1, PER_COLLECTION_LIMIT - 1);
+      let q = client
+        .from('collection_items')
+        .select('*')
+        .eq('collection_id', collectionId)
+        .eq('is_published', isPublished)
+        .is('deleted_at', null)
+        .order('manual_order', { ascending: true })
+        .order('created_at', { ascending: false })
+        .range(from, to);
+      if (isPublished) q = q.eq('is_publishable', true);
+      const { data, error } = await q;
+      if (error) throw new Error(`Failed to fetch items: ${error.message}`);
+      if (!data || data.length === 0) break;
+      all.push(...data);
+      if (data.length < (to - from + 1)) break;
+    }
+    return all;
   };
 
-  const itemsPromise = Promise.all(allCollIds.map(buildItemsQuery))
-    .then(results => ({
-      data: results.flatMap(r => r.data || []),
-      error: results.find(r => r.error)?.error,
-    }));
+  const itemsPromise = Promise.all(allCollIds.map(fetchItemsForCollection))
+    .then(results => ({ data: results.flat(), error: null as unknown }))
+    .catch(error => ({ data: [] as any[], error }));
 
   const refFieldsPromise = refCollectionIds.length > 0
     ? client.from('collection_fields').select('*')
@@ -2326,6 +2336,51 @@ export async function resolveCollectionLayers(
             filteredItems = filteredItems.filter(i => allowedSet.has(i.id));
           }
 
+          // Apply static collection filters early so totalItems, pagination
+          // slicing, and the `itemIds` we hand off to load_more all reflect
+          // the same constrained set. Input-linked conditions are skipped
+          // here — they run client-side via FilterableCollection.
+          const collectionFilters = collectionVariable.filters;
+          const staticFilters = collectionFilters?.groups?.length ? {
+            ...collectionFilters,
+            groups: collectionFilters.groups.map(group => ({
+              ...group,
+              conditions: group.conditions.filter(c => !c.inputLayerId),
+            })).filter(group => group.conditions.length > 0),
+          } : null;
+          const hasStaticFilters = !!staticFilters && staticFilters.groups.length > 0;
+
+          if (hasStaticFilters) {
+            filteredItems = filteredItems.filter(item =>
+              evaluateVisibility(staticFilters!, {
+                collectionLayerData: item.values,
+                pageCollectionData: parentItemValues ?? null,
+                pageCollectionCounts: {},
+                currentItemId: item.id,
+                pageCollectionItemId: pageCollectionItemId ?? parentCollectionItemId,
+              })
+            );
+          }
+
+          // When pagination is enabled, `collectionVariable.limit` acts as a
+          // hard cap on the total — both for the displayed count and for how
+          // far `load_more` can page. Without pagination, the legacy slice
+          // below applies it as a per-page limit instead.
+          const maxTotal = isPaginated && typeof collectionVariable.limit === 'number' && collectionVariable.limit > 0
+            ? collectionVariable.limit
+            : undefined;
+          if (maxTotal != null && filteredItems.length > maxTotal) {
+            filteredItems = filteredItems.slice(0, maxTotal);
+          }
+
+          // Static filters shrink the candidate pool — propagate the final
+          // ID list so the load_more API uses it as its candidate pool
+          // (otherwise it falls back to all collection items and bypasses
+          // the layer's static filters).
+          if (hasStaticFilters) {
+            allowedItemIds = filteredItems.map(item => item.id);
+          }
+
           const totalItems = filteredItems.length;
 
           // For non-field-sort, apply limit/offset in-memory (mirrors DB pagination)
@@ -2335,30 +2390,6 @@ export async function resolveCollectionLayers(
             items = filteredItems.slice(start, limit ? start + limit : undefined);
           } else {
             items = filteredItems;
-          }
-
-          // Apply static collection filters (evaluate against each item's own values)
-          const collectionFilters = collectionVariable.filters;
-          if (collectionFilters?.groups?.length) {
-            const staticFilters = {
-              ...collectionFilters,
-              groups: collectionFilters.groups.map(group => ({
-                ...group,
-                conditions: group.conditions.filter(c => !c.inputLayerId),
-              })).filter(group => group.conditions.length > 0),
-            };
-
-            if (staticFilters.groups.length > 0) {
-              items = items.filter(item =>
-                evaluateVisibility(staticFilters, {
-                  collectionLayerData: item.values,
-                  pageCollectionData: parentItemValues ?? null,
-                  pageCollectionCounts: {},
-                  currentItemId: item.id,
-                  pageCollectionItemId: pageCollectionItemId ?? parentCollectionItemId,
-                })
-              );
-            }
           }
 
           // Apply sorting if specified (since API doesn't handle sortBy yet)
@@ -2495,6 +2526,7 @@ export async function resolveCollectionLayers(
               isPublished,
               sortBy: collectionVariable.sort_by,
               sortOrder: collectionVariable.sort_order,
+              maxTotal,
             };
           }
 
@@ -2977,9 +3009,16 @@ function updatePaginationLayerWithMeta(layer: Layer, meta: CollectionPaginationM
   // Deep clone to avoid mutation
   const updatedLayer: Layer = JSON.parse(JSON.stringify(layer));
 
+  // No results: hide the entire pagination wrapper rather than rendering
+  // controls with empty/zero text.
+  if (totalItems <= 0) {
+    updatedLayer.classes = Array.isArray(updatedLayer.classes)
+      ? [...updatedLayer.classes, 'hidden']
+      : `${updatedLayer.classes || ''} hidden`.trim();
+  }
+
   // Helper to recursively update layers
   function updateLayerRecursive(l: Layer): void {
-    // Update page info text (for 'pages' mode)
     if (l.id?.endsWith('-pagination-info')) {
       l.variables = {
         ...l.variables,
@@ -2990,7 +3029,6 @@ function updatePaginationLayerWithMeta(layer: Layer, meta: CollectionPaginationM
       };
     }
 
-    // Update items count text (for 'load_more' mode)
     if (l.id?.endsWith('-pagination-count')) {
       const shownItems = Math.min(itemsPerPage, totalItems);
       l.variables = {

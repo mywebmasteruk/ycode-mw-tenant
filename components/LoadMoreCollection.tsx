@@ -31,7 +31,7 @@ interface LoadMoreCollectionProps {
   collectionLayer?: Omit<Layer, 'children'>;
 }
 
-const LOAD_MORE_APPENDED_ATTR = 'data-lm-appended';
+export const LOAD_MORE_APPENDED_ATTR = 'data-lm-appended';
 
 export default function LoadMoreCollection({
   children,
@@ -44,7 +44,7 @@ export default function LoadMoreCollection({
   pageCollectionSortedItemIds,
   collectionLayer,
 }: LoadMoreCollectionProps) {
-  const { totalItems, itemsPerPage, collectionId, isPublished, sortBy, sortOrder } = paginationMeta;
+  const { totalItems, itemsPerPage, collectionId, isPublished, sortBy, sortOrder, maxTotal } = paginationMeta;
   const markerRef = useRef<HTMLSpanElement>(null);
 
   const [loadedCount, setLoadedCount] = useState(itemsPerPage);
@@ -80,6 +80,7 @@ export default function LoadMoreCollection({
             pageCollectionItemId,
             pageCollectionSortedItemIds,
             collectionLayer,
+            maxTotal,
           }),
         }
       );
@@ -138,6 +139,7 @@ export default function LoadMoreCollection({
     pageCollectionItemId,
     pageCollectionSortedItemIds,
     collectionLayer,
+    maxTotal,
   ]);
 
   useEffect(() => {
@@ -155,15 +157,20 @@ export default function LoadMoreCollection({
   }, [collectionLayerId, loadMore]);
 
   useEffect(() => {
-    const countElement = document.querySelector(
-      `[data-pagination-for="${collectionLayerId}"] [data-layer-id$="-pagination-count"]`
-    );
+    const wrapper = document.querySelector(
+      `[data-pagination-for="${collectionLayerId}"]`
+    ) as HTMLElement | null;
+
+    // Hide the whole wrapper when there are no results.
+    if (wrapper) wrapper.classList.toggle('hidden', totalItems <= 0);
+
+    const countElement = wrapper?.querySelector(`[data-layer-id$="-pagination-count"]`);
     if (countElement) {
       countElement.textContent = `Showing ${loadedCount} of ${totalItems}`;
     }
 
-    const loadMoreButton = document.querySelector(
-      `[data-pagination-for="${collectionLayerId}"] [data-pagination-action="load_more"]`
+    const loadMoreButton = wrapper?.querySelector(
+      `[data-pagination-action="load_more"]`
     ) as HTMLElement | null;
     if (loadMoreButton) {
       loadMoreButton.style.display = hasMore ? '' : 'none';
