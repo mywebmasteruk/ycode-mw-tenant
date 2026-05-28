@@ -166,6 +166,12 @@ export const PAGE_COLLECTION_OPERATORS: OperatorOption[] = [
   { value: 'has_no_items', label: 'has no items' },
 ];
 
+/** Operators available when filtering an item against its own ID (source: 'self'). */
+export const SELF_OPERATORS: OperatorOption[] = [
+  { value: 'is_one_of', label: 'is one of' },
+  { value: 'is_not_one_of', label: 'is not one of' },
+];
+
 export const COMPARE_OPERATORS: { value: string; label: string }[] = [
   { value: 'eq', label: 'equals' },
   { value: 'lt', label: 'less than' },
@@ -223,6 +229,21 @@ export function operatorRequiresItemSelection(operator: VisibilityOperator): boo
   return ['is_one_of', 'is_not_one_of', 'contains_all_of', 'contains_exactly'].includes(
     operator
   );
+}
+
+/**
+ * Parse a JSON-stringified array of item IDs (used by reference / self conditions).
+ * Returns an empty array for unset, malformed, or non-array values so callers
+ * can always `for…of` the result without extra guards.
+ */
+export function parseItemIdList(value: string | undefined | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 /** Check if operator requires a second value (for date ranges) */

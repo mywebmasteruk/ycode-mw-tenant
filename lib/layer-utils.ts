@@ -10,7 +10,7 @@ import { getCmsFieldBinding } from '@/lib/tiptap-utils';
 import { applyComponentOverrides } from '@/lib/resolve-components';
 import { getComponentVariantLayers } from '@/lib/component-variant-utils';
 import { resolveFieldFromSources } from '@/lib/cms-variables-utils';
-import { compareDateFilter, isDateFieldType, isDatePreset, resolveDateFilterValue } from '@/lib/collection-field-utils';
+import { compareDateFilter, isDateFieldType, isDatePreset, parseItemIdList, resolveDateFilterValue } from '@/lib/collection-field-utils';
 import { parseMultiReferenceValue, normalizeBooleanValue } from '@/lib/collection-utils';
 import { getInheritedValue } from '@/lib/tailwind-class-mapper';
 import cloneDeep from 'lodash/cloneDeep';
@@ -1941,6 +1941,10 @@ export interface VisibilityContext {
   pageCollectionCounts?: Record<string, number>;
   /** Field definitions for type-aware comparison */
   collectionFields?: CollectionField[];
+  /** ID of the item currently being evaluated (used by `source: 'self'` conditions). */
+  currentItemId?: string;
+  /** ID of the dynamic page's collection item, when on a dynamic page. */
+  pageCollectionItemId?: string | null;
 }
 
 /**
@@ -1953,7 +1957,24 @@ function evaluateCondition(
   condition: import('@/types').VisibilityCondition,
   context: VisibilityContext
 ): boolean {
-  const { collectionLayerData, pageCollectionData, pageCollectionCounts } = context;
+  const { collectionLayerData, pageCollectionData, pageCollectionCounts, currentItemId, pageCollectionItemId } = context;
+
+  // Self conditions: compare the item being evaluated against a set of item
+  // IDs (statically picked and/or the current dynamic page item). Used for
+  // patterns like "only show the current item" or "exclude the current item
+  // from a related list". If we don't know the current item, the condition
+  // can't be evaluated meaningfully — fall through to `true` to avoid hiding
+  // everything by accident (matches the default behaviour of unset conditions).
+  if (condition.source === 'self') {
+    if (!currentItemId) return true;
+    const compareIds = new Set<string>();
+    for (const id of parseItemIdList(condition.value)) compareIds.add(id);
+    if (condition.includesCurrentPageItem && pageCollectionItemId) {
+      compareIds.add(pageCollectionItemId);
+    }
+    const matches = compareIds.has(currentItemId);
+    return condition.operator === 'is_not_one_of' ? !matches : matches;
+  }
 
   if (condition.source === 'page_collection') {
     // Page collection conditions

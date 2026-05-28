@@ -596,7 +596,7 @@ async function fetchPageByPathInternal(
             // Pass enhanced values so nested collections can filter based on dynamic page data
             // Pass collectionItem.id so inverse reference layers can query by parent item
             let resolvedLayers = layersWithInjectedData.length > 0
-              ? await resolveCollectionLayers(layersWithInjectedData, isPublished, enhancedItemValues, paginationContext, translations, collectionItem.id, timezone)
+              ? await resolveCollectionLayers(layersWithInjectedData, isPublished, enhancedItemValues, paginationContext, translations, collectionItem.id, timezone, collectionItem.id)
               : [];
 
             // Resolve collections inside rich text embedded components
@@ -2112,6 +2112,11 @@ export async function resolveCollectionLayers(
   translations?: Record<string, Translation>,
   parentCollectionItemId?: string,
   timezone?: string,
+  // The dynamic page's collection item ID. Distinct from `parentCollectionItemId`
+  // (which advances as nested collections recurse) because `self` filters always
+  // resolve "current page item" against the outermost page item, never the
+  // nearest enclosing collection.
+  pageCollectionItemId?: string,
 ): Promise<Layer[]> {
   // Reuse caller-provided timezone, or fetch once for the entire tree
   if (!timezone) {
@@ -2347,8 +2352,10 @@ export async function resolveCollectionLayers(
               items = items.filter(item =>
                 evaluateVisibility(staticFilters, {
                   collectionLayerData: item.values,
-                  pageCollectionData: null,
+                  pageCollectionData: parentItemValues ?? null,
                   pageCollectionCounts: {},
+                  currentItemId: item.id,
+                  pageCollectionItemId: pageCollectionItemId ?? parentCollectionItemId,
                 })
               );
             }
@@ -2788,7 +2795,7 @@ export async function resolveCollectionLayers(
   // Third pass: Filter layers by conditional visibility
   // We need to compute collection counts first, then filter
   // parentItemValues is the page collection data for dynamic pages
-  const filteredResult = filterByVisibility(resultWithPagination, undefined, parentItemValues);
+  const filteredResult = filterByVisibility(resultWithPagination, undefined, parentItemValues, pageCollectionItemId ?? parentCollectionItemId);
 
   return filteredResult;
 }
@@ -2877,21 +2884,25 @@ function getFilterableCollectionTarget(
  * @param layers - Layer tree to filter
  * @param collectionLayerData - Current collection layer item values for field conditions
  * @param pageCollectionData - Page collection data for dynamic pages
+ * @param pageCollectionItemId - ID of the dynamic page's collection item, when on a dynamic page
  * @returns Filtered layer tree with hidden layers removed
  */
 function filterByVisibility(
   layers: Layer[],
   collectionLayerData?: Record<string, string>,
-  pageCollectionData?: Record<string, string> | null
+  pageCollectionData?: Record<string, string> | null,
+  pageCollectionItemId?: string | null,
 ): Layer[] {
   const pageCollectionCounts = computeCollectionCounts(layers);
   const filterableCollectionIds = findFilterableCollectionIds(layers);
 
   function filterLayer(
     layer: Layer,
-    currentCollectionLayerData?: Record<string, string>
+    currentCollectionLayerData?: Record<string, string>,
+    currentItemId?: string,
   ): Layer | null {
     const effectiveCollectionLayerData = layer._collectionItemValues || currentCollectionLayerData;
+    const effectiveCurrentItemId = layer._collectionItemId || currentItemId;
 
     const conditionalVisibility = layer.variables?.conditionalVisibility;
     if (conditionalVisibility && conditionalVisibility.groups?.length > 0) {
@@ -2899,6 +2910,8 @@ function filterByVisibility(
         collectionLayerData: effectiveCollectionLayerData,
         pageCollectionData,
         pageCollectionCounts,
+        currentItemId: effectiveCurrentItemId,
+        pageCollectionItemId,
       });
       const filterTarget = getFilterableCollectionTarget(conditionalVisibility, filterableCollectionIds);
       if (filterTarget) {
@@ -2923,7 +2936,7 @@ function filterByVisibility(
           attributes,
           children: layer.children
             ? layer.children
-              .map(child => filterLayer(child, effectiveCollectionLayerData))
+              .map(child => filterLayer(child, effectiveCollectionLayerData, effectiveCurrentItemId))
               .filter((child): child is Layer => child !== null)
             : undefined,
         };
@@ -2935,7 +2948,7 @@ function filterByVisibility(
 
     if (layer.children) {
       const filteredChildren = layer.children
-        .map(child => filterLayer(child, effectiveCollectionLayerData))
+        .map(child => filterLayer(child, effectiveCollectionLayerData, effectiveCurrentItemId))
         .filter((child): child is Layer => child !== null);
 
       return {
@@ -2948,7 +2961,7 @@ function filterByVisibility(
   }
 
   return layers
-    .map(layer => filterLayer(layer, collectionLayerData))
+    .map(layer => filterLayer(layer, collectionLayerData, pageCollectionItemId ?? undefined))
     .filter((layer): layer is Layer => layer !== null);
 }
 
@@ -3260,6 +3273,7 @@ export async function renderCollectionItemsToHtml(
         undefined,
         item.id,
         htmlTimezone,
+        pageLinkContext?.pageCollectionItemId,
       );
 
       // Resolve all AssetVariables to URLs server-side
@@ -3315,7 +3329,7 @@ export async function renderCollectionItemsToHtml(
       }
 
       // Apply conditional visibility based on this item's field values
-      resolvedLayers = filterByVisibility(resolvedLayers, item.values);
+      resolvedLayers = filterByVisibility(resolvedLayers, item.values, undefined, pageLinkContext?.pageCollectionItemId);
 
       // Preferred path: rebuild a full clone of the collection layer just
       // like SSR does (link/action/attributes preserved). Renders one HTML

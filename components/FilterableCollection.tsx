@@ -184,7 +184,15 @@ export default function FilterableCollection({
   );
 
   const buildApiFilters = useCallback(() => {
-    type FilterItem = { fieldId: string; operator: string; value: string; value2?: string; fieldType?: string };
+    type FilterItem = {
+      fieldId: string;
+      operator: string;
+      value: string;
+      value2?: string;
+      fieldType?: string;
+      source?: 'collection_field' | 'self';
+      includesCurrentPageItem?: boolean;
+    };
     const operatorsWithoutValue = new Set([
       'is_present',
       'is_empty',
@@ -201,6 +209,21 @@ export default function FilterableCollection({
       const activeInGroup: FilterItem[] = [];
 
       for (const condition of group.conditions) {
+        // Self conditions compare against the item's own ID — no fieldId needed,
+        // and they're forwarded verbatim so the server resolves the current page item.
+        if (condition.source === 'self') {
+          const hasStaticIds = !!condition.value && condition.value !== '[]';
+          if (!hasStaticIds && !condition.includesCurrentPageItem) continue;
+          activeInGroup.push({
+            fieldId: '',
+            operator: condition.operator,
+            value: condition.value || '[]',
+            source: 'self',
+            includesCurrentPageItem: condition.includesCurrentPageItem,
+          });
+          continue;
+        }
+
         if (!condition.fieldId) continue;
 
         let value = condition.inputLayerId ? '' : (condition.value || '');
@@ -533,7 +556,15 @@ export default function FilterableCollection({
   // --- Fetch logic ---
 
   const fetchFiltered = useCallback((
-    filterGroups: Array<Array<{ fieldId: string; operator: string; value: string; value2?: string; fieldType?: string }>>,
+    filterGroups: Array<Array<{
+      fieldId: string;
+      operator: string;
+      value: string;
+      value2?: string;
+      fieldType?: string;
+      source?: 'collection_field' | 'self';
+      includesCurrentPageItem?: boolean;
+    }>>,
     offset: number,
     append: boolean,
   ) => {

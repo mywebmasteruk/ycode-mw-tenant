@@ -8,7 +8,7 @@ import { getAllPages } from '@/lib/repositories/pageRepository';
 import { getAllPageFolders } from '@/lib/repositories/pageFolderRepository';
 import { renderCollectionItemsToHtml, loadTranslationsForLocale } from '@/lib/page-fetcher';
 import { noCache } from '@/lib/api-response';
-import { compareDateFilter, isDateFieldType, isDatePreset, resolveDateFilterValue } from '@/lib/collection-field-utils';
+import { compareDateFilter, isDateFieldType, isDatePreset, parseItemIdList, resolveDateFilterValue } from '@/lib/collection-field-utils';
 import type { Layer, CollectionItem, CollectionItemWithValues } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -22,6 +22,12 @@ interface FilterCondition {
   value: string;
   value2?: string;
   fieldType?: string;
+  // 'collection_field' (default, legacy) compares against a stored field value;
+  // 'self' compares the item's own ID against a set of IDs.
+  source?: 'collection_field' | 'self';
+  // For source === 'self': also include the current dynamic page item's ID
+  // in the comparison set at runtime.
+  includesCurrentPageItem?: boolean;
 }
 
 // PostgREST encodes .in() values into a URL query param.
@@ -414,10 +420,30 @@ async function getIdsMatchingFilter(
   }
 }
 
+/**
+ * Build the set of IDs matched by a `source: 'self'` filter. Operates purely on
+ * the input ID set — no DB roundtrip needed because the comparison is identity-based.
+ */
+function getSelfFilterMatches(
+  filter: FilterCondition,
+  candidateIds: string[],
+  pageCollectionItemId?: string,
+): Set<string> {
+  const compareSet = new Set<string>(parseItemIdList(filter.value));
+  if (filter.includesCurrentPageItem && pageCollectionItemId) {
+    compareSet.add(pageCollectionItemId);
+  }
+  if (filter.operator === 'is_not_one_of') {
+    return new Set(candidateIds.filter(id => !compareSet.has(id)));
+  }
+  return new Set(candidateIds.filter(id => compareSet.has(id)));
+}
+
 async function getFilteredItemIds(
   collectionId: string,
   isPublished: boolean,
   filterGroups: FilterCondition[][],
+  pageCollectionItemId?: string,
 ): Promise<{ matchingIds: string[]; total: number }> {
   const client = await getSupabaseAdmin();
   if (!client) throw new Error('Supabase client not configured');
@@ -436,6 +462,11 @@ async function getFilteredItemIds(
 
     for (let filter of group) {
       if (currentIds.size === 0) break;
+      if (filter.source === 'self') {
+        const matchingForFilter = getSelfFilterMatches(filter, [...currentIds], pageCollectionItemId);
+        currentIds = new Set([...currentIds].filter(id => matchingForFilter.has(id)));
+        continue;
+      }
       if (isDateFieldType(filter.fieldType) && isDatePreset(filter.value)) {
         const resolved = resolveDateFilterValue(filter.operator, filter.value, filter.value2);
         if (resolved) {
@@ -547,6 +578,7 @@ export async function POST(
       collectionId,
       isPublished,
       filterGroups,
+      pageCollectionItemId,
     );
 
     if (matchingIds.length === 0) {

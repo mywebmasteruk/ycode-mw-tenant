@@ -34,7 +34,6 @@ import {
   DropdownMenuTrigger,
   DropdownMenuCheckboxItem,
 } from '@/components/ui/dropdown-menu';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Spinner } from '@/components/ui/spinner';
 import {
   getFieldIcon,
@@ -48,8 +47,9 @@ import {
   COMPARE_OPERATORS,
   PAGE_COLLECTION_OPERATORS,
   isDateFieldType,
+  SELF_OPERATORS,
 } from '@/lib/collection-field-utils';
-import { findAllCollectionLayers, CollectionLayerInfo } from '@/lib/layer-utils';
+import { findAllCollectionLayers, findAllParentCollectionLayers, getCollectionVariable, CollectionLayerInfo } from '@/lib/layer-utils';
 import { usePagesStore } from '@/stores/usePagesStore';
 import { useEditorStore } from '@/stores/useEditorStore';
 import { useComponentsStore } from '@/stores/useComponentsStore';
@@ -72,10 +72,16 @@ function ReferenceItemsSelector({
   collectionId,
   value,
   onChange,
+  currentPageItem,
 }: {
   collectionId: string;
   value: string; // JSON array of item IDs
   onChange: (value: string) => void;
+  /** When provided, renders a "Current page item" entry above the items list. */
+  currentPageItem?: {
+    checked: boolean;
+    onChange: (checked: boolean) => void;
+  };
 }) {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<CollectionItemWithValues[]>([]);
@@ -137,23 +143,18 @@ function ReferenceItemsSelector({
 
   // Get display text for closed state
   const getDisplayText = () => {
-    if (selectedIds.length === 0) return 'Select items...';
+    const totalCount = selectedIds.length + (currentPageItem?.checked ? 1 : 0);
+    if (totalCount === 0) return 'Select items...';
 
-    // Find display names for selected items
-    const selectedNames = selectedIds
-      .map(id => {
-        const item = items.find(i => i.id === id);
-        return item ? getDisplayName(item) : null;
-      })
-      .filter(Boolean);
-
-    if (selectedNames.length > 0) {
-      return selectedNames.length <= 2
-        ? selectedNames.join(', ')
-        : `${selectedNames.length} items selected`;
+    const labels: string[] = [];
+    if (currentPageItem?.checked) labels.push('Current page item');
+    for (const id of selectedIds) {
+      const item = items.find(i => i.id === id);
+      if (item) labels.push(getDisplayName(item));
     }
 
-    return `${selectedIds.length} item${selectedIds.length !== 1 ? 's' : ''} selected`;
+    if (labels.length > 0 && labels.length <= 2) return labels.join(', ');
+    return `${totalCount} item${totalCount !== 1 ? 's' : ''} selected`;
   };
 
   if (!collectionId) {
@@ -173,11 +174,20 @@ function ReferenceItemsSelector({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent className="w-(--radix-dropdown-menu-trigger-width) min-w-50 max-h-60 overflow-y-auto" align="start">
+        {currentPageItem && (
+          <DropdownMenuCheckboxItem
+            checked={currentPageItem.checked}
+            onCheckedChange={(checked) => currentPageItem.onChange(checked === true)}
+            onSelect={(e) => e.preventDefault()}
+          >
+            Current page item
+          </DropdownMenuCheckboxItem>
+        )}
         {loading ? (
           <div className="flex items-center justify-center py-4">
             <Spinner />
           </div>
-        ) : items.length === 0 ? (
+        ) : items.length === 0 && !currentPageItem ? (
           <div className="text-center py-4 text-xs text-muted-foreground">
             No items in this collection
           </div>
@@ -216,24 +226,34 @@ export default function ConditionalVisibilitySettings({
   const editingComponentVariantId = useEditorStore((state) => state.editingComponentVariantId);
   const componentDrafts = useComponentsStore((state) => state.componentDrafts);
 
-  // Get all collection layers on the page
-  const pageCollectionLayers = useMemo((): CollectionLayerInfo[] => {
+  // Resolve the layer tree currently being edited (page or component variant).
+  const currentLayers = useMemo((): Layer[] => {
     if (!currentPageId) return [];
-
-    let layers: Layer[] = [];
     if (editingComponentId) {
       const variantDrafts = componentDrafts[editingComponentId];
       const variantId = (editingComponentVariantId && variantDrafts?.[editingComponentVariantId])
         ? editingComponentVariantId
         : (variantDrafts ? Object.keys(variantDrafts)[0] : null);
-      layers = (variantId && variantDrafts) ? variantDrafts[variantId] || [] : [];
-    } else {
-      const draft = draftsByPageId[currentPageId];
-      layers = draft ? draft.layers : [];
+      return (variantId && variantDrafts) ? variantDrafts[variantId] || [] : [];
     }
-
-    return findAllCollectionLayers(layers);
+    const draft = draftsByPageId[currentPageId];
+    return draft ? draft.layers : [];
   }, [currentPageId, editingComponentId, editingComponentVariantId, componentDrafts, draftsByPageId]);
+
+  // Get all collection layers on the page
+  const pageCollectionLayers = useMemo((): CollectionLayerInfo[] => {
+    return currentLayers.length > 0 ? findAllCollectionLayers(currentLayers) : [];
+  }, [currentLayers]);
+
+  // The closest enclosing collection for the layer being styled — used as the
+  // pool the user picks static items from when configuring a `self` condition.
+  const selfReferenceCollectionId = useMemo((): string | undefined => {
+    if (!layer) return undefined;
+    const parents = findAllParentCollectionLayers(currentLayers, layer.id);
+    const closest = parents[0];
+    const closestId = closest ? getCollectionVariable(closest)?.id : undefined;
+    return closestId ?? pageCollectionLayers[0]?.collectionId;
+  }, [layer, currentLayers, pageCollectionLayers]);
 
   // Initialize groups from layer data
   const groups: VisibilityConditionGroup[] = useMemo(() => {
@@ -257,7 +277,7 @@ export default function ConditionalVisibilitySettings({
   }, [layer, onLayerUpdate]);
 
   const hasConditions = groups.length > 0;
-  const hasAvailableSources = allFieldsFromGroups.length > 0 || pageCollectionLayers.length > 0;
+  const hasAvailableSources = allFieldsFromGroups.length > 0 || pageCollectionLayers.length > 0 || !!selfReferenceCollectionId;
 
   if (!layer || (!hasConditions && !hasAvailableSources)) {
     return null;
@@ -299,6 +319,37 @@ export default function ConditionalVisibilitySettings({
     };
 
     updateGroups([...groups, newGroup]);
+  };
+
+  // Build a fresh "self" condition (visibility filter by enclosing item identity).
+  const buildSelfCondition = (id: string): VisibilityCondition => ({
+    id,
+    source: 'self',
+    operator: 'is_one_of',
+    value: '[]',
+    includesCurrentPageItem: true,
+    referenceCollectionId: selfReferenceCollectionId,
+  });
+
+  const handleAddSelfConditionGroup = () => {
+    const newGroup: VisibilityConditionGroup = {
+      id: Date.now().toString(),
+      conditions: [buildSelfCondition(`${Date.now()}-1`)],
+    };
+    updateGroups([...groups, newGroup]);
+  };
+
+  const handleAddSelfConditionFromOr = (groupId: string) => {
+    const newGroups = groups.map(group => {
+      if (group.id === groupId) {
+        return {
+          ...group,
+          conditions: [...group.conditions, buildSelfCondition(`${groupId}-${Date.now()}`)],
+        };
+      }
+      return group;
+    });
+    updateGroups(newGroups);
   };
 
   // Handle removing a condition group
@@ -483,13 +534,23 @@ export default function ConditionalVisibilitySettings({
   // Render the dropdown content for adding conditions
   const renderAddConditionDropdown = (
     onFieldSelect: (field: CollectionField) => void,
-    onPageCollectionSelect: (layer: CollectionLayerInfo) => void
+    onPageCollectionSelect: (layer: CollectionLayerInfo) => void,
+    onSelfSelect: () => void,
   ) => (
     <DropdownMenuContent align="end" className="max-h-75! overflow-y-auto">
-      {/* Collection Fields Section - render each group */}
+      {selfReferenceCollectionId && (
+        <>
+          <DropdownMenuLabel className="text-xs text-muted-foreground">Item</DropdownMenuLabel>
+          <DropdownMenuItem onClick={onSelfSelect} className="flex items-center gap-2">
+            <Icon name="database" className="size-3 opacity-60" />
+            Item ID
+          </DropdownMenuItem>
+        </>
+      )}
+
       {fieldGroups?.map((group, groupIndex) => group.fields.length > 0 && (
         <React.Fragment key={groupIndex}>
-          {groupIndex > 0 && <DropdownMenuSeparator />}
+          {(groupIndex > 0 || selfReferenceCollectionId) && <DropdownMenuSeparator />}
           <DropdownMenuLabel className="text-xs text-muted-foreground">
             {group.label || 'Collection Fields'}
           </DropdownMenuLabel>
@@ -527,7 +588,7 @@ export default function ConditionalVisibilitySettings({
       )}
 
       {/* Empty State */}
-      {allFieldsFromGroups.length === 0 && pageCollectionLayers.length === 0 && (
+      {allFieldsFromGroups.length === 0 && pageCollectionLayers.length === 0 && !selfReferenceCollectionId && (
         <div className="px-2 py-4 text-xs text-muted-foreground text-center">
           No fields or collections available
         </div>
@@ -548,8 +609,87 @@ export default function ConditionalVisibilitySettings({
     return undefined;
   };
 
+  // Apply an arbitrary patch to a single condition (used by self conditions
+  // that have fields beyond operator/value, e.g. includesCurrentPageItem).
+  const patchCondition = (groupId: string, conditionId: string, patch: Partial<VisibilityCondition>) => {
+    const newGroups = groups.map(group => {
+      if (group.id !== groupId) return group;
+      return {
+        ...group,
+        conditions: group.conditions.map(c => c.id === conditionId ? { ...c, ...patch } : c),
+      };
+    });
+    updateGroups(newGroups);
+  };
+
+  // Render a `source: 'self'` condition (hide/show based on the enclosing item's identity).
+  const renderSelfCondition = (
+    condition: VisibilityCondition,
+    group: VisibilityConditionGroup,
+    index: number,
+  ) => {
+    const referenceCollectionId = condition.referenceCollectionId ?? selfReferenceCollectionId;
+    return (
+      <React.Fragment key={condition.id}>
+        {index > 0 && (
+          <li className="flex items-center gap-2 h-6">
+            <Label variant="muted" className="text-[10px]">Or</Label>
+            <hr className="flex-1" />
+          </li>
+        )}
+        <li className="*:w-full flex flex-col gap-2">
+          <header className="flex items-center gap-1.5">
+            <div className="size-5 flex items-center justify-center rounded-[6px] bg-secondary/50 hover:bg-secondary">
+              <Icon name="database" className="size-2.5 opacity-60" />
+            </div>
+            <Label variant="muted" className="truncate">Item ID</Label>
+            <span
+              role="button"
+              tabIndex={0}
+              className="ml-auto -my-1 -mr-0.5 shrink-0 p-0.5 rounded-sm opacity-70 hover:opacity-100 transition-opacity cursor-pointer"
+              onClick={() => handleRemoveCondition(group.id, condition.id)}
+            >
+              <Icon name="x" className="size-2.5" />
+            </span>
+          </header>
+
+          <Select
+            value={condition.operator}
+            onValueChange={(value) => patchCondition(group.id, condition.id, { operator: value as VisibilityOperator })}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder="Select..." />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {SELF_OPERATORS.map((op) => (
+                  <SelectItem key={op.value} value={op.value}>{op.label}</SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+
+          {referenceCollectionId && (
+            <ReferenceItemsSelector
+              collectionId={referenceCollectionId}
+              value={condition.value || '[]'}
+              onChange={(value) => handleValueChange(group.id, condition.id, value)}
+              currentPageItem={{
+                checked: !!condition.includesCurrentPageItem,
+                onChange: (checked) => patchCondition(group.id, condition.id, { includesCurrentPageItem: checked }),
+              }}
+            />
+          )}
+        </li>
+      </React.Fragment>
+    );
+  };
+
   // Render a single condition
   const renderCondition = (condition: VisibilityCondition, group: VisibilityConditionGroup, index: number) => {
+    if (condition.source === 'self') {
+      return renderSelfCondition(condition, group, index);
+    }
     const isPageCollection = condition.source === 'page_collection';
     const fieldType = isPageCollection ? undefined : condition.fieldType || getFieldType(condition.fieldId || '');
     const operators = isPageCollection ? PAGE_COLLECTION_OPERATORS : getOperatorsForFieldType(fieldType);
@@ -713,7 +853,8 @@ export default function ConditionalVisibilitySettings({
           </DropdownMenuTrigger>
           {renderAddConditionDropdown(
             handleAddFieldConditionGroup,
-            handleAddPageCollectionConditionGroup
+            handleAddPageCollectionConditionGroup,
+            handleAddSelfConditionGroup,
           )}
         </DropdownMenu>
       }
@@ -750,7 +891,8 @@ export default function ConditionalVisibilitySettings({
                       </DropdownMenuTrigger>
                       {renderAddConditionDropdown(
                         (field) => handleAddConditionFromOr(group.id, field),
-                        (layer) => handleAddPageCollectionConditionFromOr(group.id, layer)
+                        (layer) => handleAddPageCollectionConditionFromOr(group.id, layer),
+                        () => handleAddSelfConditionFromOr(group.id),
                       )}
                     </DropdownMenu>
                   </li>
