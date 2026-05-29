@@ -1,4 +1,4 @@
-import type { Collection, CollectionFieldType, CollectionSorting } from '@/types';
+import type { Collection, CollectionFieldType, CollectionSorting, Layer } from '@/types';
 import { sanitizeSlug } from './page-utils';
 
 /**
@@ -334,4 +334,47 @@ export function resolveReferenceFieldsSync(
   }
 
   return enhancedValues;
+}
+
+/**
+ * Recursively suffix all layer IDs (and matching interaction tween `layer_id`
+ * references) in a subtree so each rendered collection item has unique DOM
+ * targets. Lets animations bind to the correct element per item instead of
+ * sharing one DOM node.
+ */
+export function remapLayerIdsForCollectionItem(layer: Layer, suffix: string): Layer {
+  const originalIds = new Set<string>();
+  const collectIds = (l: Layer) => {
+    originalIds.add(l.id);
+    l.children?.forEach(collectIds);
+  };
+  collectIds(layer);
+
+  const remapLayer = (l: Layer): Layer => {
+    const remapped: Layer = {
+      ...l,
+      id: `${l.id}${suffix}`,
+    };
+
+    if (l.interactions?.length) {
+      remapped.interactions = l.interactions.map(interaction => ({
+        ...interaction,
+        id: `${interaction.id}${suffix}`,
+        tweens: interaction.tweens.map(tween => ({
+          ...tween,
+          layer_id: originalIds.has(tween.layer_id)
+            ? `${tween.layer_id}${suffix}`
+            : tween.layer_id,
+        })),
+      }));
+    }
+
+    if (l.children) {
+      remapped.children = l.children.map(remapLayer);
+    }
+
+    return remapped;
+  };
+
+  return remapLayer(layer);
 }

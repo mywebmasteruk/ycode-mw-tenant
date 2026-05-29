@@ -13,7 +13,13 @@ Use the same format as commit messages:
 <type>: <concise summary in imperative mood>
 ```
 
-Examples: `feat: add custom domain management`, `fix: prevent primary domain deletion`
+**Keep titles user-friendly, not too technical.** PR titles often surface in changelogs and release notes, so they should be understandable to non-engineers. Describe the user-facing change or outcome, not the implementation detail.
+
+Examples:
+
+- `feat: add custom domain management` (not `feat: wire Vercel SDK into domain repository`)
+- `fix: prevent primary domain deletion` (not `fix: add guard clause in deleteDomain handler`)
+- `feat: support drag and drop for page reordering` (not `feat: integrate @dnd-kit into PageList`)
 
 ## Body Format
 

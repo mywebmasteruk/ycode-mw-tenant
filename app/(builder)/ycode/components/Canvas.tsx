@@ -30,7 +30,7 @@ import { useColorVariablesStore } from '@/stores/useColorVariablesStore';
 import { usePagesStore } from '@/stores/usePagesStore';
 import { useSettingsStore } from '@/stores/useSettingsStore';
 
-import { injectTranslatedText } from '@/lib/localisation-utils';
+import { injectTranslatedText, translateComponentOverrides } from '@/lib/localisation-utils';
 
 import type { Layer, Component, CollectionItemWithValues, CollectionField, Breakpoint, Asset, ComponentVariable, Locale, Translation } from '@/types';
 import type { UseLiveLayerUpdatesReturn } from '@/hooks/use-live-layer-updates';
@@ -329,10 +329,21 @@ const Canvas = React.memo(function Canvas({
   // State
   const [iframeReady, setIframeReady] = useState(false);
 
+  // Translate component-instance override values before serialization so that
+  // `resolveComponents` (inside serializeLayers) propagates per-instance
+  // translations through the override pipeline. Runs only when a non-default
+  // locale is active.
+  const layersForSerialization = useMemo(() => {
+    if (!currentLocale || currentLocale.is_default || !translations) return layers;
+    const lookupPageId = pageId || (editingComponentId ?? '');
+    if (!lookupPageId) return layers;
+    return translateComponentOverrides(layers, lookupPageId, translations, { includeIncomplete: true });
+  }, [layers, currentLocale, translations, pageId, editingComponentId]);
+
   // Resolve component instances in layers
   const { layers: resolvedLayers, componentMap } = useMemo(() => {
-    return serializeLayers(layers, components, editingComponentVariables);
-  }, [layers, components, editingComponentVariables]);
+    return serializeLayers(layersForSerialization, components, editingComponentVariables);
+  }, [layersForSerialization, components, editingComponentVariables]);
 
   // When a non-default locale is active, swap layer text and translatable
   // asset references with their translations so the canvas mirrors what the

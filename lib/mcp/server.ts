@@ -23,12 +23,13 @@ import { registerLocaleTools } from '@/lib/mcp/tools/locales';
 import { registerFormTools } from '@/lib/mcp/tools/forms';
 import { registerSettingsTools } from '@/lib/mcp/tools/settings';
 import { registerPublishingTools } from '@/lib/mcp/tools/publishing';
+import { registerAnimationTools } from '@/lib/mcp/tools/animations';
 import { registerReferenceResources } from '@/lib/mcp/resources/reference';
 import { registerSiteResources } from '@/lib/mcp/resources/site';
 
 export function createMcpServer(): McpServer {
   const server = new McpServer(
-    { name: 'ycode', version: '0.4.0' },
+    { name: 'ycode', version: '1.0.0' },
     { instructions: SYSTEM_INSTRUCTIONS },
   );
 
@@ -48,6 +49,7 @@ export function createMcpServer(): McpServer {
   registerFormTools(server);
   registerSettingsTools(server);
   registerPublishingTools(server);
+  registerAnimationTools(server);
 
   registerReferenceResources(server);
   registerSiteResources(server);
