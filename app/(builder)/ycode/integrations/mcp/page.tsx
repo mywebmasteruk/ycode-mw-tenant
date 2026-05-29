@@ -30,6 +30,8 @@ interface McpToken {
   is_active: boolean;
   last_used_at: string | null;
   created_at: string;
+  oauth_client_id: string | null;
+  expires_at: string | null;
 }
 
 export default function McpPage() {
@@ -43,9 +45,11 @@ export default function McpPage() {
   const [generatedToken, setGeneratedToken] = useState<McpToken | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [mcpBearerUrl, setMcpBearerUrl] = useState('/ycode/mcp');
 
   useEffect(() => {
     fetchTokens();
+    setMcpBearerUrl(`${window.location.origin}/ycode/mcp`);
   }, []);
 
   const fetchTokens = async () => {
@@ -127,6 +131,16 @@ export default function McpPage() {
     return formatDate(dateString);
   };
 
+  const isOAuthToken = (token: McpToken) => Boolean(token.oauth_client_id);
+
+  const tokenStatusLabel = (token: McpToken) => {
+    if (!isOAuthToken(token)) return 'URL token';
+    if (token.expires_at && new Date(token.expires_at).getTime() < Date.now()) {
+      return 'OAuth (expired)';
+    }
+    return 'OAuth';
+  };
+
   return (
     <div className="p-8">
       <div className="max-w-3xl mx-auto">
@@ -164,9 +178,15 @@ export default function McpPage() {
                     <code className="text-xs text-muted-foreground bg-secondary px-1.5 py-0.5 rounded font-mono">
                       {token.token_prefix}...
                     </code>
+                    <span className="text-xs text-muted-foreground bg-secondary px-1.5 py-0.5 rounded">
+                      {tokenStatusLabel(token)}
+                    </span>
                   </div>
                   <div className="text-xs text-muted-foreground">
                     Created {formatDate(token.created_at)} · Last used: {formatLastUsed(token.last_used_at)}
+                    {isOAuthToken(token) && token.expires_at
+                      ? <> · Expires {formatDate(token.expires_at)}</>
+                      : null}
                   </div>
                 </div>
 
@@ -224,6 +244,18 @@ export default function McpPage() {
             <p className="text-muted-foreground">
               Any AI tool that supports the MCP Streamable HTTP transport can connect using the URL.
               No API key is needed — the URL contains the authentication token.
+            </p>
+          </section>
+
+          <section>
+            <h3 className="font-medium mb-2">Claude.ai web / ChatGPT (OAuth)</h3>
+            <p className="text-muted-foreground">
+              These clients connect via OAuth. Add a custom connector pointing to{' '}
+              <code className="text-xs bg-secondary px-1.5 py-0.5 rounded font-mono">
+                {mcpBearerUrl}
+              </code>{' '}
+              and you&apos;ll be prompted to approve access from this page. OAuth-issued tokens appear in the
+              list above and can be revoked at any time.
             </p>
           </section>
         </div>

@@ -21,8 +21,8 @@ import { getSettingByKey } from '@/lib/repositories/settingsRepository';
 import { getItemsWithValues, getItemsWithValuesByIds } from '@/lib/repositories/collectionItemRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
 import { REF_PAGE_PREFIX, REF_COLLECTION_PREFIX, isCollectionItemKeyword, parseCollectionLinkValue } from '@/lib/link-utils';
-import { getClassesString } from '@/lib/layer-utils';
-import type { Layer, Component, Page, CollectionItemWithValues, CollectionField, Locale, PageFolder } from '@/types';
+import { getClassesString, hasPasswordFormLayer } from '@/lib/layer-utils';
+import type { Layer, Component, Page, CollectionItemWithValues, CollectionField, Locale, PageFolder, PasswordProtectionContext } from '@/types';
 
 interface PageLinkRef { collection_item_id: string; page_id: string }
 
@@ -210,14 +210,6 @@ function hasAnyInteractions(layers: Layer[]): boolean {
   return false;
 }
 
-/** Password protection context for 401 error pages */
-export type PasswordProtectionContext = {
-  pageId?: string;
-  folderId?: string;
-  redirectUrl: string;
-  isPublished: boolean;
-};
-
 interface PageRendererProps {
   page: Page;
   layers: Layer[];
@@ -296,6 +288,10 @@ export default async function PageRenderer({
   // Layers are always pre-resolved by the caller (page-fetcher).
   // Components are passed through for rich-text embedded component rendering in LayerRenderer.
   const resolvedLayers = layers || [];
+  // When the 401 page contains an editable password-protected form layer, the form
+  // is rendered & wired inline by LayerRendererPublic; otherwise we fall back to
+  // the hardcoded PasswordForm so older / customised 401 pages still work.
+  const hasInlinePasswordForm = is401Page && hasPasswordFormLayer(resolvedLayers);
 
   // Single tree traversal — derive both sets from the flat list
   const allPageLinks = collectLayerPageLinks(resolvedLayers);
@@ -700,10 +696,12 @@ export default async function PageRenderer({
           components={components}
           serverSettings={serverSettings}
           lcpCandidateLayerId={lcpCandidateLayerId}
+          passwordProtection={is401Page ? passwordProtection : undefined}
         />
 
-        {/* Inject password form for 401 error pages */}
-        {is401Page && passwordProtection && (
+        {/* Fallback hardcoded password form: only when the 401 page has no inline
+            password-protected form layer (e.g. older / customised 401 pages). */}
+        {is401Page && passwordProtection && !hasInlinePasswordForm && (
           <PasswordForm
             pageId={passwordProtection.pageId}
             folderId={passwordProtection.folderId}

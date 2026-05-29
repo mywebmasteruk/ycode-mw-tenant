@@ -13,6 +13,7 @@ import type { CollectionItemWithValues, CollectionPaginationMeta } from '@/types
 
 interface CollectionLayerState {
   layerData: Record<string, CollectionItemWithValues[]>; // keyed by layerId
+  layerTotal: Record<string, number>; // Total matching rows in the collection (from server count), keyed by layerId
   loading: Record<string, boolean>; // loading state per layer
   error: Record<string, string | null>; // error state per layer
   layerConfig: Record<string, { collectionId: string; sortBy?: string; sortOrder?: 'asc' | 'desc'; limit?: number; offset?: number; filters?: Array<{ fieldId: string; operator: string; value: string }> }>; // Track config per layer
@@ -52,6 +53,7 @@ type CollectionLayerStore = CollectionLayerState & CollectionLayerActions;
 export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) => ({
   // Initial state
   layerData: {},
+  layerTotal: {},
   loading: {},
   error: {},
   layerConfig: {},
@@ -199,10 +201,12 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
       }
 
       const items = response.data?.items || [];
+      const total = typeof response.data?.total === 'number' ? response.data.total : items.length;
 
       // Store fetched data keyed by layerId
       set((state) => ({
         layerData: { ...state.layerData, [layerId]: items },
+        layerTotal: { ...state.layerTotal, [layerId]: total },
         loading: { ...state.loading, [layerId]: false },
         layerConfig: {
           ...state.layerConfig,
@@ -223,11 +227,13 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
   clearLayerData: (layerId: string) => {
     set((state) => {
       const { [layerId]: _, ...restLayerData } = state.layerData;
+      const { [layerId]: _t, ...restLayerTotal } = state.layerTotal;
       const { [layerId]: __, ...restLoading } = state.loading;
       const { [layerId]: ___, ...restError } = state.error;
 
       return {
         layerData: restLayerData,
+        layerTotal: restLayerTotal,
         loading: restLoading,
         error: restError,
       };
@@ -238,6 +244,7 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
   clearAllLayerData: () => {
     set({
       layerData: {},
+      layerTotal: {},
       loading: {},
       error: {},
       referencedItems: {},
@@ -306,9 +313,11 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
           });
 
           if (!response.error && response.data?.items) {
+            const total = typeof response.data.total === 'number' ? response.data.total : response.data.items.length;
             // Update data silently (no loading state change)
             set((state) => ({
               layerData: { ...state.layerData, [layerId]: response.data!.items },
+              layerTotal: { ...state.layerTotal, [layerId]: total },
             }));
           }
         } catch (error) {
