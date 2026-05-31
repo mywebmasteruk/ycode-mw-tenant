@@ -1,15 +1,12 @@
 import { NextRequest } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { noCache } from '@/lib/api-response';
-<<<<<<< HEAD
+import { getCallerInfo, requireManageMembers } from '@/lib/roles-server';
+import { resolveRole, ASSIGNABLE_ROLES } from '@/lib/roles';
 import {
   authUserBelongsToTenant,
   filterAuthUsersForTenant,
 } from '@/lib/masjidweb/auth-users-tenant-scope';
-=======
-import { getCallerInfo, requireManageMembers } from '@/lib/roles-server';
-import { resolveRole, ASSIGNABLE_ROLES } from '@/lib/roles';
->>>>>>> upstream/main
 
 /**
  * GET /ycode/api/auth/users
@@ -42,11 +39,8 @@ export async function GET(request: NextRequest) {
       return noCache({ error: error.message }, 500);
     }
 
-<<<<<<< HEAD
-=======
     const caller = await getCallerInfo();
 
->>>>>>> upstream/main
     const activeUsers: Array<{
       id: string;
       email: string;
@@ -64,7 +58,6 @@ export async function GET(request: NextRequest) {
       invited_at: string;
     }> = [];
 
-<<<<<<< HEAD
     for (const user of filterAuthUsersForTenant(data.users, tenantId)) {
       const userAny = user as any;
       const appMetadata = user.app_metadata || userAny.raw_app_meta_data || {};
@@ -73,20 +66,10 @@ export async function GET(request: NextRequest) {
       const wasInvited = !!metadata.invited_at;
       const hasIdentities = user.identities && user.identities.length > 0;
       const hasSignedIn = user.last_sign_in_at !== null;
-      const isPending = wasInvited && (!hasSignedIn || !hasIdentities);
-=======
-    for (const user of data.users) {
-      const userAny = user as any;
-      const metadata = user.user_metadata || userAny.raw_user_meta_data || {};
-      const appMeta = user.app_metadata || userAny.raw_app_meta_data || {};
-      const wasInvited = !!metadata.invited_at;
-      const hasIdentities = user.identities && user.identities.length > 0;
-      const hasSignedIn = user.last_sign_in_at !== null;
       const emailConfirmed = !!user.email_confirmed_at;
       const isPending = wasInvited && !emailConfirmed && !hasIdentities && !hasSignedIn;
 
-      const userRole = resolveRole(appMeta.role as string);
->>>>>>> upstream/main
+      const userRole = resolveRole(appMetadata.role as string);
 
       if (!isPending) {
         activeUsers.push({
@@ -102,12 +85,8 @@ export async function GET(request: NextRequest) {
         pendingInvites.push({
           id: user.id,
           email: user.email || '',
-<<<<<<< HEAD
-          invited_at: String(metadata.invited_at || user.created_at),
-=======
           role: userRole,
           invited_at: metadata.invited_at || user.created_at,
->>>>>>> upstream/main
         });
       }
     }
@@ -181,7 +160,10 @@ export async function PATCH(request: NextRequest) {
  */
 export async function DELETE(request: NextRequest) {
   try {
-<<<<<<< HEAD
+    const result = await requireManageMembers();
+    if ('status' in result) return result;
+    const caller = result;
+
     const tenantId = request.headers.get('x-tenant-id')?.trim();
 
     if (!tenantId) {
@@ -190,11 +172,6 @@ export async function DELETE(request: NextRequest) {
         403
       );
     }
-=======
-    const result = await requireManageMembers();
-    if ('status' in result) return result;
-    const caller = result;
->>>>>>> upstream/main
 
     const { searchParams } = new URL(request.url);
     const userId = searchParams.get('id');
