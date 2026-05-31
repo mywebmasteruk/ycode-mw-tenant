@@ -13,6 +13,7 @@ import type {
   CollectionField,
   CollectionFieldType,
   CollectionItemWithValues,
+  CollectionVariable,
   Layer,
   VisibilityOperator,
 } from '@/types';
@@ -166,6 +167,12 @@ export const PAGE_COLLECTION_OPERATORS: OperatorOption[] = [
   { value: 'has_no_items', label: 'has no items' },
 ];
 
+/** Operators available when filtering an item against its own ID (source: 'self'). */
+export const SELF_OPERATORS: OperatorOption[] = [
+  { value: 'is_one_of', label: 'is one of' },
+  { value: 'is_not_one_of', label: 'is not one of' },
+];
+
 export const COMPARE_OPERATORS: { value: string; label: string }[] = [
   { value: 'eq', label: 'equals' },
   { value: 'lt', label: 'less than' },
@@ -223,6 +230,21 @@ export function operatorRequiresItemSelection(operator: VisibilityOperator): boo
   return ['is_one_of', 'is_not_one_of', 'contains_all_of', 'contains_exactly'].includes(
     operator
   );
+}
+
+/**
+ * Parse a JSON-stringified array of item IDs (used by reference / self conditions).
+ * Returns an empty array for unset, malformed, or non-array values so callers
+ * can always `for…of` the result without extra guards.
+ */
+export function parseItemIdList(value: string | undefined | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 /** Check if operator requires a second value (for date ranges) */
@@ -291,8 +313,8 @@ export function resolveDatePreset(preset: string): { start: string; end: string 
 
 /**
  * Resolve a filter value that may be a date preset into operator + concrete
- * value(s) suitable for the filter API.  For presets, the operator is widened
- * to a range comparison; for plain values it's returned as-is.
+ * value(s) suitable for the filter API. Presets always widen to `is_between`
+ * so the full day(s) are captured; plain values are returned as-is.
  */
 export function resolveDateFilterValue(
   operator: string,
@@ -306,9 +328,6 @@ export function resolveDateFilterValue(
 
   switch (operator) {
     case 'is':
-      return range.start === range.end
-        ? { operator: 'is', value: range.start }
-        : { operator: 'is_between', value: range.start, value2: range.end };
     case 'is_between':
       return { operator: 'is_between', value: range.start, value2: range.end };
     case 'is_before':
@@ -317,6 +336,65 @@ export function resolveDateFilterValue(
       return { operator: 'is_after', value: range.end };
     default:
       return { operator: 'is_between', value: range.start, value2: range.end };
+  }
+}
+
+/** Match `YYYY-MM-DD` (the format emitted by `<input type="date">` and date presets). */
+const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+export function isDateOnlyString(value: string | undefined | null): boolean {
+  return !!value && DATE_ONLY_REGEX.test(value);
+}
+
+/**
+ * Convert a filter date string to start/end-of-day UTC timestamps.
+ * For `YYYY-MM-DD` inputs the range spans the entire UTC day so that filters
+ * match datetime values (which are stored as full ISO strings) regardless of
+ * the time component. For other inputs, both bounds equal the parsed
+ * timestamp. Returns `null` if the input cannot be parsed.
+ */
+export function dateStringToDayBounds(
+  value: string | undefined | null,
+): { start: number; end: number } | null {
+  if (!value) return null;
+  if (isDateOnlyString(value)) {
+    const start = Date.parse(`${value}T00:00:00.000Z`);
+    const end = Date.parse(`${value}T23:59:59.999Z`);
+    if (isNaN(start) || isNaN(end)) return null;
+    return { start, end };
+  }
+  const ts = Date.parse(value);
+  return isNaN(ts) ? null : { start: ts, end: ts };
+}
+
+/**
+ * Compare a stored date/datetime value against a filter value using day-aware
+ * semantics (so `is today` matches any timestamp on today's date).
+ * Returns `false` if either value cannot be parsed.
+ */
+export function compareDateFilter(
+  storedValue: string,
+  operator: 'is' | 'is_before' | 'is_after' | 'is_between',
+  filterValue: string,
+  filterValue2?: string,
+): boolean {
+  const valueTs = Date.parse(storedValue);
+  if (isNaN(valueTs)) return false;
+  const bounds = dateStringToDayBounds(filterValue);
+  if (!bounds) return false;
+
+  switch (operator) {
+    case 'is':
+      return valueTs >= bounds.start && valueTs <= bounds.end;
+    case 'is_before':
+      return valueTs < bounds.start;
+    case 'is_after':
+      return valueTs > bounds.end;
+    case 'is_between': {
+      const bounds2 = dateStringToDayBounds(filterValue2);
+      if (!bounds2) return false;
+      return valueTs >= bounds.start && valueTs <= bounds2.end;
+    }
   }
 }
 
@@ -638,6 +716,18 @@ export function getAssetFieldTypeLabel(fieldType: CollectionFieldType): string {
 
 /** Virtual collection ID marker for multi-asset collections */
 export const MULTI_ASSET_COLLECTION_ID = '__multi_asset__';
+
+/**
+ * Whether a collection binding points to a real, selected source.
+ * Field-sourced bindings (reference/multi-asset/inverse) require a `source_field_id`,
+ * so an unbound multi-asset placeholder (virtual `id`, no field chosen yet) is not
+ * considered selected. Direct collections just require a non-empty `id`.
+ */
+export function hasBoundCollectionSource(collectionVariable?: CollectionVariable | null): boolean {
+  if (!collectionVariable) return false;
+  if (collectionVariable.source_field_type) return !!collectionVariable.source_field_id;
+  return !!collectionVariable.id;
+}
 
 /** Virtual field IDs for multi-asset collections (prefixed to avoid collision) */
 export const MULTI_ASSET_VIRTUAL_FIELDS = {

@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { DesignProperties, Layer } from '@/types';
 import { getAllStyles, createStyle, updateStyle, deleteStyle } from '@/lib/repositories/layerStyleRepository';
-import { getDraftLayers, upsertDraftLayers } from '@/lib/repositories/pageLayersRepository';
+import { getCachedDraft, saveCachedLayers } from '@/lib/mcp/page-layers';
 import { findLayerById, updateLayerById, designToClassString } from '@/lib/mcp/utils';
 import { designSchema } from './shared-schemas';
 
@@ -13,7 +13,7 @@ export function registerStyleTools(server: McpServer) {
     {},
     async () => {
       const styles = await getAllStyles();
-      return { content: [{ type: 'text' as const, text: JSON.stringify(styles, null, 2) }] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify(styles) }] };
     },
   );
 
@@ -30,7 +30,7 @@ export function registerStyleTools(server: McpServer) {
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ message: `Created style "${name}"`, style_id: style.id, classes }, null, 2),
+          text: JSON.stringify({ message: `Created style "${name}"`, style_id: style.id, classes }),
         }],
       };
     },
@@ -45,7 +45,7 @@ export function registerStyleTools(server: McpServer) {
       style_id: z.string().describe('The style ID'),
     },
     async ({ page_id, layer_id, style_id }) => {
-      const pageLayers = await getDraftLayers(page_id);
+      const pageLayers = await getCachedDraft(page_id);
       if (!pageLayers) {
         return { content: [{ type: 'text' as const, text: `Error: Page "${page_id}" has no layers.` }], isError: true };
       }
@@ -57,7 +57,7 @@ export function registerStyleTools(server: McpServer) {
       }
 
       const updated = updateLayerById(layers, layer_id, (l) => ({ ...l, styleId: style_id }));
-      await upsertDraftLayers(page_id, updated);
+      await saveCachedLayers(page_id, updated);
 
       return { content: [{ type: 'text' as const, text: `Applied style "${style_id}" to "${layer.customName || layer.name}"` }] };
     },
@@ -79,7 +79,7 @@ export function registerStyleTools(server: McpServer) {
         updates.classes = designToClassString(design as DesignProperties);
       }
       const style = await updateStyle(style_id, updates);
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ message: `Updated style "${style.name}"`, style }, null, 2) }] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ message: `Updated style "${style.name}"`, style }) }] };
     },
   );
 

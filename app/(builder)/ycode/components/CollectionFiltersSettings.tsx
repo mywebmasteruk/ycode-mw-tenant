@@ -49,6 +49,7 @@ import {
   DATE_PRESET_OPTIONS,
   isDatePreset,
   isDateFieldType,
+  SELF_OPERATORS,
 } from '@/lib/collection-field-utils';
 import { getCollectionVariable, isInputInsideFilter, resolveFilterInputId, findLayerById } from '@/lib/layer-utils';
 import { useEditorStore } from '@/stores/useEditorStore';
@@ -70,10 +71,16 @@ function ReferenceItemsSelector({
   collectionId,
   value,
   onChange,
+  currentPageItem,
 }: {
   collectionId: string;
   value: string; // JSON array of item IDs
   onChange: (value: string) => void;
+  /** When provided, renders a "Current page item" entry above the items list. */
+  currentPageItem?: {
+    checked: boolean;
+    onChange: (checked: boolean) => void;
+  };
 }) {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<CollectionItemWithValues[]>([]);
@@ -135,23 +142,18 @@ function ReferenceItemsSelector({
 
   // Get display text for closed state
   const getDisplayText = () => {
-    if (selectedIds.length === 0) return 'Select items...';
+    const totalCount = selectedIds.length + (currentPageItem?.checked ? 1 : 0);
+    if (totalCount === 0) return 'Select items...';
 
-    // Find display names for selected items
-    const selectedNames = selectedIds
-      .map(id => {
-        const item = items.find(i => i.id === id);
-        return item ? getDisplayName(item) : null;
-      })
-      .filter(Boolean);
-
-    if (selectedNames.length > 0) {
-      return selectedNames.length <= 2
-        ? selectedNames.join(', ')
-        : `${selectedNames.length} items selected`;
+    const labels: string[] = [];
+    if (currentPageItem?.checked) labels.push('Current page item');
+    for (const id of selectedIds) {
+      const item = items.find(i => i.id === id);
+      if (item) labels.push(getDisplayName(item));
     }
 
-    return `${selectedIds.length} item${selectedIds.length !== 1 ? 's' : ''} selected`;
+    if (labels.length > 0 && labels.length <= 2) return labels.join(', ');
+    return `${totalCount} item${totalCount !== 1 ? 's' : ''} selected`;
   };
 
   if (!collectionId) {
@@ -171,11 +173,20 @@ function ReferenceItemsSelector({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent className="w-(--radix-dropdown-menu-trigger-width) min-w-50 max-h-60 overflow-y-auto" align="start">
+        {currentPageItem && (
+          <DropdownMenuCheckboxItem
+            checked={currentPageItem.checked}
+            onCheckedChange={(checked) => currentPageItem.onChange(checked === true)}
+            onSelect={(e) => e.preventDefault()}
+          >
+            Current page item
+          </DropdownMenuCheckboxItem>
+        )}
         {loading ? (
           <div className="flex items-center justify-center py-4">
             <Spinner />
           </div>
-        ) : items.length === 0 ? (
+        ) : items.length === 0 && !currentPageItem ? (
           <div className="text-center py-4 text-xs text-muted-foreground">
             No items in this collection
           </div>
@@ -294,6 +305,15 @@ export default function CollectionFiltersSettings({
     return null;
   }
 
+  // Build a fresh "self" condition (filters by the item's own ID).
+  const buildSelfCondition = (id: string): VisibilityCondition => ({
+    id,
+    source: 'self',
+    operator: 'is_one_of',
+    value: '[]',
+    includesCurrentPageItem: true,
+  });
+
   // Handle adding a new condition group for a collection field
   const handleAddFieldConditionGroup = (field: CollectionField) => {
     const newCondition: VisibilityCondition = {
@@ -314,6 +334,14 @@ export default function CollectionFiltersSettings({
     updateGroups([...groups, newGroup]);
   };
 
+  const handleAddSelfConditionGroup = () => {
+    const newGroup: VisibilityConditionGroup = {
+      id: Date.now().toString(),
+      conditions: [buildSelfCondition(`${Date.now()}-1`)],
+    };
+    updateGroups([...groups, newGroup]);
+  };
+
   // Handle adding a condition to an existing group (OR logic)
   const handleAddConditionFromOr = (groupId: string, field: CollectionField) => {
     const newGroups = groups.map(group => {
@@ -330,6 +358,19 @@ export default function CollectionFiltersSettings({
         return {
           ...group,
           conditions: [...group.conditions, newCondition],
+        };
+      }
+      return group;
+    });
+    updateGroups(newGroups);
+  };
+
+  const handleAddSelfConditionFromOr = (groupId: string) => {
+    const newGroups = groups.map(group => {
+      if (group.id === groupId) {
+        return {
+          ...group,
+          conditions: [...group.conditions, buildSelfCondition(`${groupId}-${Date.now()}`)],
         };
       }
       return group;
@@ -457,10 +498,16 @@ export default function CollectionFiltersSettings({
 
   // Render the dropdown content for adding conditions
   const renderAddConditionDropdown = (
-    onFieldSelect: (field: CollectionField) => void
+    onFieldSelect: (field: CollectionField) => void,
+    onSelfSelect: () => void,
   ) => (
     <DropdownMenuContent align="end" className="max-h-75! overflow-y-auto">
-      {/* Collection Fields Section */}
+      <DropdownMenuLabel className="text-xs text-muted-foreground">Item</DropdownMenuLabel>
+      <DropdownMenuItem onClick={onSelfSelect} className="flex items-center gap-2">
+        <Icon name="database" className="size-3 opacity-60" />
+        Item ID
+      </DropdownMenuItem>
+
       {fields && fields.length > 0 && (
         <>
           <DropdownMenuLabel className="text-xs text-muted-foreground">
@@ -477,13 +524,6 @@ export default function CollectionFiltersSettings({
             </DropdownMenuItem>
           ))}
         </>
-      )}
-
-      {/* Empty State */}
-      {(!fields || fields.length === 0) && (
-        <div className="px-2 py-4 text-xs text-muted-foreground text-center">
-          No fields available
-        </div>
       )}
     </DropdownMenuContent>
   );
@@ -502,7 +542,68 @@ export default function CollectionFiltersSettings({
   };
 
   // Render a single condition
+  // Render a `source: 'self'` condition (filter the collection by item identity).
+  const renderSelfCondition = (
+    condition: VisibilityCondition,
+    group: VisibilityConditionGroup,
+    index: number,
+  ) => (
+    <React.Fragment key={condition.id}>
+      {index > 0 && (
+        <li className="flex items-center gap-2 h-6">
+          <Label variant="muted" className="text-[10px]">Or</Label>
+          <hr className="flex-1" />
+        </li>
+      )}
+      <li className="*:w-full flex flex-col gap-2">
+        <header className="flex items-center gap-1.5">
+          <div className="size-5 flex items-center justify-center rounded-[6px] bg-secondary/50 hover:bg-secondary">
+            <Icon name="database" className="size-2.5 opacity-60" />
+          </div>
+          <Label variant="muted" className="truncate">Item ID</Label>
+          <span
+            role="button"
+            tabIndex={0}
+            className="ml-auto -my-1 -mr-0.5 shrink-0 p-0.5 rounded-sm opacity-70 hover:opacity-100 transition-opacity cursor-pointer"
+            onClick={() => handleRemoveCondition(group.id, condition.id)}
+          >
+            <Icon name="x" className="size-2.5" />
+          </span>
+        </header>
+
+        <Select
+          value={condition.operator}
+          onValueChange={(value) => patchCondition(group.id, condition.id, { operator: value as VisibilityOperator })}
+        >
+          <SelectTrigger>
+            <SelectValue placeholder="Select..." />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {SELF_OPERATORS.map((op) => (
+                <SelectItem key={op.value} value={op.value}>{op.label}</SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+
+        <ReferenceItemsSelector
+          collectionId={collectionId}
+          value={condition.value || '[]'}
+          onChange={(value) => handleValueChange(group.id, condition.id, value)}
+          currentPageItem={{
+            checked: !!condition.includesCurrentPageItem,
+            onChange: (checked) => patchCondition(group.id, condition.id, { includesCurrentPageItem: checked }),
+          }}
+        />
+      </li>
+    </React.Fragment>
+  );
+
   const renderCondition = (condition: VisibilityCondition, group: VisibilityConditionGroup, index: number) => {
+    if (condition.source === 'self') {
+      return renderSelfCondition(condition, group, index);
+    }
     const fieldType = condition.fieldType || getFieldType(condition.fieldId || '');
     const operators = getOperatorsForFieldType(fieldType);
     const icon = getFieldIcon(fieldType);
@@ -805,7 +906,7 @@ export default function CollectionFiltersSettings({
               <Icon name="plus" />
             </Button>
           </DropdownMenuTrigger>
-          {renderAddConditionDropdown(handleAddFieldConditionGroup)}
+          {renderAddConditionDropdown(handleAddFieldConditionGroup, handleAddSelfConditionGroup)}
         </DropdownMenu>
       }
     >
@@ -845,7 +946,8 @@ export default function CollectionFiltersSettings({
                         </Button>
                       </DropdownMenuTrigger>
                       {renderAddConditionDropdown(
-                        (field) => handleAddConditionFromOr(group.id, field)
+                        (field) => handleAddConditionFromOr(group.id, field),
+                        () => handleAddSelfConditionFromOr(group.id),
                       )}
                     </DropdownMenu>
                   </li>

@@ -18,7 +18,8 @@ import {
   runWithEffectiveTenantId,
 } from '@/lib/masjidweb/effective-tenant-id';
 import { findAffectedPages } from '@/lib/repositories/pageLayersRepository';
-import { getAllDraftPages, hardDeleteSoftDeletedPages } from '@/lib/repositories/pageRepository';
+import { dispatchSitePublishedEvent } from '@/lib/services/webhookService';
+import { getAllDraftPages, hardDeleteSoftDeletedPages, backfillMissingPageHashes } from '@/lib/repositories/pageRepository';
 import { publishComponents, getUnpublishedComponents, hardDeleteSoftDeletedComponents } from '@/lib/repositories/componentRepository';
 import { publishLayerStyles, getUnpublishedLayerStyles, hardDeleteSoftDeletedLayerStyles } from '@/lib/repositories/layerStyleRepository';
 import { getAllCollections } from '@/lib/repositories/collectionRepository';
@@ -165,6 +166,16 @@ export async function POST(request: NextRequest) {
       const deletedCollectionItemSlugs: Map<string, string[]> = new Map();
       const renamedPageOldRoutes: string[] = [];
       let localisationResult: PublishLocalisationResult | null = null;
+
+      // Backfill any missing content_hash values before publish so change
+      // detection and the upsert-only-when-changed paths see consistent hashes
+      // on both draft and published rows (legacy migrations and templates
+      // insert rows without computing hashes).
+      try {
+        await backfillMissingPageHashes();
+      } catch (error) {
+        console.error('[publish] Failed to backfill page hashes:', error);
+      }
 
       // Publish folders first (pages depend on them)
       {
@@ -529,7 +540,7 @@ export async function POST(request: NextRequest) {
           result.changes.css = await publishCSS();
           stats.tables.css.added = result.changes.css ? 1 : 0;
         } catch {
-          // Silently handle - non-fatal
+          // Don't fail the entire publish if CSS fails
         }
         stats.tables.css.durationMs = Math.round(performance.now() - stepStart);
       }
@@ -612,9 +623,13 @@ export async function POST(request: NextRequest) {
             const { generateCSSForPages } = await import('@/lib/server/cssGenerator');
             await generateCSSForPages(cssAffectedPageIds);
 
-            // Re-publish layers for these pages so published version has fresh CSS
+            // Re-publish layers for these pages so published version has fresh CSS.
+            // force=true: the draft layers' JSONB still references the changed
+            // component/style by ID, so content_hash is unchanged even though
+            // the resolved/rendered output differs. Without force, downstream
+            // consumers (static export, GitHub writer) see stale data.
             const { batchPublishPageLayers } = await import('@/lib/repositories/pageLayersRepository');
-            const relayerResult = await batchPublishPageLayers(cssAffectedPageIds);
+            const relayerResult = await batchPublishPageLayers(cssAffectedPageIds, { force: true });
             if (relayerResult.changedPageIds.length > 0) {
               publishedPageIds.push(...relayerResult.changedPageIds);
               console.log(`[Cache] CSS catch-up: republished ${relayerResult.changedPageIds.length} page layer(s)`);
@@ -756,6 +771,20 @@ export async function POST(request: NextRequest) {
             value: null,
           } as Setting;
         }
+      }
+
+      // Dispatch the site.published webhook event. The dispatcher is the only
+      // path that delivers to user-configured webhooks for this event type
+      // (advertised in the Integrations → Webhooks UI), so without this call
+      // any "Site Published" subscription silently never fires. Wrapped so
+      // webhook failures never block the publish response.
+      try {
+        await dispatchSitePublishedEvent({
+          pages_count: result.changes.pages,
+          collections_count: result.changes.collectionItems,
+        });
+      } catch {
+        // Silently handle — webhook failures must not break a successful publish
       }
 
       // Calculate total duration
