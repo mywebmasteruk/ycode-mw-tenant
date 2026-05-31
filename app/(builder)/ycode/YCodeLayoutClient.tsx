@@ -41,13 +41,15 @@ interface YCodeLayoutClientProps {
   isTemplateTenant: boolean;
 }
 
-const prefixRoutes = ['/ycode/preview', '/ycode/devtools/'];
+// MASJIDWEB_SEAM: standalone-route-exclusion — see docs/masjidweb-core-seams.md#tier-5
+const prefixRoutes = ['/ycode/preview', '/ycode/devtools/', '/ycode/oauth/'];
 const exactRoutes = ['/ycode/welcome', '/ycode/accept-invite'];
 
 function isStandaloneYcodeRoute(pathname: string): boolean {
   return prefixRoutes.some(route => pathname.startsWith(route))
     || exactRoutes.includes(pathname);
 }
+// MASJIDWEB_SEAM_END
 
 // Inner component that uses useSearchParams (via useEditorUrl)
 function YCodeEditorLayout({ children, isTemplateTenant }: YCodeLayoutClientProps) {
@@ -72,21 +74,6 @@ function YCodeEditorLayout({ children, isTemplateTenant }: YCodeLayoutClientProp
     };
   }, []);
 
-<<<<<<< HEAD
-=======
-  // Exclude standalone routes from YCodeBuilder
-  // These routes should render independently without the editor UI
-  const prefixRoutes = ['/ycode/preview', '/ycode/devtools/', '/ycode/oauth/'];
-  const exactRoutes = ['/ycode/welcome', '/ycode/accept-invite'];
-
-  if (
-    prefixRoutes.some(route => pathname?.startsWith(route))
-    || exactRoutes.includes(pathname || '')
-  ) {
-    return <>{children}</>;
-  }
-
->>>>>>> upstream/main
   // For settings, localization, profile, forms, and integrations routes, pass children to YCodeBuilder so it can render them
   if (routeType === 'settings' || routeType === 'localization' || routeType === 'profile' || routeType === 'forms' || routeType === 'integrations') {
     return <YCodeBuilder isTemplateTenant={isTemplateTenant}>{children}</YCodeBuilder>;
