@@ -1,39 +1,116 @@
 import { NextRequest } from 'next/server';
-import { getItemsWithValues } from '@/lib/repositories/collectionItemRepository';
+import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getItemsByCollectionId } from '@/lib/repositories/collectionItemRepository';
+import { getValuesByItemIds } from '@/lib/repositories/collectionItemValueRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
 import { enrichItemsWithCountValues } from '@/lib/repositories/collectionCountRepository';
 import { getAllPages } from '@/lib/repositories/pageRepository';
 import { getAllPageFolders } from '@/lib/repositories/pageFolderRepository';
 import { renderCollectionItemsToHtml, loadTranslationsForLocale } from '@/lib/page-fetcher';
 import { noCache } from '@/lib/api-response';
-import type { Layer } from '@/types';
+import { fetchAllRows } from '@/lib/supabase-constants';
+import type { Layer, CollectionItem, CollectionItemWithValues } from '@/types';
 
-// Disable caching for this route
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
+const IN_CHUNK_SIZE = 150;
+
+async function chunkedQuery<T>(
+  build: (chunk: string[]) => PromiseLike<{ data: T[] | null; error: unknown }>,
+  itemIds: string[],
+): Promise<T[]> {
+  if (itemIds.length === 0) return [];
+  if (itemIds.length <= IN_CHUNK_SIZE) {
+    const { data } = await build(itemIds);
+    return data || [];
+  }
+  const results: T[] = [];
+  for (let i = 0; i < itemIds.length; i += IN_CHUNK_SIZE) {
+    const { data } = await build(itemIds.slice(i, i + IN_CHUNK_SIZE));
+    if (data) results.push(...data);
+  }
+  return results;
+}
+
+async function getAllItemIdsForCollection(
+  collectionId: string,
+  isPublished: boolean,
+): Promise<string[]> {
+  const client = await getSupabaseAdmin();
+  if (!client) throw new Error('Supabase client not configured');
+
+  // Page past Supabase's 1000-row default cap so collections with more items
+  // report accurate `total` / `hasMore` instead of stalling at the cap.
+  // Match SSR's ordering so any `maxTotal` slice picks the same items.
+  const rows = await fetchAllRows<{ id: string }>((from, to) => {
+    let q = client
+      .from('collection_items')
+      .select('id')
+      .eq('collection_id', collectionId)
+      .eq('is_published', isPublished)
+      .is('deleted_at', null)
+      .order('manual_order', { ascending: true })
+      .order('created_at', { ascending: false })
+      .range(from, to);
+    if (isPublished) q = q.eq('is_publishable', true);
+    return q;
+  });
+
+  return rows.map(r => r.id);
+}
+
+async function getFieldValuesForItems(
+  fieldId: string,
+  isPublished: boolean,
+  itemIds: string[],
+): Promise<Map<string, string>> {
+  if (itemIds.length === 0) return new Map();
+  const client = await getSupabaseAdmin();
+  if (!client) throw new Error('Supabase client not configured');
+
+  const rows = await chunkedQuery<{ item_id: string; value: string | null }>(
+    chunk => client
+      .from('collection_item_values')
+      .select('item_id, value')
+      .eq('field_id', fieldId)
+      .eq('is_published', isPublished)
+      .is('deleted_at', null)
+      .in('item_id', chunk),
+    itemIds,
+  );
+
+  const map = new Map<string, string>();
+  for (const row of rows) {
+    map.set(row.item_id, row.value ?? '');
+  }
+  return map;
+}
+
+function reorderItemsById(items: CollectionItem[], idOrder: string[]): CollectionItem[] {
+  const byId = new Map(items.map(item => [item.id, item]));
+  const ordered: CollectionItem[] = [];
+  for (const id of idOrder) {
+    const item = byId.get(id);
+    if (item) ordered.push(item);
+  }
+  return ordered;
+}
+
 /**
  * POST /ycode/api/collections/[id]/items/load-more
- * Get paginated collection items for "Load More" functionality
- * Returns pre-rendered HTML for client-side appending
- *
- * Body (JSON):
- * - offset: number of items to skip (default: 0)
- * - limit: number of items to fetch (default: 10)
- * - itemIds: array of item IDs to filter by (for multi-reference fields)
- * - layerTemplate: Layer[] - the layer template to render items with
- * - collectionLayerId: string - the collection layer ID for unique item IDs
- * - published: whether to fetch published items (default: true for public pages)
+ * Returns pre-rendered HTML for the next page of a collection. Mirrors the
+ * SSR sort (`sortBy` / `sortOrder`) so offset-based paging stays consistent
+ * — otherwise a date-sorted SSR list followed by a manual-order DB page
+ * yields duplicates.
  */
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = await params;
-    const collectionId = id;
+    const { id: collectionId } = await params;
 
-    // Parse request body
     const body = await request.json();
     const {
       offset = 0,
@@ -41,60 +118,93 @@ export async function POST(
       itemIds,
       layerTemplate,
       collectionLayerId,
+      collectionLayer,
+      sortBy,
+      sortOrder = 'asc',
       published = true,
       localeCode,
       collectionLayerClasses,
       collectionLayerTag,
+      isPreview = false,
+      pageCollectionItemId,
+      pageCollectionSortedItemIds,
+      maxTotal,
     } = body;
 
-    // Validate required fields
     if (!layerTemplate || !Array.isArray(layerTemplate)) {
-      return noCache(
-        { error: 'layerTemplate is required and must be an array' },
-        400
-      );
+      return noCache({ error: 'layerTemplate is required and must be an array' }, 400);
     }
-
     if (!collectionLayerId) {
-      return noCache(
-        { error: 'collectionLayerId is required' },
-        400
-      );
+      return noCache({ error: 'collectionLayerId is required' }, 400);
     }
 
-    // Build filters
-    const filters: {
-      offset?: number;
-      limit?: number;
-      itemIds?: string[];
-    } = {
-      offset: isNaN(offset) ? 0 : Math.max(0, offset),
-      limit: isNaN(limit) || limit < 1 ? 10 : Math.min(limit, 100), // Cap at 100
-    };
+    const pageOffset = Math.max(0, isNaN(offset) ? 0 : offset);
+    const pageLimit = isNaN(limit) || limit < 1 ? 10 : Math.min(limit, 100);
 
-    if (itemIds && Array.isArray(itemIds) && itemIds.length > 0) {
-      filters.itemIds = itemIds;
+    // Pool of candidate ids: either the explicit list (multi-reference filter)
+    // or every item in the collection. When SSR enforced a `maxTotal` cap
+    // (from `collection.limit` with pagination enabled), clamp the pool so
+    // `hasMore` and offset-based paging stop at the same boundary.
+    let candidateIds = Array.isArray(itemIds) && itemIds.length > 0
+      ? itemIds
+      : await getAllItemIdsForCollection(collectionId, published);
+
+    if (typeof maxTotal === 'number' && maxTotal > 0 && candidateIds.length > maxTotal) {
+      candidateIds = candidateIds.slice(0, maxTotal);
     }
 
-    // Fetch items with values
-    const { items, total } = await getItemsWithValues(
-      collectionId,
-      published,
-      filters
-    );
+    const total = candidateIds.length;
 
-    // Inject computed count field values so layers bound to a count field
-    // render the live number in the rendered HTML.
+    let pageRawItems: CollectionItem[] = [];
+
+    if (!sortBy || sortBy === 'none' || sortBy === 'manual') {
+      const { items } = await getItemsByCollectionId(collectionId, published, {
+        itemIds: candidateIds,
+        limit: pageLimit,
+        offset: pageOffset,
+      });
+      pageRawItems = items;
+    } else if (sortBy === 'random') {
+      // Random sort is unstable across requests; without a seed we can't
+      // reliably page it, so fall back to manual order to avoid duplicates.
+      const { items } = await getItemsByCollectionId(collectionId, published, {
+        itemIds: candidateIds,
+        limit: pageLimit,
+        offset: pageOffset,
+      });
+      pageRawItems = items;
+    } else {
+      const sortValueByItem = await getFieldValuesForItems(sortBy, published, candidateIds);
+      const sortedIds = [...candidateIds].sort((a, b) => {
+        const aStr = String(sortValueByItem.get(a) || '');
+        const bStr = String(sortValueByItem.get(b) || '');
+        const aNum = aStr.trim() !== '' ? Number(aStr) : NaN;
+        const bNum = bStr.trim() !== '' ? Number(bStr) : NaN;
+        if (!isNaN(aNum) && !isNaN(bNum)) {
+          return sortOrder === 'desc' ? bNum - aNum : aNum - bNum;
+        }
+        return sortOrder === 'desc' ? bStr.localeCompare(aStr) : aStr.localeCompare(bStr);
+      });
+      const pageItemIds = sortedIds.slice(pageOffset, pageOffset + pageLimit);
+      if (pageItemIds.length > 0) {
+        const { items } = await getItemsByCollectionId(collectionId, published, {
+          itemIds: pageItemIds,
+        });
+        pageRawItems = reorderItemsById(items, pageItemIds);
+      }
+    }
+
+    const valuesByItem = await getValuesByItemIds(pageRawItems.map(i => i.id), published);
+    const items: CollectionItemWithValues[] = pageRawItems.map(item => ({
+      ...item,
+      values: valuesByItem[item.id] || {},
+    }));
+
     await enrichItemsWithCountValues(items, collectionId, published);
 
-    // Build collection item slugs from the items we're rendering
     const collectionItemSlugs: Record<string, string> = {};
-
-    // Get the slug field for this collection
     const collectionFields = await getFieldsByCollectionId(collectionId, published, { excludeComputed: true });
     const slugField = collectionFields.find(f => f.key === 'slug');
-
-    // Extract slug values from items
     if (slugField) {
       for (const item of items) {
         if (item.values[slugField.id]) {
@@ -103,22 +213,19 @@ export async function POST(
       }
     }
 
-    // Fetch pages and folders for link resolution using repository functions
     const [pages, folders] = await Promise.all([
       getAllPages(),
       getAllPageFolders(),
     ]);
 
-    // Load locale and translations if locale code is provided
     let locale = null;
-    let translations: Record<string, any> | undefined;
+    let translations: Awaited<ReturnType<typeof loadTranslationsForLocale>>['translations'] | undefined;
     if (localeCode) {
       const localeData = await loadTranslationsForLocale(localeCode, published);
       locale = localeData.locale;
       translations = localeData.translations;
     }
 
-    // Render items to HTML using the provided template
     const html = await renderCollectionItemsToHtml(
       items,
       layerTemplate as Layer[],
@@ -132,6 +239,14 @@ export async function POST(
       translations,
       collectionLayerClasses,
       collectionLayerTag,
+      {
+        isPreview: Boolean(isPreview),
+        pageCollectionItemId,
+        pageCollectionSortedItemIds: Array.isArray(pageCollectionSortedItemIds)
+          ? pageCollectionSortedItemIds
+          : undefined,
+      },
+      collectionLayer as Omit<Layer, 'children'> | undefined,
     );
 
     return noCache({
@@ -139,79 +254,9 @@ export async function POST(
         items,
         html,
         total,
-        offset: filters.offset,
-        limit: filters.limit,
-        hasMore: (filters.offset || 0) + items.length < total,
-      }
-    });
-  } catch (error) {
-    console.error('Error fetching collection items for load-more:', error);
-    return noCache(
-      { error: error instanceof Error ? error.message : 'Failed to fetch items' },
-      500
-    );
-  }
-}
-
-/**
- * GET /ycode/api/collections/[id]/items/load-more
- * Legacy endpoint - returns raw data without rendering
- * Kept for backward compatibility
- *
- * Query params:
- * - offset: number of items to skip (default: 0)
- * - limit: number of items to fetch (default: 10)
- * - itemIds: comma-separated list of item IDs to filter by (for multi-reference fields)
- * - published: whether to fetch published items (default: true for public pages)
- */
-export async function GET(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await params;
-    const collectionId = id;
-
-    const { searchParams } = new URL(request.url);
-    const offset = parseInt(searchParams.get('offset') || '0', 10);
-    const limit = parseInt(searchParams.get('limit') || '10', 10);
-    const itemIdsParam = searchParams.get('itemIds');
-    const isPublished = searchParams.get('published') !== 'false';
-
-    // Parse itemIds if provided (for multi-reference filtering)
-    const itemIds = itemIdsParam ? itemIdsParam.split(',').filter(Boolean) : undefined;
-
-    // Build filters
-    const filters: {
-      offset?: number;
-      limit?: number;
-      itemIds?: string[];
-    } = {
-      offset: isNaN(offset) ? 0 : offset,
-      limit: isNaN(limit) || limit < 1 ? 10 : Math.min(limit, 100), // Cap at 100
-    };
-
-    if (itemIds && itemIds.length > 0) {
-      filters.itemIds = itemIds;
-    }
-
-    // Fetch items with values
-    const { items, total } = await getItemsWithValues(
-      collectionId,
-      isPublished,
-      filters
-    );
-
-    // Inject computed count field values for callers reading raw item data.
-    await enrichItemsWithCountValues(items, collectionId, isPublished);
-
-    return noCache({
-      data: {
-        items,
-        total,
-        offset: filters.offset,
-        limit: filters.limit,
-        hasMore: (filters.offset || 0) + items.length < total,
+        offset: pageOffset,
+        limit: pageLimit,
+        hasMore: pageOffset + items.length < total,
       }
     });
   } catch (error) {

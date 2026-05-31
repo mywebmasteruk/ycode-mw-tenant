@@ -167,7 +167,19 @@ export interface DesignProperties {
   transitions?: TransitionsDesign;
 }
 
+export type FormType = 'standard' | 'password_protected';
+
+export type PasswordProtectionContext = {
+  pageId?: string;
+  folderId?: string;
+  redirectUrl: string;
+  isPublished: boolean;
+};
+
 export interface FormSettings {
+  // 'password_protected' wires the form to the page-auth verify endpoint and gates access to
+  // password-protected pages; 'standard' (default) submits to /ycode/api/form-submissions.
+  form_type?: FormType;
   success_action?: 'message' | 'redirect'; // What happens on successful submission (default: 'message')
   success_message?: string; // Message shown on successful submission (deprecated - now uses alert child)
   error_message?: string; // Message shown on failed submission (deprecated - now uses alert child)
@@ -328,7 +340,7 @@ export interface InteractionTween {
 
 export type ApplyStyles = 'on-load' | 'on-trigger';
 
-export type TweenPropertyKey = 'x' | 'y' | 'rotation' | 'scale' | 'skewX' | 'skewY' | 'autoAlpha' | 'display' | 'width' | 'height' | 'backgroundColor';
+export type TweenPropertyKey = 'x' | 'y' | 'rotation' | 'scale' | 'skewX' | 'skewY' | 'autoAlpha' | 'display' | 'width' | 'height' | 'backgroundColor' | 'filterBlur' | 'filterBrightness' | 'filterGrayscale';
 
 export type InteractionApplyStyles = Partial<Record<TweenPropertyKey, ApplyStyles>>;
 
@@ -460,6 +472,11 @@ export interface Layer {
     collectionLayerClasses?: string[];
     collectionLayerTag?: string;
     isPublished?: boolean;
+    // Full collection layer (sans children) used by the client to rebuild
+    // proper item wrappers (anchor/link/attribute) when injecting filtered
+    // or load-more items. Without this, the wrapper would be a plain <div>
+    // and lose link/action behavior.
+    collectionLayer?: Omit<Layer, 'children'>;
   };
 }
 
@@ -1307,6 +1324,22 @@ export interface CollectionPaginationMeta {
   mode?: 'pages' | 'load_more'; // Pagination mode
   itemIds?: string[]; // For multi-reference filtering in load_more mode
   layerTemplate?: Layer[]; // Layer template for rendering new items in load_more mode
+  // Full collection layer (sans children) — used by load-more (and filter)
+  // to rebuild proper item wrappers (link/action/attributes) when items are
+  // re-rendered client-side.
+  collectionLayer?: Omit<Layer, 'children'>;
+  // Whether SSR rendered this collection from published data. The client
+  // must fetch load-more items from the same source so draft previews
+  // don't accidentally append published rows (or vice versa).
+  isPublished?: boolean;
+  // Sort applied by SSR — load-more must mirror it or offset-based
+  // paging will return overlapping (duplicate) items.
+  sortBy?: string;
+  sortOrder?: 'asc' | 'desc';
+  // Optional cap from `collectionVariable.limit` when pagination is enabled.
+  // Treated as a max total: clamps `totalItems` and stops `load_more` once
+  // reached, even if the underlying collection has more matching rows.
+  maxTotal?: number;
 }
 
 // Conditional Visibility Types
@@ -1319,6 +1352,9 @@ export type BooleanOperator = 'is';
 export type ReferenceOperator = 'is_one_of' | 'is_not_one_of' | 'exists' | 'does_not_exist';
 export type MultiReferenceOperator = 'is_one_of' | 'is_not_one_of' | 'contains_all_of' | 'contains_exactly' | 'item_count' | 'has_items' | 'has_no_items';
 export type PageCollectionOperator = 'item_count' | 'has_items' | 'has_no_items';
+// Self filter: compare the item's own ID against a set of IDs (statically picked
+// and/or the current dynamic page item). Mirrors reference field semantics.
+export type SelfOperator = 'is_one_of' | 'is_not_one_of';
 
 export type VisibilityOperator =
   | TextOperator
@@ -1327,11 +1363,12 @@ export type VisibilityOperator =
   | BooleanOperator
   | ReferenceOperator
   | MultiReferenceOperator
-  | PageCollectionOperator;
+  | PageCollectionOperator
+  | SelfOperator;
 
 export interface VisibilityCondition {
   id: string;
-  source: 'collection_field' | 'page_collection';
+  source: 'collection_field' | 'page_collection' | 'self';
   // For collection_field source
   fieldId?: string;
   fieldType?: CollectionFieldType;
@@ -1344,6 +1381,9 @@ export interface VisibilityCondition {
   collectionLayerName?: string; // Display name for the layer
   compareOperator?: 'eq' | 'lt' | 'lte' | 'gt' | 'gte'; // For 'item_count' operator
   compareValue?: number; // For 'item_count' operator
+  // For self source: when true, the current dynamic page item ID is injected
+  // into the comparison set alongside any statically picked IDs in `value`.
+  includesCurrentPageItem?: boolean;
   // For linking filter value to an input layer inside a Filter
   inputLayerId?: string;
   inputLayerId2?: string; // For second bound (e.g. 'is_between')

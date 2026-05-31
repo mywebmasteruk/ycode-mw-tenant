@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Layer, Breakpoint, UIState } from '@/types';
-import { getDraftLayers, upsertDraftLayers } from '@/lib/repositories/pageLayersRepository';
 import {
   findLayerById,
   updateLayerById,
@@ -13,22 +12,10 @@ import {
   getTiptapTextContent,
   buildTiptapDoc,
   applyDesignToLayer,
-  ELEMENT_TEMPLATES,
 } from '@/lib/mcp/utils';
 import type { RichTextBlock } from '@/lib/mcp/utils';
-import { broadcastLayersChanged } from '@/lib/mcp/broadcast';
-import { designSchema } from './shared-schemas';
-
-const templateEnum = z.enum(
-  Object.keys(ELEMENT_TEMPLATES) as [string, ...string[]],
-);
-
-const richTextBlockSchema = z.object({
-  type: z.enum(['paragraph', 'heading', 'blockquote', 'bulletList', 'orderedList', 'codeBlock', 'horizontalRule']),
-  text: z.string().optional(),
-  level: z.number().optional(),
-  items: z.array(z.string()).optional(),
-});
+import { getCachedLayers, saveCachedLayers } from '@/lib/mcp/page-layers';
+import { designSchema, richTextBlockSchema, templateEnum } from './shared-schemas';
 
 const addLayerOp = z.object({
   type: z.literal('add_layer'),
@@ -118,8 +105,7 @@ EXAMPLE:
       operations: z.array(operationSchema).min(1).max(50).describe('Array of operations to execute in order'),
     },
     async ({ page_id, operations }) => {
-      const pageLayers = await getDraftLayers(page_id);
-      let layers = (pageLayers?.layers as Layer[]) || [];
+      let layers = await getCachedLayers(page_id);
 
       const refMap = new Map<string, string>();
       const results: Array<{ op: number; status: string; detail: string }> = [];
@@ -253,11 +239,10 @@ EXAMPLE:
 
       const errors = results.filter((r) => r.status === 'error');
       if (errors.length === operations.length) {
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ message: 'All operations failed', results }, null, 2) }], isError: true };
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ message: 'All operations failed', results }) }], isError: true };
       }
 
-      await upsertDraftLayers(page_id, layers);
-      broadcastLayersChanged(page_id, layers).catch(() => {});
+      await saveCachedLayers(page_id, layers);
 
       const refEntries = Object.fromEntries(refMap);
       return {
@@ -267,7 +252,7 @@ EXAMPLE:
             message: `Executed ${results.filter((r) => r.status === 'ok').length}/${operations.length} operations`,
             ref_ids: Object.keys(refEntries).length > 0 ? refEntries : undefined,
             results,
-          }, null, 2),
+          }),
         }],
       };
     },

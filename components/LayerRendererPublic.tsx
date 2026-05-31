@@ -15,7 +15,7 @@
 
 import React, { useEffect, useCallback, useMemo, useRef, Suspense } from 'react';
 import dynamic from 'next/dynamic';
-import type { Layer, Locale, FormSettings, Component, DesignColorVariable } from '@/types';
+import type { Layer, Locale, FormSettings, Component, DesignColorVariable, PasswordProtectionContext } from '@/types';
 import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextContentLayer, getCollectionVariable, filterDisabledSliderLayers } from '@/lib/layer-utils';
 import { getMapIframeProps, DEFAULT_MAP_SETTINGS, resolveMarkerColor } from '@/lib/map-utils';
 import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
@@ -117,6 +117,11 @@ interface LayerRendererPublicProps {
    * the hero image during the HTML parse rather than after CSS/layout.
    */
   lcpCandidateLayerId?: string | null;
+  /**
+   * When set (typically on the 401 error page), a password-protected form layer
+   * uses this context to call the page-auth verify endpoint and redirect on success.
+   */
+  passwordProtection?: PasswordProtectionContext;
 }
 
 const LayerRendererPublic: React.FC<LayerRendererPublicProps> = ({
@@ -148,6 +153,7 @@ const LayerRendererPublic: React.FC<LayerRendererPublicProps> = ({
   isSlideChild: isSlideChildProp,
   serverSettings,
   lcpCandidateLayerId,
+  passwordProtection,
 }) => {
   const anchorMap = useMemo(() => {
     return anchorMapProp || buildAnchorMap(layers);
@@ -159,7 +165,7 @@ const LayerRendererPublic: React.FC<LayerRendererPublicProps> = ({
 
       const originalLayerId = layer.id.replace(/-fragment$/, '');
       const hasFilter = !!layer._filterConfig;
-      const hasPagination = layer._paginationMeta && isPublished;
+      const hasPagination = !!layer._paginationMeta;
 
       if (hasPagination || hasFilter) {
         let content: React.ReactNode = renderedChildren;
@@ -174,6 +180,10 @@ const LayerRendererPublic: React.FC<LayerRendererPublicProps> = ({
                 collectionLayerId={originalLayerId}
                 itemIds={layer._paginationMeta!.itemIds}
                 layerTemplate={layer._paginationMeta!.layerTemplate}
+                isPreview={isPreview}
+                pageCollectionItemId={pageCollectionItemId}
+                pageCollectionSortedItemIds={pageCollectionSortedItemIds}
+                collectionLayer={layer._filterConfig?.collectionLayer || layer._paginationMeta!.collectionLayer}
               >
                 {content}
               </LoadMoreCollection>
@@ -206,6 +216,10 @@ const LayerRendererPublic: React.FC<LayerRendererPublicProps> = ({
               collectionLayerClasses={layer._filterConfig!.collectionLayerClasses}
               collectionLayerTag={layer._filterConfig!.collectionLayerTag}
               isPublished={layer._filterConfig!.isPublished}
+              isPreview={isPreview}
+              pageCollectionItemId={pageCollectionItemId}
+              pageCollectionSortedItemIds={pageCollectionSortedItemIds}
+              collectionLayer={layer._filterConfig!.collectionLayer}
             >
               {content}
             </FilterableCollection>
@@ -253,6 +267,7 @@ const LayerRendererPublic: React.FC<LayerRendererPublicProps> = ({
         isSlideChild={isSlideChildProp}
         serverSettings={serverSettings}
         lcpCandidateLayerId={lcpCandidateLayerId}
+        passwordProtection={passwordProtection}
       />
     );
   };
@@ -294,6 +309,7 @@ const LayerItem: React.FC<{
   isSlideChild?: boolean;
   serverSettings?: Record<string, unknown>;
   lcpCandidateLayerId?: string | null;
+  passwordProtection?: PasswordProtectionContext;
 }> = ({
   layer,
   isPublished,
@@ -323,6 +339,7 @@ const LayerItem: React.FC<{
   isSlideChild,
   serverSettings,
   lcpCandidateLayerId,
+  passwordProtection,
 }) => {
   const classesString = getClassesString(layer);
   const collectionLayerItemId = layer._collectionItemId || collectionItemId;
@@ -380,7 +397,8 @@ const LayerItem: React.FC<{
     components: componentsProp,
     serverSettings,
     lcpCandidateLayerId,
-  }), [isPublished, pageId, collectionLayerData, collectionLayerItemId, effectiveLayerDataMap, pageCollectionItemId, pageCollectionItemData, pageCollectionSortedItemIds, hiddenLayerInfo, currentLocale, availableLocales, localeSelectorFormat, isInsideForm, isInsideLink, parentFormSettings, pages, folders, collectionItemSlugs, isPreview, translations, anchorMap, resolvedAssets, componentsProp, serverSettings, lcpCandidateLayerId]);
+    passwordProtection,
+  }), [isPublished, pageId, collectionLayerData, collectionLayerItemId, effectiveLayerDataMap, pageCollectionItemId, pageCollectionItemData, pageCollectionSortedItemIds, hiddenLayerInfo, currentLocale, availableLocales, localeSelectorFormat, isInsideForm, isInsideLink, parentFormSettings, pages, folders, collectionItemSlugs, isPreview, translations, anchorMap, resolvedAssets, componentsProp, serverSettings, lcpCandidateLayerId, passwordProtection]);
 
   const renderComponentBlock: RenderComponentBlockFn = useCallback(
     (comp, resolvedLayers, _overrides, key, innerAncestorIds) => {
@@ -1094,11 +1112,62 @@ const LayerItem: React.FC<{
     if (htmlTag === 'form') {
       const formId = layer.settings?.id;
       const formSettings = layer.settings?.form;
+      const isPasswordForm = formSettings?.form_type === 'password_protected';
 
       elementProps.onSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
         e.preventDefault();
 
         const form = e.currentTarget;
+
+        // Password-protected forms gate access to locked pages via /api/page-auth/verify.
+        // The standard /ycode/api/form-submissions path is skipped entirely.
+        if (isPasswordForm) {
+          const passwordInput =
+            form.querySelector<HTMLInputElement>('input[type="password"][name="password"]')
+            || form.querySelector<HTMLInputElement>('input[name="password"]')
+            || form.querySelector<HTMLInputElement>('input[type="password"]');
+          const submittedPassword = passwordInput?.value ?? '';
+
+          const errorAlert = form.querySelector('[data-alert-type="error"]') as HTMLElement | null;
+          const successAlert = form.querySelector('[data-alert-type="success"]') as HTMLElement | null;
+          if (errorAlert) errorAlert.style.display = 'none';
+          if (successAlert) successAlert.style.display = 'none';
+
+          try {
+            const response = await fetch('/api/page-auth/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                pageId: passwordProtection?.pageId,
+                folderId: passwordProtection?.folderId,
+                password: submittedPassword,
+                redirectUrl: passwordProtection?.redirectUrl
+                  ?? (typeof window !== 'undefined' ? window.location.pathname : '/'),
+                isPublished: passwordProtection?.isPublished ?? true,
+              }),
+            });
+
+            const data = await response.json().catch(() => ({}));
+
+            if (response.ok) {
+              const target = data?.redirectUrl;
+              if (target && typeof window !== 'undefined') {
+                window.location.href = target;
+              } else if (typeof window !== 'undefined') {
+                window.location.reload();
+              }
+              return;
+            }
+
+            if (errorAlert) errorAlert.style.display = '';
+            if (passwordInput) passwordInput.value = '';
+          } catch (error) {
+            console.error('Password verification error:', error);
+            if (errorAlert) errorAlert.style.display = '';
+          }
+          return;
+        }
+
         const formData = new FormData(form);
         const payload: Record<string, any> = {};
 
