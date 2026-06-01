@@ -8,8 +8,12 @@
  */
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+<<<<<<< HEAD
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
+=======
+import { fetchAllRows, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
+>>>>>>> upstream/main
 import type { Locale, Translation, TranslationSourceType } from '@/types';
 
 export interface ChangedLocale {
@@ -149,6 +153,7 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
   // `buildSlugSnapshot` reads to compute OLD URLs for slug renames.
   // ──────────────────────────────────────────────────────────────────────
 
+<<<<<<< HEAD
   let publishedLocalesQuery = client.from('locales').select('*').eq('is_published', true);
   publishedLocalesQuery = applyTenantEq(publishedLocalesQuery, tenantId);
   
@@ -161,10 +166,20 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
   ] = await Promise.all([
     publishedLocalesQuery,
     publishedTranslationsQuery,
+=======
+  // Translations regularly exceed the 1000-row PostgREST default, so page
+  // through both the existing-published snapshot and the draft fetch below.
+  // A single-shot SELECT silently truncated the publish set, leaving rows
+  // 1001..N permanently in draft.
+  const [existingPublishedLocalesRes, existingPublishedTranslations] = await Promise.all([
+    client.from('locales').select('*').eq('is_published', true),
+    fetchAllRows<Translation>((from, to) =>
+      client.from('translations').select('*').eq('is_published', true).order('id', { ascending: true }).range(from, to)
+    ),
+>>>>>>> upstream/main
   ]);
 
-  const existingPublishedLocales: Locale[] = existingPublishedLocalesRaw || [];
-  const existingPublishedTranslations: Translation[] = existingPublishedTranslationsRaw || [];
+  const existingPublishedLocales: Locale[] = existingPublishedLocalesRes.data || [];
 
   const publishedLocalesById = new Map<string, Locale>();
   for (const l of existingPublishedLocales) publishedLocalesById.set(l.id, l);
@@ -289,6 +304,7 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
   // === TRANSLATIONS ===
   const translationsStart = performance.now();
 
+<<<<<<< HEAD
   // Step 4: Fetch all draft translations (including soft-deleted)
   let draftTranslationsQuery = client
     .from('translations')
@@ -299,6 +315,18 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
 
   if (translationsError) {
     throw new Error(`Failed to fetch draft translations: ${translationsError.message}`);
+=======
+  // Step 4: Fetch all draft translations (including soft-deleted). Paged
+  // for the same 1000-row reason as the published snapshot above.
+  let allDraftTranslations: Translation[];
+  try {
+    allDraftTranslations = await fetchAllRows<Translation>((from, to) =>
+      client.from('translations').select('*').eq('is_published', false).order('id', { ascending: true }).range(from, to)
+    );
+  } catch (translationsError) {
+    const message = translationsError instanceof Error ? translationsError.message : String(translationsError);
+    throw new Error(`Failed to fetch draft translations: ${message}`);
+>>>>>>> upstream/main
   }
 
   // ──────────────────────────────────────────────────────────────────────
@@ -368,7 +396,9 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
       }
     }
 
-    // Step 6: Upsert published translations
+    // Step 6: Upsert published translations in write-sized batches so the
+    // PostgREST request payload stays well under URL/body limits when a
+    // project has tens of thousands of translations.
     if (activeDraftTranslations.length > 0) {
       const publishedTranslations = activeDraftTranslations.map((translation: Translation) => ({
         id: translation.id,
@@ -386,14 +416,15 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
         ...(tenantId ? { tenant_id: tenantId } : {}),
       }));
 
-      const { error: upsertError } = await client
-        .from('translations')
-        .upsert(publishedTranslations, {
-          onConflict: 'id,is_published',
-        });
+      for (let i = 0; i < publishedTranslations.length; i += SUPABASE_WRITE_BATCH_SIZE) {
+        const batch = publishedTranslations.slice(i, i + SUPABASE_WRITE_BATCH_SIZE);
+        const { error: upsertError } = await client
+          .from('translations')
+          .upsert(batch, { onConflict: 'id,is_published' });
 
-      if (upsertError) {
-        throw new Error(`Failed to upsert published translations: ${upsertError.message}`);
+        if (upsertError) {
+          throw new Error(`Failed to upsert published translations: ${upsertError.message}`);
+        }
       }
 
       publishedTranslationsCount = activeDraftTranslations.length;

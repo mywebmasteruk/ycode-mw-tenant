@@ -67,17 +67,21 @@ import {
   buildGsapProps,
   addTweenToTimeline,
   createSplitTextAnimation,
+  getDefaultApplyStyles,
+  getEffectiveApplyStyle,
   updateInteractionById,
   updateInteractionTweens,
   updateTweenById,
   parseAnimationValue,
   formatAnimationValue,
   setColorVariableResolver,
+  isFilterPropertyKey,
+  buildFilterString,
 } from '@/lib/animation-utils';
 import type { TriggerType, PropertyType, ParsedAnimationValue } from '@/lib/animation-utils';
 
 // 4. Types
-import type { Layer, LayerInteraction, InteractionTimeline, InteractionTween, TweenProperties, Breakpoint } from '@/types';
+import type { ApplyStyles, Layer, LayerInteraction, InteractionTimeline, InteractionTween, TweenProperties, Breakpoint } from '@/types';
 import { BREAKPOINTS, BREAKPOINT_VALUES } from '@/lib/breakpoint-utils';
 import { useColorVariablesStore } from '@/stores/useColorVariablesStore';
 import { Badge } from '@/components/ui/badge';
@@ -843,6 +847,20 @@ export default function InteractionsPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedInteractionId]);
 
+  // Reverse sync: when the trigger is locked (event selected) and the selected layer
+  // changes, select the matching animated layer in the Animations section, or clear
+  // the selection when the layer is not animated
+  useEffect(() => {
+    if (!selectedInteractionId) return;
+    const interaction = interactions.find((i) => i.id === selectedInteractionId);
+    const tweens = interaction?.tweens || [];
+    // Keep current selection if it already targets the layer (supports multiple tweens per layer)
+    const currentTween = tweens.find((t) => t.id === selectedTweenId);
+    if (currentTween && currentTween.layer_id === selectedLayerId) return;
+    const matchingTween = tweens.find((t) => t.layer_id === selectedLayerId);
+    setSelectedTweenId(matchingTween ? matchingTween.id : null);
+  }, [selectedLayerId, selectedInteractionId, selectedTweenId, interactions]);
+
   // Notify parent about state changes
   useEffect(() => {
     onStateChange?.({
@@ -948,16 +966,7 @@ export default function InteractionsPanel({
       ease: 'power1.out',
       from: {},
       to: {},
-      apply_styles: {
-        x: 'on-trigger',
-        y: 'on-trigger',
-        rotation: 'on-trigger',
-        scale: 'on-trigger',
-        skewX: 'on-trigger',
-        skewY: 'on-trigger',
-        autoAlpha: 'on-trigger',
-        display: 'on-trigger',
-      },
+      apply_styles: getDefaultApplyStyles(selectedInteraction.trigger),
     };
 
     const updatedInteractions = updateInteractionById(
@@ -1714,6 +1723,11 @@ export default function InteractionsPanel({
               <Button
                 size="xs"
                 variant="secondary"
+                className={cn(
+                  selectedLayerId &&
+                    !(selectedInteraction.tweens || []).some((t) => t.layer_id === selectedLayerId) &&
+                    'bg-teal-500/50 text-white hover:bg-teal-500/60'
+                )}
                 onClick={handleAddTween}
                 disabled={!selectedLayerId}
               >
@@ -2164,9 +2178,27 @@ export default function InteractionsPanel({
                         });
                       };
 
-                      const applyPreview = (value: string | null) => {
+                      const applyPreview = (value: string | null, side: 'from' | 'to' = 'to') => {
                         if (prop.key === 'display') return;
                         if (value === null || value === undefined) return;
+
+                        // Filter sub-properties share a single CSS `filter` declaration —
+                        // compose the full filter string from the tween's other filter
+                        // values so the preview reflects the combined effect.
+                        if (isFilterPropertyKey(prop.key)) {
+                          const base = side === 'from' ? selectedTween.from : selectedTween.to;
+                          const composed = { ...base, [prop.key]: value };
+                          const filterStr = buildFilterString(composed);
+                          if (filterStr !== null) {
+                            applyPreviewStyles(
+                              selectedTween.layer_id,
+                              { filter: filterStr },
+                              { splitText: selectedTween.splitText, duration: selectedTween.duration }
+                            );
+                          }
+                          return;
+                        }
+
                         const gsapValue = toGsapValue(value, prop);
                         if (gsapValue !== undefined) {
                           applyPreviewStyles(
@@ -2180,12 +2212,12 @@ export default function InteractionsPanel({
                       const handlePreviewFrom = () => {
                         if (isFromCurrent) return;
                         clearAllPreviewStyles();
-                        applyPreview(fromValue as string);
+                        applyPreview(fromValue as string, 'from');
                       };
 
                       const handlePreviewTo = () => {
                         clearAllPreviewStyles();
-                        applyPreview(selectedTween.to[prop.key] as string);
+                        applyPreview(selectedTween.to[prop.key] as string, 'to');
                       };
 
                       /** Helper to update property and apply preview after iframe re-renders */
@@ -2244,24 +2276,24 @@ export default function InteractionsPanel({
 
                       const handleFromChange = (value: string) => {
                         const resolved = resolveValue(value, parsedFrom);
-                        handlePropertyChange(() => setFromValue(resolved), () => applyPreview(resolved));
+                        handlePropertyChange(() => setFromValue(resolved), () => applyPreview(resolved, 'from'));
                       };
 
                       const handleFromUnitChange = (newUnit: string) => {
                         if (!parsedFrom) return;
                         const resolved = formatAnimationValue(parsedFrom.number, newUnit);
-                        handlePropertyChange(() => setFromValue(resolved), () => applyPreview(resolved));
+                        handlePropertyChange(() => setFromValue(resolved), () => applyPreview(resolved, 'from'));
                       };
 
                       const handleToChange = (value: string) => {
                         const resolved = resolveValue(value, parsedTo);
-                        handlePropertyChange(() => setToValue(resolved), () => applyPreview(resolved));
+                        handlePropertyChange(() => setToValue(resolved), () => applyPreview(resolved, 'to'));
                       };
 
                       const handleToUnitChange = (newUnit: string) => {
                         if (!parsedTo) return;
                         const resolved = formatAnimationValue(parsedTo.number, newUnit);
-                        handlePropertyChange(() => setToValue(resolved), () => applyPreview(resolved));
+                        handlePropertyChange(() => setToValue(resolved), () => applyPreview(resolved, 'to'));
                       };
 
                       /** Deferred blur: clears preview after pending RAF callbacks complete */
@@ -2278,34 +2310,47 @@ export default function InteractionsPanel({
 
                       return (
                         <div key={prop.key} className="flex items-center gap-1.25">
-                          {!prop.toOnly && (
-                            <>
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Button
-                                    size="xs"
-                                    variant="secondary"
-                                    className="size-7 p-0 shrink-0 transition-none"
-                                    disabled={isFromCurrent}
-                                    onClick={() => {
-                                      const currentValue = selectedTween.apply_styles?.[prop.key] || 'on-trigger';
-                                      handleUpdateTween(selectedTween.id, {
-                                        apply_styles: {
-                                          ...selectedTween.apply_styles,
-                                          [prop.key]: currentValue === 'on-load' ? 'on-trigger' : 'on-load',
-                                        },
-                                      });
-                                    }}
-                                  >
-                                    <Icon name={selectedTween.apply_styles?.[prop.key] === 'on-load' ? 'page' : 'cursor-default'} />
-                                  </Button>
-                                </TooltipTrigger>
-                                <TooltipContent side="top" align="start">
-                                  {selectedTween.apply_styles?.[prop.key] === 'on-load'
-                                    ? 'Apply property style on page load'
-                                    : 'Apply property style on trigger'}
-                                </TooltipContent>
-                              </Tooltip>
+                          {!prop.toOnly && (() => {
+                            // SplitText tweens target child .word/.char/.line elements that
+                            // only exist after SplitText runs client-side, so the on-load /
+                            // on-trigger toggle is a no-op — they always behave as on-trigger.
+                            const isNoOpForSplitText = !!selectedTween.splitText;
+                            const effectiveApplyStyle: ApplyStyles = isNoOpForSplitText
+                              ? 'on-trigger'
+                              : selectedInteraction
+                                ? getEffectiveApplyStyle(selectedInteraction.trigger, prop.key, selectedTween.apply_styles)
+                                : (selectedTween.apply_styles?.[prop.key] || 'on-trigger');
+                            const isOnLoad = effectiveApplyStyle === 'on-load';
+
+                            return (
+                              <>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      size="xs"
+                                      variant="secondary"
+                                      className="size-7 p-0 shrink-0 transition-none"
+                                      disabled={isFromCurrent || isNoOpForSplitText}
+                                      onClick={() => {
+                                        handleUpdateTween(selectedTween.id, {
+                                          apply_styles: {
+                                            ...selectedTween.apply_styles,
+                                            [prop.key]: isOnLoad ? 'on-trigger' : 'on-load',
+                                          },
+                                        });
+                                      }}
+                                    >
+                                      <Icon name={isOnLoad ? 'page' : 'cursor-default'} />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent side="top" align="start">
+                                    {isNoOpForSplitText
+                                      ? 'Text animations always apply styles on trigger'
+                                      : isOnLoad
+                                        ? 'Apply property style on page load'
+                                        : 'Apply property style on trigger'}
+                                  </TooltipContent>
+                                </Tooltip>
 
                               <div className="w-full flex items-center gap-1.5">
                                 {isFromCurrent ? (
@@ -2434,10 +2479,11 @@ export default function InteractionsPanel({
                                   >
                                     Set value <Icon name="chevronRight" className="size-2.5 opacity-60" /> Set value
                                   </DropdownMenuCheckboxItem>
-                                </DropdownMenuContent>
-                              </DropdownMenu>
-                            </>
-                          )}
+                                  </DropdownMenuContent>
+                                </DropdownMenu>
+                              </>
+                            );
+                          })()}
 
                           <div className="w-full flex items-center gap-1.5">
                             {isToCurrent ? (

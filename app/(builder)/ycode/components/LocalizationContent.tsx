@@ -33,6 +33,9 @@ interface LocalizationContentProps {
   children: React.ReactNode;
 }
 
+// Minimum number of characters before a search query is applied.
+const MIN_SEARCH_LENGTH = 2;
+
 interface ModalState {
   isOpen: boolean;
   isEditMode: boolean;
@@ -124,6 +127,7 @@ export default function LocalizationContent({ children }: LocalizationContentPro
   const [searchQuery, setSearchQuery] = useState<string>(() => {
     return searchParams?.get('search') || '';
   });
+  const isSearchActive = searchQuery.trim().length >= MIN_SEARCH_LENGTH;
   const [expandedPages, setExpandedPages] = useState<Set<string>>(new Set());
   // Local input values for immediate UI feedback (keyed by item.key)
   const [localInputValues, setLocalInputValues] = useState<Record<string, string>>({});
@@ -240,8 +244,8 @@ export default function LocalizationContent({ children }: LocalizationContentPro
         }
       }
 
-      // Filter by search query
-      if (searchQuery.trim()) {
+      // Filter by search query (requires a minimum query length)
+      if (isSearchActive) {
         const query = searchQuery.toLowerCase().trim();
         const originalContent = item.content_value?.toLowerCase() || '';
         const label = item.info?.label?.toLowerCase() || '';
@@ -334,12 +338,51 @@ export default function LocalizationContent({ children }: LocalizationContentPro
     });
   }, [storeFolders]);
 
-  // Initialize expanded pages when pages change
-  useEffect(() => {
-    if (sortedPages.length > 0 && expandedPages.size === 0) {
-      setExpandedPages(new Set(sortedPages.map(p => p.id)));
+  // Ordered ids of the collapsible sections for the active content type.
+  // Pages and CMS items share the same accordion/expansion behaviour.
+  const sectionIds = useMemo(() => {
+    if (selectedContentType === 'cms') {
+      return collections.flatMap(collection =>
+        (items[collection.id] || [])
+          .filter(item => !item.is_published)
+          .map(item => item.id)
+      );
     }
-  }, [sortedPages, expandedPages.size]);
+    return sortedPages.map(p => p.id);
+  }, [selectedContentType, collections, items, sortedPages]);
+
+  // Expand only the first section by default — rendering every section's
+  // translation rows at once slows the page considerably. Re-initialises when
+  // the content type changes (so switching to CMS expands its first item),
+  // but collapsing sections within a type doesn't re-trigger the auto-expand.
+  const initializedExpandedType = useRef<string | null>(null);
+  useEffect(() => {
+    if (initializedExpandedType.current === selectedContentType) return;
+    if (sectionIds.length === 0) return;
+    // Respect a deep-linked search: expand all when active, else first only.
+    setExpandedPages(
+      isSearchActive ? new Set(sectionIds) : new Set([sectionIds[0]])
+    );
+    initializedExpandedType.current = selectedContentType;
+  }, [selectedContentType, sectionIds, isSearchActive]);
+
+  // Update the search query and adjust section expansion in the SAME batched
+  // update. Doing this in a follow-up effect would briefly render an
+  // intermediate state (search inactive but all sections still expanded ⇒
+  // every section's items rendered at once), which is very slow on large sites.
+  // While searching, expand all sections so matches are visible; when search
+  // drops below the threshold, collapse back to just the first (accordion).
+  const handleSearchChange = (value: string) => {
+    const nowActive = value.trim().length >= MIN_SEARCH_LENGTH;
+    if (nowActive !== isSearchActive) {
+      setExpandedPages(
+        nowActive
+          ? new Set(sectionIds)
+          : new Set(sectionIds.length > 0 ? [sectionIds[0]] : [])
+      );
+    }
+    setSearchQuery(value);
+  };
 
   // Build full page path segments for display
   const getPagePathSegments = (page: typeof sortedPages[0]): string[] => {
@@ -348,17 +391,51 @@ export default function LocalizationContent({ children }: LocalizationContentPro
     return [...folderSegments, page.name];
   };
 
+  // Refs for scrolling a freshly-expanded section to the top of the viewport.
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const sectionRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const pendingScrollPageId = useRef<string | null>(null);
+
   const togglePageExpansion = (pageId: string) => {
     setExpandedPages(prev => {
       const next = new Set(prev);
       if (next.has(pageId)) {
         next.delete(pageId);
       } else {
+        // Accordion: only one section open at a time, unless a search is
+        // active (then matching sections can stay expanded together).
+        if (!isSearchActive) {
+          next.clear();
+        }
         next.add(pageId);
+        // Scroll this section to the top once it's expanded (and others
+        // collapsed) — handled in an effect after the layout settles.
+        pendingScrollPageId.current = pageId;
       }
       return next;
     });
   };
+
+  // After expansion changes, scroll the just-expanded section's header just
+  // below the sticky toolbar. rAF waits for the collapse/expand layout shift.
+  useEffect(() => {
+    const pageId = pendingScrollPageId.current;
+    if (!pageId) return;
+    pendingScrollPageId.current = null;
+
+    const container = scrollContainerRef.current;
+    const section = sectionRefs.current.get(pageId);
+    if (!container || !section) return;
+
+    requestAnimationFrame(() => {
+      const TOOLBAR_HEIGHT = 64; // sticky toolbar (h-16)
+      const delta =
+        section.getBoundingClientRect().top -
+        container.getBoundingClientRect().top -
+        TOOLBAR_HEIGHT;
+      container.scrollTo({ top: container.scrollTop + delta, behavior: 'smooth' });
+    });
+  }, [expandedPages]);
 
   // Helper functions for managing local input values
   const handleLocalValueChange = (key: string, value: string) => {
@@ -543,7 +620,7 @@ export default function LocalizationContent({ children }: LocalizationContentPro
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 overflow-y-auto">
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto">
         {selectedLocale ? (
           <div className="flex flex-col min-h-full">
             <div className="sticky top-0 z-10 h-16 bg-background p-4 flex items-center gap-2 border-b">
@@ -580,7 +657,7 @@ export default function LocalizationContent({ children }: LocalizationContentPro
                   <InputGroupInput
                     placeholder="Search..."
                     value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onChange={(e) => handleSearchChange(e.target.value)}
                   />
                   <InputGroupAddon>
                     <Icon name="search" className="size-3" />
@@ -638,7 +715,7 @@ export default function LocalizationContent({ children }: LocalizationContentPro
                         const draft = draftsByPageId[page.id];
                         const layers = draft?.layers || [];
                         const selectedLocale = locales.find(l => l.id === selectedLocaleId);
-                        const translatableItems = extractPageTranslatableItems(page, layers, selectedLocale);
+                        const translatableItems = extractPageTranslatableItems(page, layers, selectedLocale, storeComponents);
                         const filteredItems = filterTranslatableItems(translatableItems);
 
                         if (filteredItems.length === 0) {
@@ -648,9 +725,15 @@ export default function LocalizationContent({ children }: LocalizationContentPro
                         const isExpanded = expandedPages.has(page.id);
 
                         return (
-                          <div key={page.id}>
+                          <div
+                            key={page.id}
+                            ref={(el) => {
+                              if (el) sectionRefs.current.set(page.id, el);
+                              else sectionRefs.current.delete(page.id);
+                            }}
+                          >
                             <header
-                              className="sticky top-16 z-[5] border-b cursor-pointer bg-background"
+                              className="sticky top-16 z-5 border-b cursor-pointer bg-background"
                               onClick={() => togglePageExpansion(page.id)}
                             >
                               <div className="p-4 flex items-center gap-1.5 bg-secondary/10 hover:bg-secondary/35 transition-colors">
@@ -666,7 +749,7 @@ export default function LocalizationContent({ children }: LocalizationContentPro
                                   <Icon name={getPageIcon(page)} className="size-3 opacity-60" />
                                 </div>
 
-                                <Label className="flex items-center gap-1">
+                                <Label className="flex items-center gap-1 cursor-pointer">
                                   {getPagePathSegments(page).map((segment, index, array) => (
                                     <React.Fragment key={index}>
                                       <span>{segment}</span>
@@ -739,7 +822,7 @@ export default function LocalizationContent({ children }: LocalizationContentPro
 
                           return (
                           <div key={folder.id}>
-                            <header className="sticky top-16 z-[5] border-b bg-background">
+                            <header className="sticky top-16 z-5 border-b bg-background">
                               <div className="p-4 flex items-center gap-1.5 bg-secondary/10">
                                 <div className="size-5.5 flex items-center justify-center rounded-[6px] bg-secondary/50">
                                   <Icon name="folder" className="size-3 opacity-60" />
@@ -820,7 +903,7 @@ export default function LocalizationContent({ children }: LocalizationContentPro
 
                         return (
                           <div key={component.id}>
-                            <header className="sticky top-16 z-[5] border-b bg-background">
+                            <header className="sticky top-16 z-5 border-b bg-background">
                               <div className="p-4 flex items-center gap-1.5 bg-secondary/10">
                                 <div className="size-5.5 flex items-center justify-center rounded-[6px] bg-secondary/50">
                                   <Icon name="component" className="size-3 opacity-60" />
@@ -900,15 +983,34 @@ export default function LocalizationContent({ children }: LocalizationContentPro
                           const nameField = collectionFields.find(f => f.type === 'text' && f.fillable);
                           const itemName = nameField ? item.values[nameField.id] || item.id.substring(0, 8) : item.id.substring(0, 8);
 
+                          const isExpanded = expandedPages.has(item.id);
+
                           return (
-                            <div key={item.id}>
-                              <header className="sticky top-16 z-[5] border-b bg-background">
-                                <div className="p-4 flex items-center gap-1.5 bg-secondary/10">
+                            <div
+                              key={item.id}
+                              ref={(el) => {
+                                if (el) sectionRefs.current.set(item.id, el);
+                                else sectionRefs.current.delete(item.id);
+                              }}
+                            >
+                              <header
+                                className="sticky top-16 z-5 border-b cursor-pointer bg-background"
+                                onClick={() => togglePageExpansion(item.id)}
+                              >
+                                <div className="p-4 flex items-center gap-1.5 bg-secondary/10 hover:bg-secondary/35 transition-colors">
+                                  <Icon
+                                    name="chevronRight"
+                                    className={cn(
+                                      'size-3 transition-transform',
+                                      isExpanded && 'rotate-90'
+                                    )}
+                                  />
+
                                   <div className="size-5.5 flex items-center justify-center rounded-[6px] bg-secondary/50">
                                     <Icon name="database" className="size-3 opacity-60" />
                                   </div>
 
-                                  <Label>{collection.name} <span className="text-muted-foreground">›</span> {itemName}</Label>
+                                  <Label className="cursor-pointer">{collection.name} <span className="text-muted-foreground">›</span> {itemName}</Label>
 
                                   <span className="flex items-center gap-1.5 ml-auto text-xs text-muted-foreground">
                                   <span>{defaultLocale?.label}</span>
@@ -917,29 +1019,32 @@ export default function LocalizationContent({ children }: LocalizationContentPro
                                 </span>
                                 </div>
                               </header>
-                              <ul className="border-b px-4 py-5 flex flex-col gap-5">
-                                {filteredItems.map((transItem) => (
-                                  <TranslationRow
-                                    key={transItem.key}
-                                    item={transItem}
-                                    selectedLocaleId={selectedLocaleId}
-                                    localInputValues={localInputValues}
-                                    onLocalValueChange={handleLocalValueChange}
-                                    onLocalValueClear={handleLocalValueClear}
-                                    getTranslationByKey={getTranslationByKey}
-                                    createTranslation={createTranslation}
-                                    updateTranslation={updateTranslation}
-                                    updateTranslationValue={updateTranslationValue}
-                                    updateTranslationStatus={updateTranslationStatus}
-                                    deleteTranslation={deleteTranslation}
-                                    allFields={allFields}
-                                    collections={collections}
-                                    pages={storePages}
-                                    folders={storeFolders}
-                                    sourceItem={undefined}
-                                  />
-                                ))}
-                              </ul>
+
+                              {isExpanded && (
+                                <ul className="border-b px-4 py-5 flex flex-col gap-5">
+                                  {filteredItems.map((transItem) => (
+                                    <TranslationRow
+                                      key={transItem.key}
+                                      item={transItem}
+                                      selectedLocaleId={selectedLocaleId}
+                                      localInputValues={localInputValues}
+                                      onLocalValueChange={handleLocalValueChange}
+                                      onLocalValueClear={handleLocalValueClear}
+                                      getTranslationByKey={getTranslationByKey}
+                                      createTranslation={createTranslation}
+                                      updateTranslation={updateTranslation}
+                                      updateTranslationValue={updateTranslationValue}
+                                      updateTranslationStatus={updateTranslationStatus}
+                                      deleteTranslation={deleteTranslation}
+                                      allFields={allFields}
+                                      collections={collections}
+                                      pages={storePages}
+                                      folders={storeFolders}
+                                      sourceItem={undefined}
+                                    />
+                                  ))}
+                                </ul>
+                              )}
                             </div>
                           );
                         }).filter(Boolean);
