@@ -8,6 +8,16 @@ import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import type { Setting } from '@/types';
 
+// Postgres "undefined_table" — the settings table is briefly absent right after
+// a DB reset and before migrations re-run. Treat it as "no settings" instead of
+// crashing page renders.
+const UNDEFINED_TABLE = '42P01';
+
+/** True when an error indicates the settings table does not exist yet. */
+function isMissingTableError(error: { code?: string } | null): boolean {
+  return error?.code === UNDEFINED_TABLE;
+}
+
 /**
  * Get all settings
  *
@@ -28,6 +38,9 @@ export async function getAllSettings(): Promise<Setting[]> {
   const { data, error } = await listQuery;
 
   if (error) {
+    if (isMissingTableError(error)) {
+      return [];
+    }
     throw new Error(`Failed to fetch settings: ${error.message}`);
   }
 
@@ -55,6 +68,13 @@ export async function getSettingByKey(key: string): Promise<any | null> {
   const { data, error } = await oneQuery.maybeSingle();
 
   if (error) {
+<<<<<<< HEAD
+=======
+    if (error.code === 'PGRST116' || isMissingTableError(error)) {
+      // Not found, or table not yet created
+      return null;
+    }
+>>>>>>> upstream/main
     throw new Error(`Failed to fetch setting: ${error.message}`);
   }
 
@@ -86,6 +106,9 @@ export async function getSettingsByKeys(keys: string[]): Promise<Record<string, 
   const { data, error } = await keysQuery;
 
   if (error) {
+    if (isMissingTableError(error)) {
+      return {};
+    }
     throw new Error(`Failed to fetch settings: ${error.message}`);
   }
 

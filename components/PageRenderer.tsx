@@ -21,8 +21,8 @@ import { getSettingByKey } from '@/lib/repositories/settingsRepository';
 import { getItemsWithValues, getItemsWithValuesByIds } from '@/lib/repositories/collectionItemRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
 import { REF_PAGE_PREFIX, REF_COLLECTION_PREFIX, isCollectionItemKeyword, parseCollectionLinkValue } from '@/lib/link-utils';
-import { getClassesString } from '@/lib/layer-utils';
-import type { Layer, Component, Page, CollectionItemWithValues, CollectionField, Locale, PageFolder } from '@/types';
+import { getClassesString, hasPasswordFormLayer } from '@/lib/layer-utils';
+import type { Layer, Component, Page, CollectionItemWithValues, CollectionField, Locale, PageFolder, PasswordProtectionContext } from '@/types';
 
 interface PageLinkRef { collection_item_id: string; page_id: string }
 
@@ -179,22 +179,45 @@ function extractAnimationLayers(layers: Layer[]): Layer[] {
     }));
 }
 
-/** Recursively check if any layer in the tree is a slider */
-function hasSliderLayers(layers: Layer[]): boolean {
-  for (const layer of layers) {
-    if (layer.name === 'slider') return true;
-    if (layer.children && hasSliderLayers(layer.children)) return true;
+/** Scan a Tiptap JSON node for richTextComponent nodes and test their pre-resolved
+ * layers (populated by resolveTiptapComponentCollections) against the predicate. */
+function tiptapTreeHasLayer(node: any, predicate: (layer: Layer) => boolean): boolean {
+  if (!node || typeof node !== 'object') return false;
+  if (node.type === 'richTextComponent' && Array.isArray(node.attrs?._resolvedLayers)
+    && layerTreeHasLayer(node.attrs._resolvedLayers as Layer[], predicate)) {
+    return true;
+  }
+  if (Array.isArray(node.content)) {
+    for (const child of node.content) {
+      if (tiptapTreeHasLayer(child, predicate)) return true;
+    }
   }
   return false;
 }
 
-/** Recursively check if any layer in the tree is a lightbox */
-function hasLightboxLayers(layers: Layer[]): boolean {
+/** Recursively check if any layer matches the predicate, descending into both
+ * children and the pre-resolved layers of rich-text-embedded components. */
+function layerTreeHasLayer(layers: Layer[], predicate: (layer: Layer) => boolean): boolean {
   for (const layer of layers) {
-    if (layer.name === 'lightbox') return true;
-    if (layer.children && hasLightboxLayers(layer.children)) return true;
+    if (predicate(layer)) return true;
+    const textVar = layer.variables?.text as any;
+    if (textVar?.type === 'dynamic_rich_text' && textVar.data?.content
+      && tiptapTreeHasLayer(textVar.data.content, predicate)) {
+      return true;
+    }
+    if (layer.children && layerTreeHasLayer(layer.children, predicate)) return true;
   }
   return false;
+}
+
+/** Check if any layer in the tree (including rich-text-embedded components) is a slider */
+function hasSliderLayers(layers: Layer[]): boolean {
+  return layerTreeHasLayer(layers, layer => layer.name === 'slider');
+}
+
+/** Check if any layer in the tree (including rich-text-embedded components) is a lightbox */
+function hasLightboxLayers(layers: Layer[]): boolean {
+  return layerTreeHasLayer(layers, layer => layer.name === 'lightbox');
 }
 
 /**
@@ -209,14 +232,6 @@ function hasAnyInteractions(layers: Layer[]): boolean {
   }
   return false;
 }
-
-/** Password protection context for 401 error pages */
-export type PasswordProtectionContext = {
-  pageId?: string;
-  folderId?: string;
-  redirectUrl: string;
-  isPublished: boolean;
-};
 
 interface PageRendererProps {
   page: Page;
@@ -296,6 +311,10 @@ export default async function PageRenderer({
   // Layers are always pre-resolved by the caller (page-fetcher).
   // Components are passed through for rich-text embedded component rendering in LayerRenderer.
   const resolvedLayers = layers || [];
+  // When the 401 page contains an editable password-protected form layer, the form
+  // is rendered & wired inline by LayerRendererPublic; otherwise we fall back to
+  // the hardcoded PasswordForm so older / customised 401 pages still work.
+  const hasInlinePasswordForm = is401Page && hasPasswordFormLayer(resolvedLayers);
 
   // Single tree traversal — derive both sets from the flat list
   const allPageLinks = collectLayerPageLinks(resolvedLayers);
@@ -700,10 +719,12 @@ export default async function PageRenderer({
           components={components}
           serverSettings={serverSettings}
           lcpCandidateLayerId={lcpCandidateLayerId}
+          passwordProtection={is401Page ? passwordProtection : undefined}
         />
 
-        {/* Inject password form for 401 error pages */}
-        {is401Page && passwordProtection && (
+        {/* Fallback hardcoded password form: only when the 401 page has no inline
+            password-protected form layer (e.g. older / customised 401 pages). */}
+        {is401Page && passwordProtection && !hasInlinePasswordForm && (
           <PasswordForm
             pageId={passwordProtection.pageId}
             folderId={passwordProtection.folderId}

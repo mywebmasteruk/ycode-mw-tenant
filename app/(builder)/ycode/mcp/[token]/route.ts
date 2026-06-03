@@ -1,14 +1,26 @@
 import { NextRequest } from 'next/server';
+<<<<<<< HEAD
 import { randomUUID } from 'crypto';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { validateToken, type McpToken } from '@/lib/repositories/mcpTokenRepository';
 import { createMcpServer } from '@/lib/mcp/server';
 import { runWithEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+=======
+import {
+  authenticateToken,
+  handleMcpPost,
+  handleMcpGet,
+  handleMcpDelete,
+  addCorsHeaders,
+  unauthorizedJson,
+} from '@/lib/mcp/handler';
+>>>>>>> upstream/main
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
+<<<<<<< HEAD
 interface McpSession {
   transport: WebStandardStreamableHTTPServerTransport;
   server: McpServer;
@@ -70,127 +82,23 @@ function createSessionTransport() {
   return { server, transport };
 }
 
+=======
+>>>>>>> upstream/main
 /**
- * Auto-initialize a fresh server+transport so it can handle non-init requests.
- * This is needed on serverless (Vercel) where in-memory sessions are lost
- * between requests that hit different instances.
+ * Legacy URL-token MCP endpoint.
+ *
+ * Used by Cursor, Windsurf, Claude Desktop, and Claude Code — clients that
+ * accept an MCP URL with the auth token embedded in the path. Claude.ai web
+ * and ChatGPT use the sibling `/ycode/mcp` route, which authenticates via
+ * `Authorization: Bearer <token>` headers issued by the OAuth flow.
  */
-async function autoInitialize(
-  transport: WebStandardStreamableHTTPServerTransport,
-  url: string,
-): Promise<void> {
-  const initReq = new Request(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json, text/event-stream',
-    },
-  });
-
-  await transport.handleRequest(initReq, {
-    parsedBody: {
-      jsonrpc: '2.0',
-      id: '_auto_init',
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-03-26',
-        capabilities: {},
-        clientInfo: { name: 'ycode-auto', version: '1.0.0' },
-      },
-    },
-  });
-
-  const notifReq = new Request(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json, text/event-stream',
-      'mcp-session-id': transport.sessionId!,
-    },
-  });
-
-  await transport.handleRequest(notifReq, {
-    parsedBody: { jsonrpc: '2.0', method: 'notifications/initialized' },
-  });
-}
-
-/**
- * Ensure the Accept header includes both required MIME types.
- * Some MCP clients (e.g., Claude Code) don't send text/event-stream,
- * but the SDK enforces it even when enableJsonResponse is true.
- */
-function ensureAcceptHeader(request: Request): Request {
-  const accept = request.headers.get('accept') || '';
-  if (accept.includes('application/json') && accept.includes('text/event-stream')) {
-    return request;
-  }
-
-  const headers = new Headers(request.headers);
-  headers.set('Accept', 'application/json, text/event-stream');
-  return new Request(request.url, {
-    method: request.method,
-    headers,
-    body: request.body,
-    // @ts-expect-error duplex is needed for streaming body but not in all TS defs
-    duplex: 'half',
-  });
-}
-
-async function handleMcpRequest(request: Request): Promise<Response> {
-  const normalized = ensureAcceptHeader(request);
-  const sessionId = normalized.headers.get('mcp-session-id');
-
-  if (sessionId && sessions.has(sessionId)) {
-    const session = sessions.get(sessionId)!;
-    session.lastActivity = Date.now();
-    return session.transport.handleRequest(normalized);
-  }
-
-  if (normalized.method !== 'POST') {
-    return new Response(JSON.stringify({
-      jsonrpc: '2.0',
-      error: { code: -32000, message: 'Session expired. Send a new initialize request.' },
-      id: null,
-    }), {
-      status: 400,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
-  const body = await normalized.json();
-  const isInit = !Array.isArray(body) && body.method === 'initialize';
-
-  const { server, transport } = createSessionTransport();
-  await server.connect(transport);
-
-  if (isInit) {
-    const req = new Request(normalized.url, {
-      method: 'POST',
-      headers: normalized.headers,
-    });
-    return transport.handleRequest(req, { parsedBody: body });
-  }
-
-  // Session was lost (serverless instance recycled) — auto-initialize
-  await autoInitialize(transport, normalized.url);
-
-  const actualReq = new Request(normalized.url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Accept': 'application/json, text/event-stream',
-      'mcp-session-id': transport.sessionId!,
-    },
-  });
-
-  return transport.handleRequest(actualReq, { parsedBody: body });
-}
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ token: string }> },
 ) {
   const { token } = await params;
+<<<<<<< HEAD
 
   try {
     const mcpToken = await authenticateToken(token);
@@ -216,7 +124,12 @@ export async function POST(
       status: 500,
       headers: { 'Content-Type': 'application/json' },
     }));
+=======
+  if (!(await authenticateToken(token))) {
+    return unauthorizedJson('Invalid MCP token');
+>>>>>>> upstream/main
   }
+  return handleMcpPost(request);
 }
 
 export async function GET(
@@ -224,6 +137,7 @@ export async function GET(
   { params }: { params: Promise<{ token: string }> },
 ) {
   const { token } = await params;
+<<<<<<< HEAD
 
   try {
     const mcpToken = await authenticateToken(token);
@@ -262,7 +176,12 @@ export async function GET(
       status: 500,
       headers: { 'Content-Type': 'application/json' },
     }));
+=======
+  if (!(await authenticateToken(token))) {
+    return unauthorizedJson('Invalid MCP token');
+>>>>>>> upstream/main
   }
+  return handleMcpGet(request);
 }
 
 export async function DELETE(
@@ -270,6 +189,7 @@ export async function DELETE(
   { params }: { params: Promise<{ token: string }> },
 ) {
   const { token } = await params;
+<<<<<<< HEAD
 
   try {
     const mcpToken = await authenticateToken(token);
@@ -297,7 +217,12 @@ export async function DELETE(
   } catch (error) {
     console.error('[MCP DELETE] Error:', error);
     return addCorsHeaders(new Response(null, { status: 204 }));
+=======
+  if (!(await authenticateToken(token))) {
+    return unauthorizedJson('Invalid MCP token');
+>>>>>>> upstream/main
   }
+  return handleMcpDelete(request);
 }
 
 export async function OPTIONS() {

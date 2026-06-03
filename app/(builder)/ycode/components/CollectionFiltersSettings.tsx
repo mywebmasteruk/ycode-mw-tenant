@@ -49,7 +49,9 @@ import {
   DATE_PRESET_OPTIONS,
   isDatePreset,
   isDateFieldType,
+  SELF_OPERATORS,
 } from '@/lib/collection-field-utils';
+import { clampDateInputValue } from '@/lib/date-format-utils';
 import { getCollectionVariable, isInputInsideFilter, resolveFilterInputId, findLayerById } from '@/lib/layer-utils';
 import { useEditorStore } from '@/stores/useEditorStore';
 import { usePagesStore } from '@/stores/usePagesStore';
@@ -70,10 +72,16 @@ function ReferenceItemsSelector({
   collectionId,
   value,
   onChange,
+  currentPageItem,
 }: {
   collectionId: string;
   value: string; // JSON array of item IDs
   onChange: (value: string) => void;
+  /** When provided, renders a "Current page item" entry above the items list. */
+  currentPageItem?: {
+    checked: boolean;
+    onChange: (checked: boolean) => void;
+  };
 }) {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<CollectionItemWithValues[]>([]);
@@ -135,23 +143,18 @@ function ReferenceItemsSelector({
 
   // Get display text for closed state
   const getDisplayText = () => {
-    if (selectedIds.length === 0) return 'Select items...';
+    const totalCount = selectedIds.length + (currentPageItem?.checked ? 1 : 0);
+    if (totalCount === 0) return 'Select items...';
 
-    // Find display names for selected items
-    const selectedNames = selectedIds
-      .map(id => {
-        const item = items.find(i => i.id === id);
-        return item ? getDisplayName(item) : null;
-      })
-      .filter(Boolean);
-
-    if (selectedNames.length > 0) {
-      return selectedNames.length <= 2
-        ? selectedNames.join(', ')
-        : `${selectedNames.length} items selected`;
+    const labels: string[] = [];
+    if (currentPageItem?.checked) labels.push('Current page item');
+    for (const id of selectedIds) {
+      const item = items.find(i => i.id === id);
+      if (item) labels.push(getDisplayName(item));
     }
 
-    return `${selectedIds.length} item${selectedIds.length !== 1 ? 's' : ''} selected`;
+    if (labels.length > 0 && labels.length <= 2) return labels.join(', ');
+    return `${totalCount} item${totalCount !== 1 ? 's' : ''} selected`;
   };
 
   if (!collectionId) {
@@ -171,11 +174,20 @@ function ReferenceItemsSelector({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent className="w-(--radix-dropdown-menu-trigger-width) min-w-50 max-h-60 overflow-y-auto" align="start">
+        {currentPageItem && (
+          <DropdownMenuCheckboxItem
+            checked={currentPageItem.checked}
+            onCheckedChange={(checked) => currentPageItem.onChange(checked === true)}
+            onSelect={(e) => e.preventDefault()}
+          >
+            Current page item
+          </DropdownMenuCheckboxItem>
+        )}
         {loading ? (
           <div className="flex items-center justify-center py-4">
             <Spinner />
           </div>
-        ) : items.length === 0 ? (
+        ) : items.length === 0 && !currentPageItem ? (
           <div className="text-center py-4 text-xs text-muted-foreground">
             No items in this collection
           </div>
@@ -294,6 +306,15 @@ export default function CollectionFiltersSettings({
     return null;
   }
 
+  // Build a fresh "self" condition (filters by the item's own ID).
+  const buildSelfCondition = (id: string): VisibilityCondition => ({
+    id,
+    source: 'self',
+    operator: 'is_one_of',
+    value: '[]',
+    includesCurrentPageItem: true,
+  });
+
   // Handle adding a new condition group for a collection field
   const handleAddFieldConditionGroup = (field: CollectionField) => {
     const newCondition: VisibilityCondition = {
@@ -314,6 +335,14 @@ export default function CollectionFiltersSettings({
     updateGroups([...groups, newGroup]);
   };
 
+  const handleAddSelfConditionGroup = () => {
+    const newGroup: VisibilityConditionGroup = {
+      id: Date.now().toString(),
+      conditions: [buildSelfCondition(`${Date.now()}-1`)],
+    };
+    updateGroups([...groups, newGroup]);
+  };
+
   // Handle adding a condition to an existing group (OR logic)
   const handleAddConditionFromOr = (groupId: string, field: CollectionField) => {
     const newGroups = groups.map(group => {
@@ -330,6 +359,19 @@ export default function CollectionFiltersSettings({
         return {
           ...group,
           conditions: [...group.conditions, newCondition],
+        };
+      }
+      return group;
+    });
+    updateGroups(newGroups);
+  };
+
+  const handleAddSelfConditionFromOr = (groupId: string) => {
+    const newGroups = groups.map(group => {
+      if (group.id === groupId) {
+        return {
+          ...group,
+          conditions: [...group.conditions, buildSelfCondition(`${groupId}-${Date.now()}`)],
         };
       }
       return group;
@@ -379,11 +421,17 @@ export default function CollectionFiltersSettings({
 
   const handleOperatorChange = (groupId: string, conditionId: string, operator: VisibilityOperator) => {
     const needsSecondValue = operatorRequiresSecondValue(operator);
+    const existing = groups.find(g => g.id === groupId)?.conditions.find(c => c.id === conditionId);
+    // `is between` has no preset options, so drop a stale preset value carried
+    // over from a single-bound operator.
+    const value = operatorRequiresValue(operator)
+      ? (needsSecondValue && isDatePreset(existing?.value) ? '' : existing?.value)
+      : undefined;
     patchCondition(groupId, conditionId, {
       operator,
-      value: operatorRequiresValue(operator) ? groups.find(g => g.id === groupId)?.conditions.find(c => c.id === conditionId)?.value : undefined,
-      value2: needsSecondValue ? groups.find(g => g.id === groupId)?.conditions.find(c => c.id === conditionId)?.value2 : undefined,
-      inputLayerId2: needsSecondValue ? groups.find(g => g.id === groupId)?.conditions.find(c => c.id === conditionId)?.inputLayerId2 : undefined,
+      value,
+      value2: needsSecondValue ? existing?.value2 : undefined,
+      inputLayerId2: needsSecondValue ? existing?.inputLayerId2 : undefined,
     });
   };
 
@@ -457,10 +505,16 @@ export default function CollectionFiltersSettings({
 
   // Render the dropdown content for adding conditions
   const renderAddConditionDropdown = (
-    onFieldSelect: (field: CollectionField) => void
+    onFieldSelect: (field: CollectionField) => void,
+    onSelfSelect: () => void,
   ) => (
     <DropdownMenuContent align="end" className="max-h-75! overflow-y-auto">
-      {/* Collection Fields Section */}
+      <DropdownMenuLabel className="text-xs text-muted-foreground">Item</DropdownMenuLabel>
+      <DropdownMenuItem onClick={onSelfSelect} className="flex items-center gap-2">
+        <Icon name="database" className="size-3 opacity-60" />
+        Item ID
+      </DropdownMenuItem>
+
       {fields && fields.length > 0 && (
         <>
           <DropdownMenuLabel className="text-xs text-muted-foreground">
@@ -477,13 +531,6 @@ export default function CollectionFiltersSettings({
             </DropdownMenuItem>
           ))}
         </>
-      )}
-
-      {/* Empty State */}
-      {(!fields || fields.length === 0) && (
-        <div className="px-2 py-4 text-xs text-muted-foreground text-center">
-          No fields available
-        </div>
       )}
     </DropdownMenuContent>
   );
@@ -502,12 +549,81 @@ export default function CollectionFiltersSettings({
   };
 
   // Render a single condition
+  // Render a `source: 'self'` condition (filter the collection by item identity).
+  const renderSelfCondition = (
+    condition: VisibilityCondition,
+    group: VisibilityConditionGroup,
+    index: number,
+  ) => (
+    <React.Fragment key={condition.id}>
+      {index > 0 && (
+        <li className="flex items-center gap-2 h-6">
+          <Label variant="muted" className="text-[10px]">Or</Label>
+          <hr className="flex-1" />
+        </li>
+      )}
+      <li className="*:w-full flex flex-col gap-2">
+        <header className="flex items-center gap-1.5">
+          <div className="size-5 flex items-center justify-center rounded-[6px] bg-secondary/50 hover:bg-secondary">
+            <Icon name="database" className="size-2.5 opacity-60" />
+          </div>
+          <Label variant="muted" className="truncate">Item ID</Label>
+          <span
+            role="button"
+            tabIndex={0}
+            className="ml-auto -my-1 -mr-0.5 shrink-0 p-0.5 rounded-sm opacity-70 hover:opacity-100 transition-opacity cursor-pointer"
+            onClick={() => handleRemoveCondition(group.id, condition.id)}
+          >
+            <Icon name="x" className="size-2.5" />
+          </span>
+        </header>
+
+        <Select
+          value={condition.operator}
+          onValueChange={(value) => patchCondition(group.id, condition.id, { operator: value as VisibilityOperator })}
+        >
+          <SelectTrigger>
+            <SelectValue placeholder="Select..." />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {SELF_OPERATORS.map((op) => (
+                <SelectItem key={op.value} value={op.value}>{op.label}</SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+
+        <ReferenceItemsSelector
+          collectionId={collectionId}
+          value={condition.value || '[]'}
+          onChange={(value) => handleValueChange(group.id, condition.id, value)}
+          currentPageItem={{
+            checked: !!condition.includesCurrentPageItem,
+            onChange: (checked) => patchCondition(group.id, condition.id, { includesCurrentPageItem: checked }),
+          }}
+        />
+      </li>
+    </React.Fragment>
+  );
+
   const renderCondition = (condition: VisibilityCondition, group: VisibilityConditionGroup, index: number) => {
+    if (condition.source === 'self') {
+      return renderSelfCondition(condition, group, index);
+    }
     const fieldType = condition.fieldType || getFieldType(condition.fieldId || '');
     const operators = getOperatorsForFieldType(fieldType);
     const icon = getFieldIcon(fieldType);
     const displayName = getFieldName(condition.fieldId || '');
     const referenceCollectionId = getReferenceCollectionId(condition);
+    // Date fields use a dropdown for value mode; the "Filter form input" option
+    // is the only place that reveals the link-to-input target icon. Falls back
+    // to a linked input for conditions saved before `dateInput` existed.
+    const isDateInputMode = isDateFieldType(fieldType)
+      && (condition.dateInput === true || !!condition.inputLayerId);
+    // Same mode tracking for the second bound (`is_between`).
+    const isDateInputMode2 = isDateFieldType(fieldType)
+      && (condition.dateInput2 === true || !!condition.inputLayerId2);
 
     return (
       <React.Fragment key={condition.id}>
@@ -672,12 +788,14 @@ export default function CollectionFiltersSettings({
                     ) : isDateFieldType(fieldType) ? (
                       <div className="flex flex-col gap-1.5">
                         <Select
-                          value={isDatePreset(condition.value) ? condition.value : (condition.value ? '_custom' : '')}
+                          value={isDatePreset(condition.value) ? condition.value : (isDateInputMode ? '_input' : '_custom')}
                           onValueChange={(v) => {
-                            if (v === '_custom') {
-                              handleValueChange(group.id, condition.id, '');
+                            if (v === '_input') {
+                              patchCondition(group.id, condition.id, { dateInput: true, value: '' });
+                            } else if (v === '_custom') {
+                              patchCondition(group.id, condition.id, { dateInput: false, value: '' });
                             } else {
-                              handleValueChange(group.id, condition.id, v);
+                              patchCondition(group.id, condition.id, { dateInput: false, value: v });
                             }
                           }}
                         >
@@ -686,18 +804,21 @@ export default function CollectionFiltersSettings({
                           </SelectTrigger>
                           <SelectContent>
                             <SelectGroup>
-                              {DATE_PRESET_OPTIONS.map((opt) => (
+                              <SelectItem value="_custom">Custom date</SelectItem>
+                              {/* Presets resolve to a single day/range, so they only
+                                  apply to single-bound operators — not `is between`. */}
+                              {!operatorRequiresSecondValue(condition.operator) && DATE_PRESET_OPTIONS.map((opt) => (
                                 <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
                               ))}
-                              <SelectItem value="_custom">Custom date...</SelectItem>
+                              <SelectItem value="_input">Filter form input</SelectItem>
                             </SelectGroup>
                           </SelectContent>
                         </Select>
-                        {!isDatePreset(condition.value) && (
+                        {!isDatePreset(condition.value) && !isDateInputMode && (
                           <Input
                             type="date"
                             value={condition.value || ''}
-                            onChange={(e) => handleValueChange(group.id, condition.id, e.target.value)}
+                            onChange={(e) => patchCondition(group.id, condition.id, { value: clampDateInputValue(e.target.value) })}
                           />
                         )}
                       </div>
@@ -716,72 +837,101 @@ export default function CollectionFiltersSettings({
                       />
                     )}
                   </div>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="secondary"
-                        onClick={(e) => {
-                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                          handlePickInputForCondition(group.id, condition.id, {
-                            x: rect.left + rect.width / 2,
-                            y: rect.top + rect.height / 2,
-                          });
-                        }}
-                      >
-                        <Icon name="crosshair" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Link to filter input</TooltipContent>
-                  </Tooltip>
+                  {(!isDateFieldType(fieldType) || isDateInputMode) && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="secondary"
+                          onClick={(e) => {
+                            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                            handlePickInputForCondition(group.id, condition.id, {
+                              x: rect.left + rect.width / 2,
+                              y: rect.top + rect.height / 2,
+                            });
+                          }}
+                        >
+                          <Icon name="crosshair" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Link to filter input</TooltipContent>
+                    </Tooltip>
+                  )}
                 </div>
               )}
 
-              {/* Second value for date between */}
+              {/* Second value for date between — mirrors the primary date UI:
+                  a Custom date / Filter form input select, with the date input
+                  (custom) or the link-to-input target icon (input mode). */}
               {operatorRequiresSecondValue(condition.operator) && (
                 <>
                   <Label variant="muted" className="text-[10px] text-center">and</Label>
                   {condition.inputLayerId2 ? (
-                    <div className="flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2 py-1.5 text-xs">
-                      <Icon name="filter" className="size-3 text-muted-foreground shrink-0" />
-                      <span className="truncate text-foreground">{getLinkedInputName(condition.inputLayerId2)}</span>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <button
-                            className="ml-auto shrink-0 text-muted-foreground hover:text-foreground"
-                            onClick={() => handleUnlinkSecondInput(group.id, condition.id)}
-                          >
-                            <Icon name="unlink" className="size-3" />
-                          </button>
-                        </TooltipTrigger>
-                        <TooltipContent>Unlink second filter input</TooltipContent>
-                      </Tooltip>
+                    <div className="flex items-center gap-1">
+                      <Input
+                        value={getLinkedInputName(condition.inputLayerId2)}
+                        disabled
+                      />
+                      <div className="shrink-0">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button variant="secondary" onClick={() => handleUnlinkSecondInput(group.id, condition.id)}>
+                              <Icon name="x" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Unlink second filter input</TooltipContent>
+                        </Tooltip>
+                      </div>
                     </div>
                   ) : (
                     <div className="flex items-center gap-1">
-                      <div className="flex-1">
-                        <Input
-                          type="date"
-                          value={condition.value2 || ''}
-                          onChange={(e) => handleValue2Change(group.id, condition.id, e.target.value)}
-                        />
+                      <div className="flex-1 flex flex-col gap-1.5">
+                        <Select
+                          value={isDateInputMode2 ? '_input' : '_custom'}
+                          onValueChange={(v) => {
+                            if (v === '_input') {
+                              patchCondition(group.id, condition.id, { dateInput2: true, value2: '' });
+                            } else {
+                              patchCondition(group.id, condition.id, { dateInput2: false, value2: '' });
+                            }
+                          }}
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select..." />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              <SelectItem value="_custom">Custom date</SelectItem>
+                              <SelectItem value="_input">Filter form input</SelectItem>
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                        {!isDateInputMode2 && (
+                          <Input
+                            type="date"
+                            value={condition.value2 || ''}
+                            onChange={(e) => patchCondition(group.id, condition.id, { value2: clampDateInputValue(e.target.value) })}
+                          />
+                        )}
                       </div>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="secondary"
-                            onClick={(e) => {
-                              const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                              handlePickSecondInputForCondition(group.id, condition.id, {
-                                x: rect.left + rect.width / 2,
-                                y: rect.top + rect.height / 2,
-                              });
-                            }}
-                          >
-                            <Icon name="crosshair" />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Link second filter input</TooltipContent>
-                      </Tooltip>
+                      {isDateInputMode2 && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="secondary"
+                              onClick={(e) => {
+                                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                handlePickSecondInputForCondition(group.id, condition.id, {
+                                  x: rect.left + rect.width / 2,
+                                  y: rect.top + rect.height / 2,
+                                });
+                              }}
+                            >
+                              <Icon name="crosshair" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Link second filter input</TooltipContent>
+                        </Tooltip>
+                      )}
                     </div>
                   )}
                 </>
@@ -805,7 +955,7 @@ export default function CollectionFiltersSettings({
               <Icon name="plus" />
             </Button>
           </DropdownMenuTrigger>
-          {renderAddConditionDropdown(handleAddFieldConditionGroup)}
+          {renderAddConditionDropdown(handleAddFieldConditionGroup, handleAddSelfConditionGroup)}
         </DropdownMenu>
       }
     >
@@ -845,7 +995,8 @@ export default function CollectionFiltersSettings({
                         </Button>
                       </DropdownMenuTrigger>
                       {renderAddConditionDropdown(
-                        (field) => handleAddConditionFromOr(group.id, field)
+                        (field) => handleAddConditionFromOr(group.id, field),
+                        () => handleAddSelfConditionFromOr(group.id),
                       )}
                     </DropdownMenu>
                   </li>

@@ -232,6 +232,7 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
                 collectionLayerId={originalLayerId}
                 itemIds={layer._paginationMeta!.itemIds}
                 layerTemplate={layer._paginationMeta!.layerTemplate}
+                collectionLayer={layer._filterConfig?.collectionLayer || layer._paginationMeta!.collectionLayer}
               >
                 {content}
               </LoadMoreCollection>
@@ -265,6 +266,7 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
               collectionLayerClasses={layer._filterConfig!.collectionLayerClasses}
               collectionLayerTag={layer._filterConfig!.collectionLayerTag}
               isPublished={layer._filterConfig!.isPublished}
+              collectionLayer={layer._filterConfig!.collectionLayer}
             >
               {content}
             </FilterableCollection>
@@ -468,6 +470,8 @@ const LayerItemImpl: React.FC<{
   const isEditing = editingLayerId === layer.id;
   const isDragging = activeLayerId === layer.id;
   const textEditable = isTextEditable(layer);
+
+  const isEditor = useAuthStore((state) => state.role === 'editor');
 
   // Collaboration layer locking - use unified resource lock system
   const currentUserId = useAuthStore((state) => state.user?.id);
@@ -929,8 +933,81 @@ const LayerItemImpl: React.FC<{
     };
   }, [isFilterLayer, filterOnChange, isEditMode, layer.id]);
 
+  // Canvas-only: identify pagination sibling/wrapper layers so we can
+  // substitute dynamic text and hide the wrapper when the linked collection
+  // is empty. Published mode handles this server-side via
+  // `updatePaginationLayerWithMeta` in page-fetcher.
+  const paginationContextTarget = useMemo<{ collectionLayerId: string; kind: 'count' | 'info' | 'wrapper' } | null>(() => {
+    if (!isEditMode || !layer.id) return null;
+    if (layer.id.endsWith('-pagination-count')) {
+      return { collectionLayerId: layer.id.replace(/-pagination-count$/, ''), kind: 'count' };
+    }
+    if (layer.id.endsWith('-pagination-info')) {
+      return { collectionLayerId: layer.id.replace(/-pagination-info$/, ''), kind: 'info' };
+    }
+    const paginationFor = layer.attributes?.['data-pagination-for'];
+    if (typeof paginationFor === 'string' && paginationFor) {
+      return { collectionLayerId: paginationFor, kind: 'wrapper' };
+    }
+    return null;
+  }, [isEditMode, layer.id, layer.attributes]);
+
+  const paginationLinkedCollectionLayer = usePagesStore((state) => {
+    if (!paginationContextTarget || !pageId) return null;
+    const draft = state.draftsByPageId[pageId];
+    if (!draft) return null;
+    return findLayerById(draft.layers, paginationContextTarget.collectionLayerId);
+  });
+
+  const paginationLinkedLayerTotal = useCollectionLayerStore((state) =>
+    paginationContextTarget ? state.layerTotal[paginationContextTarget.collectionLayerId] : undefined
+  );
+
+  /**
+   * Resolves the displayed total for the linked paginated collection.
+   * Returns `undefined` while data is loading (don't flash "0 of 0") or when
+   * pagination isn't applicable to this layer.
+   */
+  const paginationDisplayTotal = useMemo<number | undefined>(() => {
+    if (!paginationContextTarget || !paginationLinkedCollectionLayer) return undefined;
+    const linkedCollection = getCollectionVariable(paginationLinkedCollectionLayer);
+    if (!linkedCollection?.pagination?.enabled) return undefined;
+    if (paginationLinkedLayerTotal === undefined) return undefined;
+    const maxTotal = typeof linkedCollection.limit === 'number' && linkedCollection.limit > 0
+      ? linkedCollection.limit
+      : undefined;
+    return maxTotal != null
+      ? Math.min(paginationLinkedLayerTotal, maxTotal)
+      : paginationLinkedLayerTotal;
+  }, [paginationContextTarget, paginationLinkedCollectionLayer, paginationLinkedLayerTotal]);
+
+  const isPaginationWrapperEmpty = paginationContextTarget?.kind === 'wrapper'
+    && paginationDisplayTotal !== undefined
+    && paginationDisplayTotal <= 0;
+
+  const computedPaginationText = useMemo<string | undefined>(() => {
+    if (!paginationContextTarget || paginationContextTarget.kind === 'wrapper') return undefined;
+    if (paginationDisplayTotal === undefined) return undefined;
+    if (paginationDisplayTotal <= 0) return '';
+    const pagination = getCollectionVariable(paginationLinkedCollectionLayer!)?.pagination;
+    const itemsPerPage = pagination?.items_per_page || 10;
+    if (paginationContextTarget.kind === 'count') {
+      const shown = Math.min(itemsPerPage, paginationDisplayTotal);
+      return `Showing ${shown} of ${paginationDisplayTotal}`;
+    }
+    const totalPages = Math.max(1, Math.ceil(paginationDisplayTotal / itemsPerPage));
+    return `Page 1 of ${totalPages}`;
+  }, [paginationContextTarget, paginationLinkedCollectionLayer, paginationDisplayTotal]);
+
   // Resolve text and image URLs with field binding support
   const textContent = (() => {
+    // Canvas pagination overlay: when this layer is the count/info sibling of
+    // a paginated collection, replace the placeholder content with the same
+    // dynamic text SSR would render.
+    if (computedPaginationText !== undefined) {
+      return computedPaginationText;
+    }
+
     // Special handling for locale selector label.
     // Runs in both edit and runtime modes so the builder canvas reflects the
     // active locale chosen via the header dropdown — otherwise the label
@@ -1319,6 +1396,7 @@ const LayerItemImpl: React.FC<{
     // Apply collection filters (evaluate against each item's own values)
     // In edit mode, skip conditions that have inputLayerId (dynamic filter inputs have no value at design time)
     const collectionFilters = collectionVariable?.filters;
+    const hasStaticFilters = !!collectionFilters?.groups?.some(g => g.conditions.some(c => !c.inputLayerId));
     if (collectionFilters?.groups?.length) {
       const effectiveFilters = isEditMode
         ? {
@@ -1336,15 +1414,39 @@ const LayerItemImpl: React.FC<{
         items = items.filter(item =>
           evaluateVisibility(effectiveFilters, {
             collectionLayerData: item.values,
-            pageCollectionData: null,
+            pageCollectionData: pageCollectionItemData ?? null,
             pageCollectionCounts: {},
+            currentItemId: item.id,
+            pageCollectionItemId,
+            timezone,
           })
         );
       }
     }
 
+    // Mirror SSR semantics: pagination (when enabled) overrides legacy
+    // `limit`/`offset`, showing only `items_per_page` items — same as the
+    // first page of preview. Without pagination, fall back to legacy
+    // `limit`/`offset`. We slice unconditionally for paginated layers, and
+    // when static filters are present for non-paginated ones (the API
+    // returns the configured limit when there are no static filters, so no
+    // re-slicing is needed there).
+    const pagination = collectionVariable?.pagination;
+    const isPaginated = !!pagination?.enabled && (pagination.mode === 'pages' || pagination.mode === 'load_more');
+
+    if (isPaginated) {
+      const itemsPerPage = pagination!.items_per_page || 10;
+      items = items.slice(0, itemsPerPage);
+    } else if (hasStaticFilters) {
+      const offset = collectionVariable?.offset ?? 0;
+      const limit = collectionVariable?.limit;
+      if (offset || limit) {
+        items = items.slice(offset, limit ? offset + limit : undefined);
+      }
+    }
+
     return items;
-  }, [collectionId, allCollectionItems, sourceFieldId, sourceFieldType, sourceFieldSource, collectionLayerData, pageCollectionItemData, collectionLayerItemId, pageCollectionItemId, getAsset, collectionVariable?.filters, isEditMode]);
+  }, [collectionId, allCollectionItems, sourceFieldId, sourceFieldType, sourceFieldSource, collectionLayerData, pageCollectionItemData, collectionLayerItemId, pageCollectionItemId, getAsset, collectionVariable?.filters, collectionVariable?.limit, collectionVariable?.offset, collectionVariable?.pagination, isEditMode, timezone]);
 
   const optionsSourceSort = layer.settings?.optionsSource;
 
@@ -1400,13 +1502,38 @@ const LayerItemImpl: React.FC<{
       }
     }
 
+    // When static filters are present, fetch the full set so client-side
+    // filtering matches SSR (which filters then limits). The API's default
+    // `limit=25` would otherwise return a page of items that all fail the
+    // filter (e.g. all past events for a "date >= today" filter), hiding the
+    // layer. Mirrors the per-collection cap used by SSR's collection cache.
+    const FILTERED_FETCH_LIMIT = 5000;
+    const hasStaticFilters = !!collectionVariable.filters?.groups?.some(
+      g => g.conditions.some(c => !c.inputLayerId)
+    );
+    const pagination = collectionVariable.pagination;
+    const isPaginated = !!pagination?.enabled && (pagination.mode === 'pages' || pagination.mode === 'load_more');
+
+    let fetchLimit: number | undefined;
+    let fetchOffset: number | undefined;
+    if (hasStaticFilters) {
+      fetchLimit = FILTERED_FETCH_LIMIT;
+      fetchOffset = 0;
+    } else if (isPaginated) {
+      fetchLimit = pagination!.items_per_page || 10;
+      fetchOffset = 0;
+    } else {
+      fetchLimit = collectionVariable.limit;
+      fetchOffset = collectionVariable.offset;
+    }
+
     fetchLayerData(
       layer.id,
       collectionVariable.id,
       sortBy,
       sortOrder,
-      collectionVariable.limit,
-      collectionVariable.offset
+      fetchLimit,
+      fetchOffset
     );
   }, [
     isEditMode,
@@ -1418,6 +1545,8 @@ const LayerItemImpl: React.FC<{
     collectionVariable?.sort_order_inputLayerId,
     collectionVariable?.limit,
     collectionVariable?.offset,
+    collectionVariable?.filters,
+    collectionVariable?.pagination,
     optionsSourceSort?.sortFieldId,
     optionsSourceSort?.sortOrder,
     sortByInputDefaultValue,
@@ -1656,6 +1785,7 @@ const LayerItemImpl: React.FC<{
     isDragging && 'opacity-30',
     showProjection && 'outline outline-1 outline-dashed outline-blue-400 bg-blue-50/10',
     isLockedByOther && 'opacity-90 pointer-events-none select-none',
+    isPaginationWrapperEmpty && 'hidden',
     'ycode-layer'
   ) : clsx(classesString, paragraphClasses, SWIPER_CLASS_MAP[layer.name], isSlideChild && 'swiper-slide', buttonNeedsFit && 'w-fit', buttonNeedsTextCenter && 'text-center');
 
@@ -1683,6 +1813,9 @@ const LayerItemImpl: React.FC<{
       collectionLayerData,
       pageCollectionData: pageCollectionItemData,
       pageCollectionCounts,
+      currentItemId: collectionLayerItemId,
+      pageCollectionItemId,
+      timezone,
     });
     if (!isVisible) {
       return null;
@@ -3346,6 +3479,7 @@ const LayerItemImpl: React.FC<{
         onLayerSelect={onLayerClick}
         liveLayerUpdates={liveLayerUpdates}
         liveComponentUpdates={liveComponentUpdates}
+        readOnly={isEditor}
       >
         {content}
       </LayerContextMenu>
