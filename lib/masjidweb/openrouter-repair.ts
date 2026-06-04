@@ -1,5 +1,5 @@
-/** Default frontier model for automated safe-update repair (override with OPENROUTER_MODEL). */
-export const DEFAULT_AI_REPAIR_MODEL = 'anthropic/claude-opus-4';
+/** Default repair model (override with OPENROUTER_MODEL). Use vars for Opus on high-risk only. */
+export const DEFAULT_AI_REPAIR_MODEL = 'anthropic/claude-sonnet-4';
 
 export type OpenRouterRepairMessage = {
   role: 'system' | 'user' | 'assistant';
@@ -30,7 +30,7 @@ export function stripCodeFences(text: string): string {
 }
 
 export function assertNoConflictMarkers(content: string, filePath: string): void {
-  if (/^<<<<<<<|^=======|^>>>>>>>/m.test(content)) {
+  if (/^<<<<<<<|^=======|^>>>>>>>|^\|\|\|\|\|\|\|/m.test(content)) {
     throw new Error(`Resolved file still contains conflict markers: ${filePath}`);
   }
 }
