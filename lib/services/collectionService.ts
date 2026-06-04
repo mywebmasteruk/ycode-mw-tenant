@@ -13,12 +13,9 @@
 
 import { withTransaction } from '../database/transaction';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
-<<<<<<< HEAD
+import { SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
-=======
-import { SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
->>>>>>> upstream/main
 import { getCollectionById, hardDeleteCollection } from '@/lib/repositories/collectionRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
 import { getItemsByCollectionId, getAllItemsByCollectionId, getItemById, getItemsByIds } from '@/lib/repositories/collectionItemRepository';
@@ -636,6 +633,7 @@ async function publishItemValuesBatch(itemIds: string[]): Promise<number> {
     is_published: boolean;
     created_at: string;
     updated_at: string;
+    tenant_id?: string;
   }> = [];
 
   for (const value of draftValues) {
