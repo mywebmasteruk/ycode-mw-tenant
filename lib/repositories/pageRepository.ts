@@ -5,6 +5,7 @@
  */
 
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { reorderSiblings } from '@/lib/repositories/pageFolderRepository';
 import type { Page, PageSettings } from '../../types';
@@ -96,9 +97,7 @@ export async function getAllPages(filters?: QueryFilters): Promise<Page[]> {
     .select('*')
     .is('deleted_at', null);
 
-  if (tenantId) {
-    query = query.eq('tenant_id', tenantId);
-  }
+  query = applyTenantEq(query, tenantId);
 
   // Apply filters if provided
   if (filters) {
@@ -138,9 +137,7 @@ export async function getPageById(id: string, isPublished: boolean = false): Pro
     .eq('is_published', isPublished)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    q = q.eq('tenant_id', tenantId);
-  }
+  q = applyTenantEq(q, tenantId);
 
   const { data, error } = await q.single();
 
@@ -174,9 +171,7 @@ export async function getPageBySlug(slug: string, filters?: QueryFilters): Promi
     .eq('slug', slug)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    query = query.eq('tenant_id', tenantId);
-  }
+  query = applyTenantEq(query, tenantId);
 
   // Apply additional filters if provided
   if (filters) {
@@ -236,9 +231,7 @@ async function transferIndexPage(
     .is('deleted_at', null)
     .neq('id', newIndexPageId);
 
-  if (tenantId) {
-    query = query.eq('tenant_id', tenantId);
-  }
+  query = applyTenantEq(query, tenantId);
 
   // Filter by parent folder
   if (pageFolderId === null || pageFolderId === undefined) {
@@ -271,9 +264,7 @@ async function transferIndexPage(
         .eq('id', existingIndex.id)
         .eq('is_published', isPublished); // Must filter by is_published for composite key
 
-      if (tenantId) {
-        upd = upd.eq('tenant_id', tenantId);
-      }
+      upd = applyTenantEq(upd, tenantId);
 
       const { error: updateError } = await upd;
 
@@ -297,9 +288,7 @@ async function transferIndexPage(
       .neq('id', existingIndex.id)
       .limit(1);
 
-    if (tenantId) {
-      dupQ = dupQ.eq('tenant_id', tenantId);
-    }
+    dupQ = applyTenantEq(dupQ, tenantId);
 
     const { data: duplicateCheck } = await dupQ.single();
 
@@ -316,9 +305,7 @@ async function transferIndexPage(
         .neq('id', existingIndex.id)
         .limit(1);
 
-      if (tenantId) {
-        tsDupQ = tsDupQ.eq('tenant_id', tenantId);
-      }
+      tsDupQ = applyTenantEq(tsDupQ, tenantId);
 
       const { data: timestampedDuplicateCheck } = await tsDupQ.single();
 
@@ -339,9 +326,7 @@ async function transferIndexPage(
       .eq('id', existingIndex.id)
       .eq('is_published', isPublished); // Must filter by is_published for composite key
 
-    if (tenantId) {
-      upd2 = upd2.eq('tenant_id', tenantId);
-    }
+    upd2 = applyTenantEq(upd2, tenantId);
 
     const { error: updateError } = await upd2;
 
@@ -398,9 +383,7 @@ async function validateIndexPageConstraints(
       .is('page_folder_id', null)
       .is('deleted_at', null);
 
-    if (tenantId) {
-      query = query.eq('tenant_id', tenantId);
-    }
+    query = applyTenantEq(query, tenantId);
 
     // Exclude current page if updating
     if (excludePageId) {
@@ -473,11 +456,8 @@ export async function createPage(pageData: CreatePageData, additionalData?: Reco
     ...(additionalData || {}),
     ...pageDataWithoutHash,
     content_hash: contentHash,
+    ...(tenantId ? { tenant_id: tenantId } : {}),
   };
-
-  if (tenantId) {
-    insertData.tenant_id = tenantId;
-  }
 
   const { data, error } = await client
     .from('pages')
@@ -566,9 +546,7 @@ export async function updatePage(id: string, updates: UpdatePageData): Promise<P
       .eq('is_index', false)
       .is('deleted_at', null);
 
-    if (tenantId) {
-      orphanQ = orphanQ.eq('tenant_id', tenantId);
-    }
+    orphanQ = applyTenantEq(orphanQ, tenantId);
 
     const { data: orphanedPages } = await orphanQ;
 
@@ -607,9 +585,7 @@ export async function updatePage(id: string, updates: UpdatePageData): Promise<P
     .eq('id', id)
     .eq('is_published', false);
 
-  if (tenantId) {
-    updateQ = updateQ.eq('tenant_id', tenantId);
-  }
+  updateQ = applyTenantEq(updateQ, tenantId);
 
   const { data, error } = await updateQ.select().single();
 
@@ -642,9 +618,7 @@ export async function batchUpdatePageOrder(updates: Array<{ id: string; order: n
       .eq('is_published', false)
       .is('deleted_at', null);
 
-    if (tenantId) {
-      q = q.eq('tenant_id', tenantId);
-    }
+    q = applyTenantEq(q, tenantId);
 
     return q;
   });
@@ -692,9 +666,7 @@ export async function deletePage(id: string): Promise<void> {
       .is('deleted_at', null)
       .neq('id', id);
 
-    if (tenantId) {
-      rootIdxQ = rootIdxQ.eq('tenant_id', tenantId);
-    }
+    rootIdxQ = applyTenantEq(rootIdxQ, tenantId);
 
     const { data: otherRootIndexPages, error: checkError } = await rootIdxQ;
 
@@ -715,9 +687,7 @@ export async function deletePage(id: string): Promise<void> {
     .eq('is_published', false)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    layersDel = layersDel.eq('tenant_id', tenantId);
-  }
+  layersDel = applyTenantEq(layersDel, tenantId);
 
   const { error: layersError } = await layersDel;
 
@@ -733,9 +703,7 @@ export async function deletePage(id: string): Promise<void> {
     .eq('is_published', false)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    pageDel = pageDel.eq('tenant_id', tenantId);
-  }
+  pageDel = applyTenantEq(pageDel, tenantId);
 
   const { error } = await pageDel;
 
@@ -772,9 +740,7 @@ export async function restorePage(id: string): Promise<void> {
     .eq('is_published', false)
     .not('deleted_at', 'is', null); // Only restore if deleted
 
-  if (tenantId) {
-    restoreQ = restoreQ.eq('tenant_id', tenantId);
-  }
+  restoreQ = applyTenantEq(restoreQ, tenantId);
 
   const { error } = await restoreQ;
 
@@ -798,9 +764,7 @@ export async function forceDeletePage(id: string): Promise<void> {
 
   let delQ = client.from('pages').delete().eq('id', id);
 
-  if (tenantId) {
-    delQ = delQ.eq('tenant_id', tenantId);
-  }
+  delQ = applyTenantEq(delQ, tenantId);
 
   const { error } = await delQ;
 
@@ -827,9 +791,7 @@ export async function getAllDraftPages(includeDeleted = false): Promise<Page[]> 
     .select('*')
     .eq('is_published', false);
 
-  if (tenantId) {
-    query = query.eq('tenant_id', tenantId);
-  }
+  query = applyTenantEq(query, tenantId);
 
   // Exclude soft-deleted records by default
   if (!includeDeleted) {
@@ -869,9 +831,7 @@ export async function getPublishedPagesByIds(ids: string[]): Promise<Page[]> {
     .eq('is_published', true)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    q = q.eq('tenant_id', tenantId);
-  }
+  q = applyTenantEq(q, tenantId);
 
   const { data, error } = await q;
 
@@ -900,9 +860,7 @@ export async function getPagesByFolder(folderId: string | null): Promise<Page[]>
     .select('*')
     .is('deleted_at', null);
 
-  if (tenantId) {
-    query = query.eq('tenant_id', tenantId);
-  }
+  query = applyTenantEq(query, tenantId);
 
   // Handle null vs non-null folder_id
   const finalQuery = folderId === null
@@ -961,9 +919,7 @@ export async function duplicatePage(pageId: string): Promise<Page> {
     .is('error_page', null)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    query = query.eq('tenant_id', tenantId);
-  }
+  query = applyTenantEq(query, tenantId);
 
   // Handle null parent folder properly
   if (originalPage.page_folder_id === null) {
@@ -1005,11 +961,8 @@ export async function duplicatePage(pageId: string): Promise<Page> {
     is_dynamic: originalPage.is_dynamic,
     error_page: originalPage.error_page,
     settings: originalPage.settings || {},
+    ...(tenantId ? { tenant_id: tenantId } : {}),
   };
-
-  if (tenantId) {
-    newPageRow.tenant_id = tenantId;
-  }
 
   const { data: newPage, error: pageError } = await client
     .from('pages')
@@ -1031,9 +984,7 @@ export async function duplicatePage(pageId: string): Promise<Page> {
     .order('created_at', { ascending: false })
     .limit(1);
 
-  if (tenantId) {
-    layersSel = layersSel.eq('tenant_id', tenantId);
-  }
+  layersSel = applyTenantEq(layersSel, tenantId);
 
   const { data: originalLayers, error: layersError } = await layersSel.single();
 
@@ -1043,11 +994,8 @@ export async function duplicatePage(pageId: string): Promise<Page> {
       page_id: newPage.id,
       layers: originalLayers.layers,
       is_published: false,
+      ...(tenantId ? { tenant_id: tenantId } : {}),
     };
-
-    if (tenantId) {
-      layerInsert.tenant_id = tenantId;
-    }
 
     const { error: newLayersError } = await client.from('page_layers').insert(layerInsert);
 
@@ -1180,10 +1128,8 @@ export async function getUnpublishedPagesCount(): Promise<number> {
     .is('deleted_at', null)
     .is('page_layers.deleted_at', null);
 
-  if (tenantId) {
-    draftQ = draftQ.eq('tenant_id', tenantId);
-    pubQ = pubQ.eq('tenant_id', tenantId);
-  }
+  draftQ = applyTenantEq(draftQ, tenantId);
+  pubQ = applyTenantEq(pubQ, tenantId);
 
   // 2 bulk queries: all draft pages with layers + all published pages with layers
   const [draftResult, publishedResult] = await Promise.all([draftQ, pubQ]);
@@ -1254,52 +1200,32 @@ export async function getUnpublishedPages(): Promise<Page[]> {
     throw new Error('Supabase not configured');
   }
 
-<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
 
-  // Get all draft pages with their layers' content_hash in a single efficient query
-  let draftListQ = client
+  let draftQ = client
     .from('pages')
-    .select(`
-      *,
-      page_layers!inner(content_hash)
-    `)
+    .select('*, page_layers!inner(content_hash)')
     .eq('is_published', false)
     .eq('page_layers.is_published', false)
     .is('deleted_at', null)
     .is('page_layers.deleted_at', null)
     .order('created_at', { ascending: false });
 
-  if (tenantId) {
-    draftListQ = draftListQ.eq('tenant_id', tenantId);
-  }
+  let pubQ = client
+    .from('pages')
+    .select('id, content_hash, page_folder_id, page_layers!inner(content_hash)')
+    .eq('is_published', true)
+    .eq('page_layers.is_published', true)
+    .is('deleted_at', null)
+    .is('page_layers.deleted_at', null);
 
-  const { data: draftPagesWithLayers, error } = await draftListQ;
+  draftQ = applyTenantEq(draftQ, tenantId);
+  pubQ = applyTenantEq(pubQ, tenantId);
 
-  if (error) {
-    throw new Error(`Failed to fetch draft pages: ${error.message}`);
-=======
-  const [draftResult, publishedResult] = await Promise.all([
-    client
-      .from('pages')
-      .select('*, page_layers!inner(content_hash)')
-      .eq('is_published', false)
-      .eq('page_layers.is_published', false)
-      .is('deleted_at', null)
-      .is('page_layers.deleted_at', null)
-      .order('created_at', { ascending: false }),
-    client
-      .from('pages')
-      .select('id, content_hash, page_folder_id, page_layers!inner(content_hash)')
-      .eq('is_published', true)
-      .eq('page_layers.is_published', true)
-      .is('deleted_at', null)
-      .is('page_layers.deleted_at', null),
-  ]);
+  const [draftResult, publishedResult] = await Promise.all([draftQ, pubQ]);
 
   if (draftResult.error) {
     throw new Error(`Failed to fetch draft pages: ${draftResult.error.message}`);
->>>>>>> upstream/main
   }
 
   if (!draftResult.data || draftResult.data.length === 0) {
@@ -1321,33 +1247,8 @@ export async function getUnpublishedPages(): Promise<Page[]> {
 
   const unpublishedPages: Page[] = [];
 
-<<<<<<< HEAD
-  // Check each draft page
-  for (const draftPage of draftPagesWithLayers) {
-    // Check if a published version exists
-    let pubOneQ = client
-      .from('pages')
-      .select(`
-        id,
-        content_hash,
-        page_folder_id,
-        page_layers!inner(content_hash)
-      `)
-      .eq('id', draftPage.id)
-      .eq('is_published', true)
-      .eq('page_layers.is_published', true)
-      .is('deleted_at', null)
-      .is('page_layers.deleted_at', null);
-
-    if (tenantId) {
-      pubOneQ = pubOneQ.eq('tenant_id', tenantId);
-    }
-
-    const { data: publishedPageWithLayers } = await pubOneQ.single();
-=======
   for (const draftPage of draftResult.data) {
     const pub = publishedMap.get(draftPage.id);
->>>>>>> upstream/main
 
     if (!pub) {
       unpublishedPages.push(draftPage);
@@ -1379,11 +1280,17 @@ export async function getSoftDeletedPageIds(): Promise<string[]> {
   const client = await getSupabaseAdmin();
   if (!client) return [];
 
-  const { data } = await client
+  const tenantId = await resolveEffectiveTenantId();
+
+  let q = client
     .from('pages')
     .select('id')
     .eq('is_published', false)
     .not('deleted_at', 'is', null);
+
+  q = applyTenantEq(q, tenantId);
+
+  const { data } = await q;
 
   return (data || []).map(p => p.id);
 }
@@ -1408,9 +1315,7 @@ export async function hardDeleteSoftDeletedPages(): Promise<{ count: number; del
     .eq('is_published', false)
     .not('deleted_at', 'is', null);
 
-  if (tenantId) {
-    selDel = selDel.eq('tenant_id', tenantId);
-  }
+  selDel = applyTenantEq(selDel, tenantId);
 
   const { data: deletedDrafts, error } = await selDel;
 
@@ -1427,9 +1332,7 @@ export async function hardDeleteSoftDeletedPages(): Promise<{ count: number; del
   // Delete published versions first (CASCADE removes page_layers)
   let pubDel = client.from('pages').delete().in('id', ids).eq('is_published', true);
 
-  if (tenantId) {
-    pubDel = pubDel.eq('tenant_id', tenantId);
-  }
+  pubDel = applyTenantEq(pubDel, tenantId);
 
   const { error: pubError } = await pubDel;
 
@@ -1445,9 +1348,7 @@ export async function hardDeleteSoftDeletedPages(): Promise<{ count: number; del
     .eq('is_published', false)
     .not('deleted_at', 'is', null);
 
-  if (tenantId) {
-    draftDel = draftDel.eq('tenant_id', tenantId);
-  }
+  draftDel = applyTenantEq(draftDel, tenantId);
 
   const { error: draftError } = await draftDel;
 
