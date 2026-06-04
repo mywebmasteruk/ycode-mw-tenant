@@ -80,58 +80,11 @@ export async function GET(
       return new Response('Not found', { status: 404 });
     }
 
-<<<<<<< HEAD
     return buildAssetProxyResponse({
       storageResponse: response,
       mimeType: asset.mime_type,
       searchParams: url.searchParams,
       canTransformMimeType: isAssetOfType(asset.mime_type, ASSET_CATEGORIES.IMAGES),
-=======
-    const transform = parseTransformParams(url.searchParams);
-    const canResize = transform && isImage;
-
-    if (canResize) {
-      const buffer = Buffer.from(await response.arrayBuffer());
-      let pipeline = sharp(buffer);
-
-      if (transform.width || transform.height) {
-        pipeline = pipeline.resize(transform.width, transform.height, {
-          fit: 'cover',
-          withoutEnlargement: true,
-        });
-      }
-
-      pipeline = pipeline.webp({ quality: transform.quality });
-
-      const resized = await pipeline.toBuffer();
-
-      return new Response(new Uint8Array(resized), {
-        status: 200,
-        headers: {
-          'Content-Type': 'image/webp',
-          'Content-Length': resized.length.toString(),
-        },
-      });
-    }
-
-    // Mirror the upstream status (206 for partial content) and range headers so
-    // Safari can stream/seek the video. Advertise Accept-Ranges so clients know
-    // range requests are supported even on the initial full response.
-    const headers = new Headers({
-      'Content-Type': asset.mime_type || 'application/octet-stream',
-      'Accept-Ranges': 'bytes',
-    });
-
-    const contentRange = response.headers.get('content-range');
-    if (contentRange) headers.set('Content-Range', contentRange);
-
-    const contentLength = response.headers.get('content-length');
-    if (contentLength) headers.set('Content-Length', contentLength);
-
-    return new Response(response.body, {
-      status: response.status,
-      headers,
->>>>>>> upstream/main
     });
   } catch {
     return new Response('Internal server error', { status: 500 });
