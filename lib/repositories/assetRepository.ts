@@ -262,15 +262,8 @@ export async function getAssetsByIds(ids: string[], isPublished: boolean = false
     return {};
   }
 
-<<<<<<< HEAD
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
 
-  let query = client
-    .from('assets')
-    .select('*')
-    .eq('is_published', isPublished)
-    .in('id', ids);
-=======
   // Chunk the ID list: a single large `.in()` overflows the request URL length
   // limit and returns 400 Bad Request. Fetch chunks in parallel and merge.
   const results = await Promise.all(
@@ -280,20 +273,15 @@ export async function getAssetsByIds(ids: string[], isPublished: boolean = false
         .select('*')
         .eq('is_published', isPublished)
         .in('id', idsChunk);
->>>>>>> upstream/main
 
       // Only filter deleted_at for drafts
       if (!isPublished) {
         query = query.is('deleted_at', null);
       }
 
-<<<<<<< HEAD
-  query = applyTenantEq(query, tenantId);
+      query = applyTenantEq(query, effectiveTenantId);
 
-  const { data, error } = await query;
-=======
       const { data, error } = await query;
->>>>>>> upstream/main
 
       if (error) {
         throw new Error(`Failed to fetch assets: ${error.message}`);
