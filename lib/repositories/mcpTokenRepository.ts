@@ -1,11 +1,7 @@
 import { getSupabaseAdmin } from '@/lib/supabase-server';
-<<<<<<< HEAD
 import { applyTenantOrLegacyScope } from '@/lib/masjidweb/tenant-or-legacy-scope';
-import { randomBytes } from 'crypto';
-=======
 import { createHash, randomBytes } from 'crypto';
 import { invalidateToken } from '@/lib/mcp/token-cache';
->>>>>>> upstream/main
 
 export interface McpToken {
   id: string;
@@ -25,9 +21,6 @@ export interface McpTokenWithPlainToken extends McpToken {
   token: string;
 }
 
-<<<<<<< HEAD
-const MCP_TOKEN_SELECT = 'id, name, token_prefix, tenant_id, is_active, last_used_at, created_at, updated_at';
-=======
 export interface OAuthTokenPair {
   access_token: string;
   refresh_token: string;
@@ -45,15 +38,11 @@ export interface CreateOAuthTokenData {
 
 const DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 60 * 60; // 1 hour
 const DEFAULT_REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
->>>>>>> upstream/main
 
 function generateToken(): string {
   return 'ymc_' + randomBytes(24).toString('hex');
 }
 
-<<<<<<< HEAD
-export async function getAllTokens(tenantId?: string | null): Promise<McpToken[]> {
-=======
 function generateRefreshToken(): string {
   return 'ymr_' + randomBytes(32).toString('hex');
 }
@@ -67,8 +56,7 @@ function hashRefreshToken(refreshToken: string): string {
   return createHash('sha256').update(refreshToken).digest('hex');
 }
 
-export async function getAllTokens(): Promise<McpToken[]> {
->>>>>>> upstream/main
+export async function getAllTokens(tenantId?: string | null): Promise<McpToken[]> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -77,11 +65,7 @@ export async function getAllTokens(): Promise<McpToken[]> {
 
   let query = client
     .from('mcp_tokens')
-<<<<<<< HEAD
-    .select(MCP_TOKEN_SELECT)
-=======
-    .select('id, name, token_prefix, is_active, last_used_at, created_at, updated_at, oauth_client_id, expires_at, user_id')
->>>>>>> upstream/main
+    .select('id, name, token_prefix, tenant_id, is_active, last_used_at, created_at, updated_at, oauth_client_id, expires_at, user_id')
     .order('created_at', { ascending: false });
 
   query = applyTenantOrLegacyScope(query, tenantId);
@@ -118,11 +102,7 @@ export async function createToken(
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     })
-<<<<<<< HEAD
-    .select(`id, name, token, token_prefix, tenant_id, is_active, last_used_at, created_at, updated_at`)
-=======
-    .select('id, name, token, token_prefix, is_active, last_used_at, created_at, updated_at, oauth_client_id, expires_at, user_id')
->>>>>>> upstream/main
+    .select('id, name, token, token_prefix, tenant_id, is_active, last_used_at, created_at, updated_at, oauth_client_id, expires_at, user_id')
     .single();
 
   if (error) {
@@ -145,11 +125,7 @@ export async function validateToken(token: string): Promise<McpToken | null> {
 
   const { data, error } = await client
     .from('mcp_tokens')
-<<<<<<< HEAD
-    .select(MCP_TOKEN_SELECT)
-=======
-    .select('id, name, token_prefix, is_active, last_used_at, created_at, updated_at, oauth_client_id, expires_at, user_id')
->>>>>>> upstream/main
+    .select('id, name, token_prefix, tenant_id, is_active, last_used_at, created_at, updated_at, oauth_client_id, expires_at, user_id')
     .eq('token', token)
     .eq('is_active', true)
     .single();
@@ -158,15 +134,11 @@ export async function validateToken(token: string): Promise<McpToken | null> {
     return null;
   }
 
-<<<<<<< HEAD
-  let updateQuery = client
-=======
   if (data.expires_at && new Date(data.expires_at).getTime() < Date.now()) {
     return null;
   }
 
-  await client
->>>>>>> upstream/main
+  let updateQuery = client
     .from('mcp_tokens')
     .update({ last_used_at: new Date().toISOString() })
     .eq('id', data.id);
@@ -184,17 +156,13 @@ export async function deleteToken(id: string, tenantId?: string | null): Promise
     throw new Error('Supabase not configured');
   }
 
-<<<<<<< HEAD
-  let query = client
-=======
   const { data: existing } = await client
     .from('mcp_tokens')
     .select('token')
     .eq('id', id)
     .single();
 
-  const { error } = await client
->>>>>>> upstream/main
+  let query = client
     .from('mcp_tokens')
     .delete()
     .eq('id', id);
@@ -221,18 +189,12 @@ export async function getTokenById(id: string, tenantId?: string | null): Promis
 
   let query = client
     .from('mcp_tokens')
-<<<<<<< HEAD
-    .select(MCP_TOKEN_SELECT)
+    .select('id, name, token_prefix, tenant_id, is_active, last_used_at, created_at, updated_at, oauth_client_id, expires_at, user_id')
     .eq('id', id);
 
   query = applyTenantOrLegacyScope(query, tenantId);
 
   const { data, error } = await query.single();
-=======
-    .select('id, name, token_prefix, is_active, last_used_at, created_at, updated_at, oauth_client_id, expires_at, user_id')
-    .eq('id', id)
-    .single();
->>>>>>> upstream/main
 
   if (error && error.code !== 'PGRST116') {
     throw new Error(`Failed to fetch MCP token: ${error.message}`);
