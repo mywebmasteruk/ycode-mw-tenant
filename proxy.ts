@@ -37,84 +37,7 @@ type CookieToSet = {
 /**
  * Verify Supabase session for protected API / preview routes.
  */
-<<<<<<< HEAD
 async function verifyApiAuth(request: NextRequest): Promise<ApiAuthResult> {
-=======
-const PUBLIC_API_PREFIXES = [
-  '/ycode/api/setup/',    // Setup wizard — needed before any user exists
-  '/ycode/api/supabase/', // Supabase config — needed for browser client init
-  '/ycode/api/auth/',     // Auth callbacks and session checks
-  '/ycode/api/v1/',       // Public API — has own API key auth
-];
-
-/**
- * Patterns for collection item endpoints that must be accessible on published pages
- * (load-more pagination, filter). Matched via regex since the collection ID is dynamic.
- */
-const PUBLIC_COLLECTION_ITEM_SUFFIXES = ['/items/filter', '/items/load-more'];
-
-const PUBLIC_API_EXACT = [
-  '/ycode/api/revalidate', // Cache revalidation — has own secret token auth
-  '/ycode/api/oauth/register', // RFC 7591 Dynamic Client Registration — anonymous
-  '/ycode/api/oauth/token',    // OAuth token exchange — auth is via PKCE/refresh
-];
-
-/**
- * Derive the Supabase project URL and anon key from environment variables.
- * Returns null if env vars are not set (pre-setup or local dev without .env.local).
- *
- * Uses SUPABASE_URL when set (self-hosted instances), otherwise derives from
- * the project ref in the connection string (hosted Supabase).
- */
-function getSupabaseEnvConfig(): { url: string; anonKey: string } | null {
-  const anonKey = process.env.SUPABASE_PUBLISHABLE_KEY
-    || process.env.SUPABASE_ANON_KEY;
-  const connectionUrl = process.env.SUPABASE_CONNECTION_URL;
-
-  if (!anonKey || !connectionUrl) return null;
-
-  if (process.env.SUPABASE_URL) {
-    return {
-      url: process.env.SUPABASE_URL.replace(/\/+$/, ''),
-      anonKey,
-    };
-  }
-
-  // Hosted Supabase: extract project ID from connection URL
-  const match = connectionUrl.match(/\/\/postgres\.([a-z0-9]+):/);
-  if (!match) return null;
-
-  return {
-    url: `https://${match[1]}.supabase.co`,
-    anonKey,
-  };
-}
-
-function isPublicApiRoute(pathname: string, method: string): boolean {
-  // POST to form-submissions is public (website visitors submitting forms)
-  if (pathname === '/ycode/api/form-submissions' && method === 'POST') {
-    return true;
-  }
-
-  if (PUBLIC_API_EXACT.includes(pathname)) return true;
-
-  if (PUBLIC_API_PREFIXES.some((prefix) => pathname.startsWith(prefix))) return true;
-
-  // Collection item endpoints for published pages (POST only — filter, load-more)
-  if (method === 'POST' && pathname.startsWith('/ycode/api/collections/') &&
-      PUBLIC_COLLECTION_ITEM_SUFFIXES.some(suffix => pathname.endsWith(suffix))) {
-    return true;
-  }
-
-  return false;
-}
-
-/**
- * Verify Supabase session for protected API routes.
- * Returns a 401 response if not authenticated, or null to continue.
- */
-async function verifyApiAuth(request: NextRequest): Promise<NextResponse | null> {
->>>>>>> upstream/main
   if (isPublicApiRoute(request.nextUrl.pathname, request.method)) {
     return { kind: 'public' };
   }
@@ -161,17 +84,7 @@ async function verifyApiAuth(request: NextRequest): Promise<NextResponse | null>
     };
   }
 
-<<<<<<< HEAD
   return { kind: 'authenticated', user };
-=======
-  // Authenticated — pass through with any refreshed cookies
-  const authResponse = NextResponse.next({ request });
-  response.cookies.getAll().forEach((cookie) => {
-    authResponse.cookies.set(cookie.name, cookie.value);
-  });
-
-  return authResponse;
->>>>>>> upstream/main
 }
 
 export async function proxy(request: NextRequest) {
@@ -188,6 +101,7 @@ export async function proxy(request: NextRequest) {
     return response;
   }
 
+  // MASJIDWEB_SEAM: provisioning-publish — see docs/masjidweb-core-seams.md#provisioning
   const provisioningSecret = process.env.PROVISIONING_WEBHOOK_SECRET;
   const isProvisionPublish =
     request.method === 'POST' &&
@@ -198,11 +112,13 @@ export async function proxy(request: NextRequest) {
   const provisionTenantSlug = isProvisionPublish
     ? request.headers.get('x-tenant-slug')
     : null;
+  // MASJIDWEB_SEAM_END
 
   // Defense in depth: never trust client-supplied tenant headers
   request.headers.delete('x-tenant-id');
   request.headers.delete('x-tenant-slug');
 
+  // MASJIDWEB_SEAM: subdomain-tenant-resolution — see docs/masjidweb-core-seams.md#subdomain
   const subdomain = extractSubdomain(host, TENANT_DOMAIN_SUFFIX);
 
   if (subdomain) {
@@ -253,6 +169,7 @@ export async function proxy(request: NextRequest) {
     request.headers.set('x-tenant-id', tenant.id);
     request.headers.set('x-tenant-slug', tenant.slug);
   } else if (pathname.startsWith('/ycode')) {
+    // Builder on apex domain: derive tenant from JWT
     const sbConfig = getSupabaseEnvConfig();
     if (sbConfig) {
       try {
@@ -288,10 +205,11 @@ export async function proxy(request: NextRequest) {
       }
     }
   }
+  // MASJIDWEB_SEAM_END
 
   // Protect API and preview routes with auth + tenant / JWT alignment
   if (pathname.startsWith('/ycode/api') || pathname.startsWith('/ycode/preview')) {
-<<<<<<< HEAD
+    // MASJIDWEB_SEAM: auth-tenant-alignment — see docs/masjidweb-core-seams.md#auth-alignment
     if (!isProvisionPublish) {
       const auth = await verifyApiAuth(request);
       if (auth.kind === 'unauthenticated') {
@@ -309,20 +227,8 @@ export async function proxy(request: NextRequest) {
           );
         }
       }
-=======
-    const authResponse = await verifyApiAuth(request);
-    if (authResponse) {
-      if (authResponse.status === 401) {
-        if (pathname.startsWith('/ycode/preview')) {
-          return NextResponse.redirect(new URL('/ycode', request.url));
-        }
-        return authResponse;
-      }
-      // Authenticated — pass through
-      authResponse.headers.set('x-pathname', pathname);
-      return authResponse;
->>>>>>> upstream/main
     }
+    // MASJIDWEB_SEAM_END
   }
 
   const hasPaginationParams = Array.from(request.nextUrl.searchParams.keys())
