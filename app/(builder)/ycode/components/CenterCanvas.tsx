@@ -37,6 +37,7 @@ import { useEditorUrl } from '@/hooks/use-editor-url';
 import { useEditComponent } from '@/hooks/use-edit-component';
 import { useZoom } from '@/hooks/use-zoom';
 import { useUndoRedo } from '@/hooks/use-undo-redo';
+import { useRole } from '@/hooks/use-role';
 
 // 5. Stores
 import { useEditorStore } from '@/stores/useEditorStore';
@@ -58,7 +59,7 @@ import CollectionItemSelector from './CollectionItemSelector';
 import RichTextEditorSheet from './RichTextEditorSheet';
 
 // 6. Utils
-import { buildLocalizedSlugPath, buildLocalizedDynamicPageUrl } from '@/lib/page-utils';
+import { buildPreviewAuthRevision, buildLocalizedSlugPath, buildLocalizedDynamicPageUrl } from '@/lib/page-utils';
 import { getTranslationValue, applyCmsTranslations, extractLayerTranslatableItemsShallow } from '@/lib/localisation-utils';
 import { cn } from '@/lib/utils';
 import { getCollectionVariable, canDeleteLayer, findLayerById, findParentCollectionLayer, canLayerHaveLink, updateLayerProps, removeRichTextSublayer, isRichTextLayer, getLayerCmsFieldBinding } from '@/lib/layer-utils';
@@ -583,6 +584,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
   liveLayerUpdates,
   liveComponentUpdates,
 }: CenterCanvasProps) {
+  const { canEditStructure } = useRole();
   const selectedLayerId = useEditorStore((state) => state.selectedLayerId);
 
   const [showAddBlockPanel, setShowAddBlockPanel] = useState(false);
@@ -1964,8 +1966,13 @@ const CenterCanvas = React.memo(function CenterCanvas({
     return `/ycode/preview${path === '/' ? '' : path}`;
   }, [currentPage, folders, currentPageCollectionItemId, collectionItemsFromStore, collectionFieldsFromStore, selectedLocale, localeTranslations]);
 
-  // Reload preview iframe every time preview mode opens (covers all change sources:
-  // layer edits, component updates, CMS, layer styles, color variables, etc.)
+  // Reload preview when password settings change (URL path stays the same).
+  const previewAuthRevision = useMemo(
+    () => buildPreviewAuthRevision(currentPage, folders),
+    [currentPage, folders],
+  );
+
+  // Reload preview iframe when preview opens, URL changes, or auth settings change.
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
   useEffect(() => {
     if (!isPreviewMode || !previewUrl) return;
@@ -1978,7 +1985,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
       previewObserverRef.current?.disconnect();
       previewObserverRef.current = null;
     };
-  }, [isPreviewMode, previewUrl]);
+  }, [isPreviewMode, previewUrl, previewAuthRevision]);
 
   // Autofit when entering preview mode (not on every breakpoint change)
   const prevIsPreviewMode = useRef(false);
@@ -2582,10 +2589,10 @@ const CenterCanvas = React.memo(function CenterCanvas({
                         pageId={currentPageId || ''}
                         onLayerClick={handleCanvasLayerClick}
                         onLayerUpdate={handleCanvasLayerUpdate}
-                        onDeleteLayer={handleCanvasDeleteLayer}
+                        onDeleteLayer={canEditStructure ? handleCanvasDeleteLayer : undefined}
                         onContentHeightChange={setReportedContentHeight}
                         onContentWidthChange={editingComponentId ? setReportedContentWidth : undefined}
-                        onGapUpdate={handleCanvasGapUpdate}
+                        onGapUpdate={canEditStructure ? handleCanvasGapUpdate : undefined}
                         onZoomGesture={handleZoomGesture}
                         onZoomIn={zoomIn}
                         onZoomOut={zoomOut}
@@ -2599,7 +2606,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
                         onIframeReady={handleIframeReady}
                         onLayerHover={handleCanvasLayerHover}
                         onCanvasClick={handleCanvasClick}
-                        onComponentEdit={handleCanvasComponentEdit}
+                        onComponentEdit={canEditStructure ? handleCanvasComponentEdit : undefined}
                         editingComponentVariables={editingComponentVariables}
                         forceVisibleLayerIds={activeInteractionTriggerLayerId ? activeInteractionTargetLayerIds : undefined}
                         zoom={zoom}
@@ -2622,28 +2629,29 @@ const CenterCanvas = React.memo(function CenterCanvas({
                                   <Icon name="layout" className="size-3 text-neutral-900" />
                                 </EmptyMedia>
                                 <EmptyHeader>
-                                  <EmptyTitle className="text-sm">Start building</EmptyTitle>
+                                  <EmptyTitle className="text-sm">{canEditStructure ? 'Start building' : 'No content yet'}</EmptyTitle>
                                   <EmptyDescription>
-                                    Add your first block to begin creating your page.
+                                    {canEditStructure
+                                      ? 'Add your first block to begin creating your page.'
+                                      : 'This page has no content to edit yet.'}
                                   </EmptyDescription>
                                 </EmptyHeader>
-                                <Button
-                                  onClick={(e) => {
-                                    // Stop propagation to prevent canvas click handler from
-                                    // dispatching closeElementLibrary and immediately closing the panel
-                                    e.stopPropagation();
-                                    // Open ElementLibrary with layouts tab active
-                                    window.dispatchEvent(new CustomEvent('toggleElementLibrary', {
-                                      detail: { tab: 'layouts' }
-                                    }));
-                                  }}
-                                  size="sm"
-                                  variant="secondary"
-                                  className="bg-neutral-900/5 hover:bg-neutral-900/10 text-neutral-900"
-                                >
-                                  <Icon name="plus" />
-                                  Add layout
-                                </Button>
+                                {canEditStructure && (
+                                  <Button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      window.dispatchEvent(new CustomEvent('toggleElementLibrary', {
+                                        detail: { tab: 'layouts' }
+                                      }));
+                                    }}
+                                    size="sm"
+                                    variant="secondary"
+                                    className="bg-neutral-900/5 hover:bg-neutral-900/10 text-neutral-900"
+                                  >
+                                    <Icon name="plus" />
+                                    Add layout
+                                  </Button>
+                                )}
                               </EmptyContent>
                             </Empty>
                           </div>
@@ -2657,12 +2665,14 @@ const CenterCanvas = React.memo(function CenterCanvas({
                           <Icon name="layout" className="w-10 h-10 text-blue-500" />
                         </div>
                         <h2 className="text-2xl font-bold text-gray-900 mb-3">
-                          Start building
+                          {canEditStructure ? 'Start building' : 'No content yet'}
                         </h2>
                         <p className="text-gray-600 mb-8">
-                          Add your first block to begin creating your page.
+                          {canEditStructure
+                            ? 'Add your first block to begin creating your page.'
+                            : 'This page has no content to edit yet.'}
                         </p>
-                        <div className="relative inline-block">
+                        {canEditStructure && <div className="relative inline-block">
                           <Button
                             onClick={() => setShowAddBlockPanel(!showAddBlockPanel)}
                             size="lg"
@@ -2798,7 +2808,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
                               </div>
                             </div>
                           )}
-                        </div>
+                        </div>}
                       </div>
                     </div>
                   )}

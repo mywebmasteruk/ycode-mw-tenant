@@ -9,6 +9,8 @@ import RichTextEditorSheet from './RichTextEditorSheet';
 import type { FieldGroup } from './CollectionFieldSelector';
 import FileManagerDialog from './FileManagerDialog';
 import { sanitizeSlug, checkDuplicatePageSlug, checkDuplicateFolderSlug, type ValidationResult } from '@/lib/page-utils';
+import { looksLikeTiptapJson } from '@/lib/localisation-utils';
+import { tiptapDocToCanonicalString } from '@/lib/tiptap-utils';
 import { parseValueToContent } from '@/lib/cms-variables-utils';
 import { flattenFieldGroups, SIMPLE_TEXT_FIELD_TYPES } from '@/lib/collection-field-utils';
 import type { TranslatableItem } from '@/lib/localisation-utils';
@@ -112,10 +114,16 @@ export default function TranslationRow({
     }
   }
 
-  // Use local value if available, otherwise use store value
-  const translationValue = localInputValues[item.key] !== undefined
+  // Use local value if available, otherwise use store value.
+  // Guard against content_type/value-shape mismatches: a plain-text item may
+  // carry a legacy translation stored as a Tiptap JSON doc string — flatten it
+  // to plain text so the cell shows readable content instead of raw JSON.
+  const rawTranslationValue = localInputValues[item.key] !== undefined
     ? localInputValues[item.key]
     : storeValue;
+  const translationValue = !isRichText && looksLikeTiptapJson(rawTranslationValue)
+    ? tiptapDocToCanonicalString(JSON.parse(rawTranslationValue))
+    : rawTranslationValue;
 
   // For rich text, parse JSON string to Tiptap JSON object for RichTextEditor
   let translationValueForEditor: string | any = translationValue;
@@ -500,7 +508,7 @@ export default function TranslationRow({
 
     return (
       <>
-        <div className={`size-8 rounded overflow-hidden flex-shrink-0 flex items-center justify-center relative`}>
+        <div className={`size-8 rounded overflow-hidden shrink-0 flex items-center justify-center relative isolate`}>
           {/* Checkerboard pattern for transparency - only for images and icons */}
           {showCheckerboard
             ? <div className="absolute inset-0 opacity-10 bg-checkerboard" />
@@ -543,11 +551,29 @@ export default function TranslationRow({
     <li key={item.key} className="flex flex-col gap-1.5">
       {/* Item header */}
       <div className="flex items-center gap-1.75">
-        <div className="size-5 flex items-center justify-center rounded-[6px] bg-secondary/50">
-          <Icon name={item.info.icon} className="shrink-0 size-2.5 opacity-50" />
-        </div>
+        {item.info.segments && item.info.segments.length > 0 ? (
+          <div className="flex items-center gap-1.25">
+            {item.info.segments.map((segment, index) => (
+              <React.Fragment key={index}>
+                {index > 0 && (
+                  <Icon name="chevronRight" className="shrink-0 size-2.5 opacity-40" />
+                )}
+                <div className="size-5 flex items-center justify-center rounded-[6px] bg-secondary/50">
+                  <Icon name={segment.icon} className="shrink-0 size-2.5 opacity-50" />
+                </div>
+                <span className="text-xs font-medium opacity-60">{segment.label}</span>
+              </React.Fragment>
+            ))}
+          </div>
+        ) : (
+          <>
+            <div className="size-5 flex items-center justify-center rounded-[6px] bg-secondary/50">
+              <Icon name={item.info.icon} className="shrink-0 size-2.5 opacity-50" />
+            </div>
 
-        <span className="text-xs font-medium opacity-60">{item.info.label}</span>
+            <span className="text-xs font-medium opacity-60">{item.info.label}</span>
+          </>
+        )}
 
         {item.info.description && (
           <>
@@ -621,7 +647,7 @@ export default function TranslationRow({
                 onClick={() => setIsRichTextSheetOpen(true)}
               >
                 {isRichTextTranslationEmpty ? (
-                  <div className="min-h-[28px] px-2.5 py-1 flex items-center">
+                  <div className="min-h-7 px-2.5 py-1 flex items-center">
                     <span className="text-muted-foreground/50 text-xs">
                       {translation?.is_completed === true ? '(Using original)' : 'Click to edit...'}
                     </span>
@@ -652,7 +678,7 @@ export default function TranslationRow({
                     ? '(Using original)'
                     : (originalPreviewText || 'Enter translation...')
                 }
-                className={`min-h-[28px] [&_.ProseMirror]:py-1 [&_.ProseMirror]:px-2.5 [&_.ProseMirror]:!bg-transparent`}
+                className={`min-h-7 [&_.ProseMirror]:py-1 [&_.ProseMirror]:px-2.5 [&_.ProseMirror]:bg-transparent!`}
                 fieldGroups={fieldGroups}
                 allFields={allFields}
                 collections={collections}
@@ -670,8 +696,8 @@ export default function TranslationRow({
                     ? '(Using original)'
                     : (originalPreviewText || 'Enter translation...')
                 }
-                className={`min-h-[28px] [&_.ProseMirror]:py-1 [&_.ProseMirror]:px-2.5 [&_.ProseMirror]:!bg-transparent ${
-                  validationError ? '[&_.ProseMirror]:!border-destructive' : ''
+                className={`min-h-7 [&_.ProseMirror]:py-1 [&_.ProseMirror]:px-2.5 [&_.ProseMirror]:bg-transparent! ${
+                  validationError ? '[&_.ProseMirror]:border-destructive!' : ''
                 }`}
                 fieldGroups={fieldGroups}
                 allFields={allFields}
@@ -686,8 +712,10 @@ export default function TranslationRow({
         </div>
       </div>
 
-      {/* Asset Picker Dialog */}
-      {isAsset && (
+      {/* Asset Picker Dialog — only mount when open. FileManagerDialog fetches
+          the asset list on mount regardless of `open`, so keeping one mounted
+          per asset row would fire a redundant request for every row. */}
+      {isAsset && isAssetPickerOpen && (
         <FileManagerDialog
           open={isAssetPickerOpen}
           onOpenChange={setIsAssetPickerOpen}

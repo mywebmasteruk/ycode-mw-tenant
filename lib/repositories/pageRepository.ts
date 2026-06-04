@@ -10,7 +10,7 @@ import { reorderSiblings } from '@/lib/repositories/pageFolderRepository';
 import type { Page, PageSettings } from '../../types';
 import { isHomepage } from '../page-utils';
 import { incrementSiblingOrders, fixOrphanedPageSlugs } from '../services/pageService';
-import { generatePageMetadataHash } from '../hash-utils';
+import { generatePageMetadataHash, generatePageLayersHash } from '../hash-utils';
 
 /**
  * Query filters for page lookups
@@ -27,6 +27,7 @@ export interface CreatePageData {
   name: string;
   slug: string;
   is_published?: boolean;
+  is_publishable?: boolean;
   page_folder_id?: string | null;
   order?: number;
   depth?: number;
@@ -44,6 +45,7 @@ export interface UpdatePageData {
   name?: string;
   slug?: string;
   is_published?: boolean;
+  is_publishable?: boolean;
   page_folder_id?: string | null;
   order?: number;
   depth?: number;
@@ -1062,10 +1064,100 @@ export async function duplicatePage(pageId: string): Promise<Page> {
 }
 
 /**
+ * Backfill missing `content_hash` on pages and page_layers (draft + published).
+ *
+ * Legacy migrations and template applies insert rows without computing a hash,
+ * which leaves `content_hash` as NULL. Without backfill, draft hashes get
+ * computed lazily on edit while published hashes stay NULL, causing change
+ * detection to report false positives forever.
+ *
+ * Safe to call repeatedly — converges to a no-op once all rows have a hash.
+ */
+export async function backfillMissingPageHashes(): Promise<{
+  pagesUpdated: number;
+  layersUpdated: number;
+}> {
+  const client = await getSupabaseAdmin();
+  if (!client) return { pagesUpdated: 0, layersUpdated: 0 };
+
+  let pagesUpdated = 0;
+  let layersUpdated = 0;
+
+  const { data: pagesToBackfill } = await client
+    .from('pages')
+    .select('*')
+    .is('content_hash', null)
+    .is('deleted_at', null);
+
+  if (pagesToBackfill && pagesToBackfill.length > 0) {
+    const upsertRows = pagesToBackfill.map((page) => ({
+      ...page,
+      content_hash: generatePageMetadataHash({
+        name: page.name,
+        slug: page.slug,
+        settings: page.settings || {},
+        is_index: page.is_index || false,
+        is_dynamic: page.is_dynamic || false,
+        error_page: page.error_page ?? null,
+      }),
+    }));
+
+    const { error } = await client
+      .from('pages')
+      .upsert(upsertRows, { onConflict: 'id,is_published' });
+
+    if (!error) {
+      pagesUpdated = upsertRows.length;
+    } else {
+      console.error('Failed to backfill page content_hash:', error);
+    }
+  }
+
+  const { data: layersToBackfill } = await client
+    .from('page_layers')
+    .select('*')
+    .is('content_hash', null)
+    .is('deleted_at', null);
+
+  if (layersToBackfill && layersToBackfill.length > 0) {
+    const upsertRows = layersToBackfill.map((row) => ({
+      ...row,
+      content_hash: generatePageLayersHash({
+        layers: row.layers || [],
+        generated_css: row.generated_css ?? null,
+      }),
+    }));
+
+    const { error } = await client
+      .from('page_layers')
+      .upsert(upsertRows, { onConflict: 'id,is_published' });
+
+    if (!error) {
+      layersUpdated = upsertRows.length;
+    } else {
+      console.error('Failed to backfill page_layers content_hash:', error);
+    }
+  }
+
+  return { pagesUpdated, layersUpdated };
+}
+
+/**
+ * Treat a null on either side as "unchanged" — null hashes are pre-backfill
+ * legacy rows that will be repaired on the next backfill pass, not real diffs.
+ */
+function hashesDiffer(a: string | null, b: string | null): boolean {
+  if (a === null || b === null) return false;
+  return a !== b;
+}
+
+/**
  * Get count of unpublished pages efficiently.
  * Uses 2 bulk queries instead of N+1 per-page lookups.
  */
 export async function getUnpublishedPagesCount(): Promise<number> {
+  await backfillMissingPageHashes();
+
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -1096,7 +1188,26 @@ export async function getUnpublishedPagesCount(): Promise<number> {
   }
 
   // 2 bulk queries: all draft pages with layers + all published pages with layers
+<<<<<<< HEAD
   const [draftResult, publishedResult] = await Promise.all([draftQ, pubQ]);
+=======
+  const [draftResult, publishedResult] = await Promise.all([
+    client
+      .from('pages')
+      .select('id, content_hash, page_folder_id, is_publishable, page_layers!inner(content_hash)')
+      .eq('is_published', false)
+      .eq('page_layers.is_published', false)
+      .is('deleted_at', null)
+      .is('page_layers.deleted_at', null),
+    client
+      .from('pages')
+      .select('id, content_hash, page_folder_id, page_layers!inner(content_hash)')
+      .eq('is_published', true)
+      .eq('page_layers.is_published', true)
+      .is('deleted_at', null)
+      .is('page_layers.deleted_at', null),
+  ]);
+>>>>>>> upstream/main
 
   if (draftResult.error) {
     throw new Error(`Failed to fetch draft pages: ${draftResult.error.message}`);
@@ -1124,16 +1235,26 @@ export async function getUnpublishedPagesCount(): Promise<number> {
   let count = 0;
   for (const draft of draftResult.data) {
     const pub = publishedMap.get(draft.id);
+    const isDraftOnly = (draft as { is_publishable?: boolean }).is_publishable === false;
 
     if (!pub) {
-      count++; // Never published
+      // Never published: only counts if it is meant to go live
+      if (!isDraftOnly) count++;
       continue;
     }
 
-    const pageMetadataChanged = draft.content_hash !== pub.content_hash;
+    // Marked as draft but still live: will be removed on publish
+    if (isDraftOnly) {
+      count++;
+      continue;
+    }
 
-    const layersChanged =
-      (draft.page_layers[0]?.content_hash ?? null) !== pub.layerHash;
+    const pageMetadataChanged = hashesDiffer(draft.content_hash, pub.content_hash);
+
+    const layersChanged = hashesDiffer(
+      draft.page_layers[0]?.content_hash ?? null,
+      pub.layerHash
+    );
 
     const folderChanged = draft.page_folder_id !== pub.page_folder_id;
 
@@ -1154,12 +1275,15 @@ export async function getUnpublishedPagesCount(): Promise<number> {
  * Uses content_hash for efficient change detection
  */
 export async function getUnpublishedPages(): Promise<Page[]> {
+  await backfillMissingPageHashes();
+
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
   }
 
+<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
 
   // Get all draft pages with their layers' content_hash in a single efficient query
@@ -1183,14 +1307,50 @@ export async function getUnpublishedPages(): Promise<Page[]> {
 
   if (error) {
     throw new Error(`Failed to fetch draft pages: ${error.message}`);
+=======
+  const [draftResult, publishedResult] = await Promise.all([
+    client
+      .from('pages')
+      .select('*, page_layers!inner(content_hash)')
+      .eq('is_published', false)
+      .eq('page_layers.is_published', false)
+      .is('deleted_at', null)
+      .is('page_layers.deleted_at', null)
+      .order('created_at', { ascending: false }),
+    client
+      .from('pages')
+      .select('id, content_hash, page_folder_id, page_layers!inner(content_hash)')
+      .eq('is_published', true)
+      .eq('page_layers.is_published', true)
+      .is('deleted_at', null)
+      .is('page_layers.deleted_at', null),
+  ]);
+
+  if (draftResult.error) {
+    throw new Error(`Failed to fetch draft pages: ${draftResult.error.message}`);
+>>>>>>> upstream/main
   }
 
-  if (!draftPagesWithLayers || draftPagesWithLayers.length === 0) {
+  if (!draftResult.data || draftResult.data.length === 0) {
     return [];
+  }
+
+  const publishedMap = new Map<string, {
+    content_hash: string | null;
+    page_folder_id: string | null;
+    layerHash: string | null;
+  }>();
+  for (const pub of publishedResult.data || []) {
+    publishedMap.set(pub.id, {
+      content_hash: pub.content_hash,
+      page_folder_id: pub.page_folder_id,
+      layerHash: pub.page_layers[0]?.content_hash ?? null,
+    });
   }
 
   const unpublishedPages: Page[] = [];
 
+<<<<<<< HEAD
   // Check each draft page
   for (const draftPage of draftPagesWithLayers) {
     // Check if a published version exists
@@ -1213,24 +1373,33 @@ export async function getUnpublishedPages(): Promise<Page[]> {
     }
 
     const { data: publishedPageWithLayers } = await pubOneQ.single();
+=======
+  for (const draftPage of draftResult.data) {
+    const pub = publishedMap.get(draftPage.id);
+    const isDraftOnly = draftPage.is_publishable === false;
+>>>>>>> upstream/main
 
-    // If no published version exists, needs first-time publishing
-    if (!publishedPageWithLayers) {
+    if (!pub) {
+      // Never published: only pending if it is meant to go live
+      if (!isDraftOnly) unpublishedPages.push(draftPage);
+      continue;
+    }
+
+    // Marked as draft but still live: will be removed on publish
+    if (isDraftOnly) {
       unpublishedPages.push(draftPage);
       continue;
     }
 
-    const pageMetadataChanged =
-      draftPage.content_hash !== publishedPageWithLayers.content_hash;
+    const pageMetadataChanged = hashesDiffer(draftPage.content_hash, pub.content_hash);
 
-    const layersChanged =
-      (draftPage.page_layers[0]?.content_hash ?? null) !==
-      (publishedPageWithLayers.page_layers[0]?.content_hash ?? null);
+    const layersChanged = hashesDiffer(
+      draftPage.page_layers[0]?.content_hash ?? null,
+      pub.layerHash
+    );
 
-    // Check if page was moved to a different folder
-    const folderChanged = draftPage.page_folder_id !== publishedPageWithLayers.page_folder_id;
+    const folderChanged = draftPage.page_folder_id !== pub.page_folder_id;
 
-    // If any of these changed, needs republishing
     if (pageMetadataChanged || layersChanged || folderChanged) {
       unpublishedPages.push(draftPage);
     }
@@ -1324,4 +1493,85 @@ export async function hardDeleteSoftDeletedPages(): Promise<{ count: number; del
   }
 
   return { count: deletedDrafts.length, deletedPageIds: ids };
+}
+
+/**
+ * Set the is_publishable flag on a page's draft row.
+ */
+export async function setPagePublishable(pageId: string, isPublishable: boolean): Promise<void> {
+  const client = await getSupabaseAdmin();
+  if (!client) throw new Error('Supabase not configured');
+
+  const { error } = await client
+    .from('pages')
+    .update({ is_publishable: isPublishable, updated_at: new Date().toISOString() })
+    .eq('id', pageId)
+    .eq('is_published', false);
+
+  if (error) throw new Error(`Failed to update page publishable flag: ${error.message}`);
+}
+
+/**
+ * Remove a page's published version (live row + layers via CASCADE).
+ * @returns true if a published row existed
+ */
+export async function deletePublishedPage(pageId: string): Promise<boolean> {
+  const client = await getSupabaseAdmin();
+  if (!client) throw new Error('Supabase not configured');
+
+  const { data: published } = await client
+    .from('pages')
+    .select('id')
+    .eq('id', pageId)
+    .eq('is_published', true)
+    .maybeSingle();
+
+  if (!published) return false;
+
+  const { error } = await client
+    .from('pages')
+    .delete()
+    .eq('id', pageId)
+    .eq('is_published', true);
+
+  if (error) throw new Error(`Failed to remove published page: ${error.message}`);
+
+  return true;
+}
+
+/**
+ * Annotate draft pages with computed publish status for the builder listing:
+ * has_published_version (a live row exists) and is_modified (draft differs from live).
+ */
+export async function enrichDraftPagesWithPublishStatus(pages: Page[]): Promise<Page[]> {
+  if (pages.length === 0) return pages;
+
+  const client = await getSupabaseAdmin();
+  if (!client) return pages;
+
+  const ids = pages.map(p => p.id);
+
+  const [{ data: publishedPages }, { data: draftLayers }, { data: publishedLayers }] = await Promise.all([
+    client.from('pages').select('id, content_hash, page_folder_id').in('id', ids).eq('is_published', true).is('deleted_at', null),
+    client.from('page_layers').select('page_id, content_hash').in('page_id', ids).eq('is_published', false).is('deleted_at', null),
+    client.from('page_layers').select('page_id, content_hash').in('page_id', ids).eq('is_published', true).is('deleted_at', null),
+  ]);
+
+  const publishedById = new Map((publishedPages || []).map(p => [p.id, p]));
+  const draftLayerHash = new Map((draftLayers || []).map(l => [l.page_id, l.content_hash]));
+  const publishedLayerHash = new Map((publishedLayers || []).map(l => [l.page_id, l.content_hash]));
+
+  return pages.map(page => {
+    const pub = publishedById.get(page.id);
+    if (!pub) {
+      return { ...page, has_published_version: false, is_modified: false };
+    }
+    const metaChanged = hashesDiffer(page.content_hash ?? null, pub.content_hash);
+    const layersChanged = hashesDiffer(
+      draftLayerHash.get(page.id) ?? null,
+      publishedLayerHash.get(page.id) ?? null
+    );
+    const folderChanged = page.page_folder_id !== pub.page_folder_id;
+    return { ...page, has_published_version: true, is_modified: metaChanged || layersChanged || folderChanged };
+  });
 }

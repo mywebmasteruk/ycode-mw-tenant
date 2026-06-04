@@ -13,6 +13,7 @@ import type {
   CollectionField,
   CollectionFieldType,
   CollectionItemWithValues,
+  CollectionVariable,
   Layer,
   VisibilityOperator,
 } from '@/types';
@@ -166,6 +167,12 @@ export const PAGE_COLLECTION_OPERATORS: OperatorOption[] = [
   { value: 'has_no_items', label: 'has no items' },
 ];
 
+/** Operators available when filtering an item against its own ID (source: 'self'). */
+export const SELF_OPERATORS: OperatorOption[] = [
+  { value: 'is_one_of', label: 'is one of' },
+  { value: 'is_not_one_of', label: 'is not one of' },
+];
+
 export const COMPARE_OPERATORS: { value: string; label: string }[] = [
   { value: 'eq', label: 'equals' },
   { value: 'lt', label: 'less than' },
@@ -225,6 +232,21 @@ export function operatorRequiresItemSelection(operator: VisibilityOperator): boo
   );
 }
 
+/**
+ * Parse a JSON-stringified array of item IDs (used by reference / self conditions).
+ * Returns an empty array for unset, malformed, or non-array values so callers
+ * can always `for…of` the result without extra guards.
+ */
+export function parseItemIdList(value: string | undefined | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 /** Check if operator requires a second value (for date ranges) */
 export function operatorRequiresSecondValue(operator: VisibilityOperator): boolean {
   return operator === 'is_between';
@@ -254,36 +276,97 @@ export function isDatePreset(value: string | undefined): boolean {
 }
 
 /**
- * Resolve a date preset string to a concrete YYYY-MM-DD date (or date pair for
- * range presets). Returns `null` for non-preset values.
+ * Calendar year/month/day (1-based month) of an instant as it appears in a
+ * timezone. Falls back to the UTC components if the timezone is invalid.
  */
-export function resolveDatePreset(preset: string): { start: string; end: string } | null {
-  const now = new Date();
-  const yyyy = now.getFullYear();
-  const mm = now.getMonth();
-  const dd = now.getDate();
+export function getDatePartsInTimezone(
+  date: Date,
+  timezone: string = 'UTC',
+): { year: number; month: number; day: number } {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(date);
+    const get = (t: string) => Number(parts.find(p => p.type === t)?.value);
+    return { year: get('year'), month: get('month'), day: get('day') };
+  } catch {
+    return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() };
+  }
+}
 
-  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+/**
+ * UTC epoch milliseconds for a wall-clock time interpreted in the given
+ * timezone. Single-pass offset correction — accurate except within the rare
+ * ~1h DST overlap, which is acceptable for day-boundary filtering.
+ */
+export function zonedTimeToUtcMs(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+  ms: number,
+  timezone: string = 'UTC',
+): number {
+  const utcGuess = Date.UTC(year, month - 1, day, hour, minute, second, ms);
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    }).formatToParts(new Date(utcGuess));
+    const get = (t: string) => Number(parts.find(p => p.type === t)?.value);
+    const wallAsUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'));
+    return utcGuess - (wallAsUtc - utcGuess);
+  } catch {
+    return utcGuess;
+  }
+}
+
+/**
+ * Resolve a date preset string to a concrete YYYY-MM-DD date (or date pair for
+ * range presets), relative to the current date in the project `timezone`.
+ * Returns `null` for non-preset values.
+ */
+export function resolveDatePreset(
+  preset: string,
+  timezone: string = 'UTC',
+): { start: string; end: string } | null {
+  const { year: yyyy, month, day: dd } = getDatePartsInTimezone(new Date(), timezone);
+  const mm = month - 1;
+
+  // Format calendar Y/M/D as YYYY-MM-DD using UTC purely as a calendar
+  // calculator (constructed and read in UTC, so no timezone shift).
+  const fmt = (y: number, m0: number, d: number) =>
+    new Date(Date.UTC(y, m0, d)).toISOString().slice(0, 10);
 
   switch (preset) {
     case '$today':
-      return { start: fmt(new Date(yyyy, mm, dd)), end: fmt(new Date(yyyy, mm, dd)) };
+      return { start: fmt(yyyy, mm, dd), end: fmt(yyyy, mm, dd) };
     case '$this_week': {
-      const day = now.getDay();
-      const monday = new Date(yyyy, mm, dd - ((day + 6) % 7));
-      const sunday = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6);
-      return { start: fmt(monday), end: fmt(sunday) };
+      const dow = new Date(Date.UTC(yyyy, mm, dd)).getUTCDay();
+      const mondayOffset = (dow + 6) % 7;
+      return { start: fmt(yyyy, mm, dd - mondayOffset), end: fmt(yyyy, mm, dd - mondayOffset + 6) };
     }
     case '$this_month':
-      return { start: fmt(new Date(yyyy, mm, 1)), end: fmt(new Date(yyyy, mm + 1, 0)) };
+      return { start: fmt(yyyy, mm, 1), end: fmt(yyyy, mm + 1, 0) };
     case '$this_year':
-      return { start: fmt(new Date(yyyy, 0, 1)), end: fmt(new Date(yyyy, 11, 31)) };
+      return { start: fmt(yyyy, 0, 1), end: fmt(yyyy, 11, 31) };
     case '$past_week':
-      return { start: fmt(new Date(yyyy, mm, dd - 7)), end: fmt(new Date(yyyy, mm, dd)) };
+      return { start: fmt(yyyy, mm, dd - 7), end: fmt(yyyy, mm, dd) };
     case '$past_month':
-      return { start: fmt(new Date(yyyy, mm - 1, dd)), end: fmt(new Date(yyyy, mm, dd)) };
+      return { start: fmt(yyyy, mm - 1, dd), end: fmt(yyyy, mm, dd) };
     case '$past_year':
-      return { start: fmt(new Date(yyyy - 1, mm, dd)), end: fmt(new Date(yyyy, mm, dd)) };
+      return { start: fmt(yyyy - 1, mm, dd), end: fmt(yyyy, mm, dd) };
     default:
       return null;
   }
@@ -291,24 +374,22 @@ export function resolveDatePreset(preset: string): { start: string; end: string 
 
 /**
  * Resolve a filter value that may be a date preset into operator + concrete
- * value(s) suitable for the filter API.  For presets, the operator is widened
- * to a range comparison; for plain values it's returned as-is.
+ * value(s) suitable for the filter API. Presets always widen to `is_between`
+ * so the full day(s) are captured; plain values are returned as-is.
  */
 export function resolveDateFilterValue(
   operator: string,
   value: string | undefined,
   value2: string | undefined,
+  timezone: string = 'UTC',
 ): { operator: string; value: string; value2?: string } | null {
   if (!value) return null;
   if (!isDatePreset(value)) return { operator, value, value2 };
-  const range = resolveDatePreset(value);
+  const range = resolveDatePreset(value, timezone);
   if (!range) return { operator, value, value2 };
 
   switch (operator) {
     case 'is':
-      return range.start === range.end
-        ? { operator: 'is', value: range.start }
-        : { operator: 'is_between', value: range.start, value2: range.end };
     case 'is_between':
       return { operator: 'is_between', value: range.start, value2: range.end };
     case 'is_before':
@@ -317,6 +398,112 @@ export function resolveDateFilterValue(
       return { operator: 'is_after', value: range.end };
     default:
       return { operator: 'is_between', value: range.start, value2: range.end };
+  }
+}
+
+/**
+ * True if a single condition compares a date field against a date preset
+ * (e.g. `$today`). Such conditions resolve relative to the current date, so
+ * the static export re-evaluates them client-side instead of baking the result.
+ */
+export function isDynamicDateCondition(
+  condition: { source?: string; fieldType?: string; value?: string },
+): boolean {
+  if (condition.source !== 'collection_field') return false;
+  if (!condition.fieldType || !isDateFieldType(condition.fieldType as CollectionFieldType)) return false;
+  return isDatePreset(condition.value);
+}
+
+/**
+ * True if a ConditionalVisibility expression contains any date-preset condition.
+ * Used by the static export to detect rules that need client-side re-evaluation.
+ */
+export function hasDynamicDateRule(
+  visibility:
+    | { groups?: Array<{ conditions?: Array<{ source?: string; fieldType?: string; value?: string }> }> }
+    | undefined
+    | null,
+): boolean {
+  if (!visibility?.groups) return false;
+  for (const group of visibility.groups) {
+    if (!group.conditions) continue;
+    for (const condition of group.conditions) {
+      if (isDynamicDateCondition(condition)) return true;
+    }
+  }
+  return false;
+}
+
+/** Match `YYYY-MM-DD` (the format emitted by `<input type="date">` and date presets). */
+const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+export function isDateOnlyString(value: string | undefined | null): boolean {
+  return !!value && DATE_ONLY_REGEX.test(value);
+}
+
+/**
+ * Convert a filter date string to start/end-of-day UTC timestamps.
+ *
+ * For datetime (`date`) fields, a `YYYY-MM-DD` input spans the day in the
+ * project `timezone` (converted to the matching UTC instants) so filters align
+ * with what the user sees. For `date_only` fields (`dateOnly = true`) the day
+ * spans UTC, since those values are timezone-neutral calendar dates. Other
+ * inputs collapse to a single parsed instant. Returns `null` if unparseable.
+ */
+export function dateStringToDayBounds(
+  value: string | undefined | null,
+  timezone: string = 'UTC',
+  dateOnly: boolean = false,
+): { start: number; end: number } | null {
+  if (!value) return null;
+  if (isDateOnlyString(value)) {
+    if (dateOnly) {
+      const start = Date.parse(`${value}T00:00:00.000Z`);
+      const end = Date.parse(`${value}T23:59:59.999Z`);
+      if (isNaN(start) || isNaN(end)) return null;
+      return { start, end };
+    }
+    const [y, m, d] = value.split('-').map(Number);
+    const start = zonedTimeToUtcMs(y, m, d, 0, 0, 0, 0, timezone);
+    const end = zonedTimeToUtcMs(y, m, d, 23, 59, 59, 999, timezone);
+    if (isNaN(start) || isNaN(end)) return null;
+    return { start, end };
+  }
+  const ts = Date.parse(value);
+  return isNaN(ts) ? null : { start: ts, end: ts };
+}
+
+/**
+ * Compare a stored date/datetime value against a filter value using day-aware
+ * semantics (so `is today` matches any timestamp on today's date). Day bounds
+ * are resolved in the project `timezone` for datetime fields; `dateOnly` fields
+ * compare in UTC. Returns `false` if either value cannot be parsed.
+ */
+export function compareDateFilter(
+  storedValue: string,
+  operator: 'is' | 'is_before' | 'is_after' | 'is_between',
+  filterValue: string,
+  filterValue2?: string,
+  timezone: string = 'UTC',
+  dateOnly: boolean = false,
+): boolean {
+  const valueTs = Date.parse(storedValue);
+  if (isNaN(valueTs)) return false;
+  const bounds = dateStringToDayBounds(filterValue, timezone, dateOnly);
+  if (!bounds) return false;
+
+  switch (operator) {
+    case 'is':
+      return valueTs >= bounds.start && valueTs <= bounds.end;
+    case 'is_before':
+      return valueTs < bounds.start;
+    case 'is_after':
+      return valueTs > bounds.end;
+    case 'is_between': {
+      const bounds2 = dateStringToDayBounds(filterValue2, timezone, dateOnly);
+      if (!bounds2) return false;
+      return valueTs >= bounds.start && valueTs <= bounds2.end;
+    }
   }
 }
 
@@ -638,6 +825,18 @@ export function getAssetFieldTypeLabel(fieldType: CollectionFieldType): string {
 
 /** Virtual collection ID marker for multi-asset collections */
 export const MULTI_ASSET_COLLECTION_ID = '__multi_asset__';
+
+/**
+ * Whether a collection binding points to a real, selected source.
+ * Field-sourced bindings (reference/multi-asset/inverse) require a `source_field_id`,
+ * so an unbound multi-asset placeholder (virtual `id`, no field chosen yet) is not
+ * considered selected. Direct collections just require a non-empty `id`.
+ */
+export function hasBoundCollectionSource(collectionVariable?: CollectionVariable | null): boolean {
+  if (!collectionVariable) return false;
+  if (collectionVariable.source_field_type) return !!collectionVariable.source_field_id;
+  return !!collectionVariable.id;
+}
 
 /** Virtual field IDs for multi-asset collections (prefixed to avoid collision) */
 export const MULTI_ASSET_VIRTUAL_FIELDS = {

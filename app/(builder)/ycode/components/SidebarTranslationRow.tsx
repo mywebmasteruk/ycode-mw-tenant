@@ -69,7 +69,20 @@ export default function SidebarTranslationRow({
 }: SidebarTranslationRowProps) {
   const [isAssetPickerOpen, setIsAssetPickerOpen] = useState(false);
 
-  const isRichText = item.content_type === 'richtext';
+  const translation = selectedLocaleId
+    ? getTranslationByKey(selectedLocaleId, item.key)
+    : null;
+  const storeValue = translation?.content_value || '';
+
+  // The source side always follows the layer's declared content_type, but the
+  // translation side must follow whatever was actually stored in the DB row.
+  // Legacy migrations and historical rich-text edits can leave a translation
+  // stored as `richtext` (Tiptap JSON) on a layer whose source variable is
+  // `dynamic_text` — without this preference the editor would render the raw
+  // JSON string instead of the translated text. Mirrors the same logic used
+  // by `injectTranslatedText` at render time.
+  const isSourceRichText = item.content_type === 'richtext';
+  const isTranslationRichText = (translation?.content_type ?? item.content_type) === 'richtext';
   const isAsset = item.content_type === 'asset_id';
 
   // Sub-label shown beneath each language name when a layer has more than
@@ -89,11 +102,6 @@ export default function SidebarTranslationRow({
     }
   })();
 
-  const translation = selectedLocaleId
-    ? getTranslationByKey(selectedLocaleId, item.key)
-    : null;
-  const storeValue = translation?.content_value || '';
-
   // Display value for the source textarea: convert Tiptap JSON → plain text so
   // the user sees readable content instead of raw JSON for rich-text fields.
   // In preview-only mode (rich-text element layers) we keep block-level
@@ -101,7 +109,7 @@ export default function SidebarTranslationRow({
   // the canvas; the editable textarea path stays single-line so it round-trips
   // cleanly through stringToTiptapContent on save.
   const sourceDisplayValue = (() => {
-    if (!isRichText || !item.content_value) return item.content_value || '';
+    if (!isSourceRichText || !item.content_value) return item.content_value || '';
     try {
       const parsed = JSON.parse(item.content_value);
       return previewOnly
@@ -118,7 +126,7 @@ export default function SidebarTranslationRow({
     if (localInputValues[item.key] !== undefined) {
       return localInputValues[item.key];
     }
-    if (!isRichText || !storeValue) return storeValue || '';
+    if (!isTranslationRichText || !storeValue) return storeValue || '';
     try {
       const parsed = JSON.parse(storeValue);
       return previewOnly
@@ -145,8 +153,11 @@ export default function SidebarTranslationRow({
     if (!selectedLocaleId) return;
 
     // Re-wrap plain text into Tiptap JSON for rich_text fields so the
-    // rendering pipeline still receives a valid rich_text payload.
-    const finalValue = isRichText
+    // rendering pipeline still receives a valid rich_text payload. Use the
+    // translation's actual stored content_type so an existing richtext row
+    // (e.g. legacy-migrated) keeps its shape on edit instead of being
+    // silently downgraded to a plain string.
+    const finalValue = isTranslationRichText
       ? JSON.stringify(stringToTiptapContent(value))
       : value;
 

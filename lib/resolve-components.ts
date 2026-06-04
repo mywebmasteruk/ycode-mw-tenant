@@ -182,6 +182,26 @@ function remapVariableCollectionLayerIds(vars: LayerVariables, idMap: Map<string
     if (designChanged) { result.design = newDesign; changed = true; }
   }
 
+  // Conditional visibility conditions targeting a collection by layer ID
+  // (e.g. empty-state "has no items" rules inside a component instance)
+  if (vars.conditionalVisibility?.groups?.length) {
+    const groups = vars.conditionalVisibility.groups;
+    const newGroups = groups.map((group) => {
+      if (!Array.isArray(group?.conditions)) return group;
+      const newConditions = group.conditions.map((cond) => {
+        const mapped = cond?.collectionLayerId ? idMap.get(cond.collectionLayerId) : undefined;
+        return mapped && mapped !== cond.collectionLayerId ? { ...cond, collectionLayerId: mapped } : cond;
+      });
+      return newConditions.some((c, i) => c !== group.conditions[i])
+        ? { ...group, conditions: newConditions }
+        : group;
+    });
+    if (newGroups.some((g, i) => g !== groups[i])) {
+      result.conditionalVisibility = { ...vars.conditionalVisibility, groups: newGroups };
+      changed = true;
+    }
+  }
+
   return changed ? result : vars;
 }
 
@@ -358,13 +378,17 @@ export function applyComponentOverrides(
 
       // Only apply if it's a text variable (has 'type' property, not ImageSettingsValue)
       if (valueToApply && 'type' in valueToApply) {
-        // Apply the value to this layer's text variable
+        // Apply the value to this layer's text variable. Mark layers whose
+        // text came from an instance override so `injectTranslatedText`
+        // doesn't clobber the (already page-scope-translated) override value
+        // with the component-scope default translation.
         updatedLayer = {
           ...updatedLayer,
           variables: {
             ...updatedLayer.variables,
             text: valueToApply as any,
           },
+          ...(overrideValue !== undefined ? { _textFromOverride: true } as any : {}),
         };
       }
     }
@@ -398,6 +422,7 @@ export function applyComponentOverrides(
             ...(imageValue.height && { height: imageValue.height }),
             ...(imageValue.loading && { loading: imageValue.loading }),
           },
+          ...(overrideValue !== undefined ? { _imageFromOverride: true } as any : {}),
         };
       }
     }

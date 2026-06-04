@@ -10,10 +10,18 @@
  */
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { fetchAllRows } from '@/lib/supabase-constants';
 import type { Translation, CreateTranslationData, UpdateTranslationData } from '@/types';
 
+type TranslationDiffRow = Pick<
+  Translation,
+  'id' | 'content_value' | 'is_completed' | 'deleted_at'
+>;
+
 /**
- * Get all translations for a locale (draft by default)
+ * Get all translations for a locale (draft by default). Pages through the
+ * 1000-row PostgREST default so projects with large catalogues don't get
+ * silently truncated.
  */
 export async function getTranslationsByLocale(
   localeId: string,
@@ -25,19 +33,29 @@ export async function getTranslationsByLocale(
     throw new Error('Supabase not configured');
   }
 
-  const { data, error } = await client
-    .from('translations')
-    .select('*')
-    .eq('locale_id', localeId)
-    .eq('is_published', isPublished)
-    .is('deleted_at', null)
-    .order('created_at', { ascending: true });
+  const PAGE_SIZE = 1000;
+  const results: Translation[] = [];
 
-  if (error) {
-    throw new Error(`Failed to fetch translations: ${error.message}`);
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await client
+      .from('translations')
+      .select('*')
+      .eq('locale_id', localeId)
+      .eq('is_published', isPublished)
+      .is('deleted_at', null)
+      .order('created_at', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+
+    if (error) {
+      throw new Error(`Failed to fetch translations: ${error.message}`);
+    }
+
+    if (!data || data.length === 0) break;
+    results.push(...(data as Translation[]));
+    if (data.length < PAGE_SIZE) break;
   }
 
-  return data || [];
+  return results;
 }
 
 /**
@@ -339,6 +357,9 @@ export async function upsertTranslations(
     content_key: t.content_key,
     content_type: t.content_type,
     content_value: t.content_value,
+    // Without this, the DB default (false) keeps batch translations hidden on
+    // the live site, which only renders completed translations.
+    is_completed: t.is_completed ?? false,
     is_published: false,
     deleted_at: null,
   }));
@@ -355,4 +376,67 @@ export async function upsertTranslations(
   }
 
   return data || [];
+}
+
+/**
+ * Count translations needing publish: drafts with no published counterpart,
+ * pending soft-deletes, or rows whose content_value/is_completed differs from
+ * published. Mirrors the diff logic in `publishLocalisation` so the preview
+ * matches what will actually publish. Paginates both sides to avoid the
+ * 1000-row PostgREST default silently truncating the count.
+ */
+export async function getUnpublishedTranslationsCount(): Promise<number> {
+  const client = await getSupabaseAdmin();
+
+  if (!client) {
+    return 0;
+  }
+
+  const cols = 'id, content_value, is_completed, deleted_at';
+
+  // Order by id so .range() pagination is deterministic — without an ORDER BY
+  // PostgREST returns rows in arbitrary order between pages, which causes
+  // duplicates and gaps when paging tens of thousands of translations, leading
+  // to spurious "missing in published map" hits and inflated change counts.
+  const [draftRows, publishedRows] = await Promise.all([
+    fetchAllRows<TranslationDiffRow>((from, to) =>
+      client.from('translations').select(cols).eq('is_published', false).order('id', { ascending: true }).range(from, to)
+    ),
+    fetchAllRows<TranslationDiffRow>((from, to) =>
+      client.from('translations').select(cols).eq('is_published', true).order('id', { ascending: true }).range(from, to)
+    ),
+  ]);
+
+  if (draftRows.length === 0) {
+    return 0;
+  }
+
+  const publishedById = new Map<string, TranslationDiffRow>();
+  for (const t of publishedRows) {
+    publishedById.set(t.id, t);
+  }
+
+  let count = 0;
+  for (const draft of draftRows) {
+    const pub = publishedById.get(draft.id);
+
+    if (!pub || pub.deleted_at) {
+      if (!draft.deleted_at) count++;
+      continue;
+    }
+
+    if (draft.deleted_at) {
+      count++;
+      continue;
+    }
+
+    if (
+      draft.content_value !== pub.content_value ||
+      draft.is_completed !== pub.is_completed
+    ) {
+      count++;
+    }
+  }
+
+  return count;
 }

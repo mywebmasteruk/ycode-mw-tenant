@@ -20,6 +20,7 @@ import { useCollectionsStore } from '@/stores/useCollectionsStore';
 import { Separator } from '@/components/ui/separator';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { generateUniqueSlug, generateUniqueFolderSlug, getNextNumberFromNames, getParentContextFromSelection, calculateNextOrder, findNextSelection } from '@/lib/page-utils';
+import type { StatusAction } from '@/lib/collection-field-utils';
 
 export interface LeftSidebarPagesHandle {
   checkAndCloseSettings: () => Promise<boolean>;
@@ -31,6 +32,7 @@ interface LeftSidebarPagesProps {
   currentPageId: string | null;
   onPageSelect: (pageId: string) => void;
   setCurrentPageId: (pageId: string | null) => void;
+  readOnly?: boolean;
 }
 
 const LeftSidebarPages = React.forwardRef<LeftSidebarPagesHandle, LeftSidebarPagesProps>(({
@@ -39,6 +41,7 @@ const LeftSidebarPages = React.forwardRef<LeftSidebarPagesHandle, LeftSidebarPag
   currentPageId,
   onPageSelect,
   setCurrentPageId,
+  readOnly = false,
 }, ref) => {
   const { urlState } = useEditorUrl();
   const activeSidebarTab = useEditorStore((state) => state.activeSidebarTab);
@@ -140,6 +143,7 @@ const LeftSidebarPages = React.forwardRef<LeftSidebarPagesHandle, LeftSidebarPag
   const updateFolder = usePagesStore((s) => s.updateFolder);
   const duplicateFolder = usePagesStore((s) => s.duplicateFolder);
   const deleteFolder = usePagesStore((s) => s.deleteFolder);
+  const setPageStatus = usePagesStore((s) => s.setPageStatus);
   const batchReorderPagesAndFolders = usePagesStore((s) => s.batchReorderPagesAndFolders);
   const collections = useCollectionsStore((s) => s.collections);
   const fields = useCollectionsStore((s) => s.fields);
@@ -193,6 +197,7 @@ const LeftSidebarPages = React.forwardRef<LeftSidebarPagesHandle, LeftSidebarPag
       name: newPageName,
       slug: newPageSlug,
       is_published: false,
+      is_publishable: true,
       page_folder_id: parentFolderId,
       order: newOrder,
       depth: newDepth,
@@ -381,13 +386,17 @@ const LeftSidebarPages = React.forwardRef<LeftSidebarPagesHandle, LeftSidebarPag
   const handleSavePage = async (data: PageFormData) => {
     if (!editingPage) return;
 
-    const pageUpdates = {
+    const pageUpdates: Partial<Page> = {
       name: data.name,
       slug: data.slug,
       page_folder_id: data.page_folder_id,
       is_index: data.is_index,
       settings: data.settings,
     };
+
+    if (data.is_publishable !== undefined) {
+      pageUpdates.is_publishable = data.is_publishable;
+    }
 
     // Update in background
     const result = await updatePage(editingPage.id, pageUpdates);
@@ -570,6 +579,10 @@ const LeftSidebarPages = React.forwardRef<LeftSidebarPagesHandle, LeftSidebarPag
       }
     }
   }, [pages, folders, pendingDuplicateSelection]);
+
+  const handleStatusChange = (id: string, action: StatusAction) => {
+    void setPageStatus(id, action);
+  };
 
   const handleDuplicate = async (id: string, type: 'folder' | 'page') => {
     if (type === 'folder') {
@@ -776,52 +789,54 @@ const LeftSidebarPages = React.forwardRef<LeftSidebarPagesHandle, LeftSidebarPag
     <>
       <header className="py-5 flex justify-between shrink-0 sticky top-0 bg-linear-to-b from-background to-transparent z-20">
         <span className="font-medium">Pages</span>
-        <div className="-my-1">
-          <DropdownMenu onOpenChange={setIsMenuOpen}>
-            <DropdownMenuTrigger asChild>
-              <Button size="xs" variant="secondary">
-                <Icon name="plus" className={`${isMenuOpen ? 'rotate-45' : 'rotate-0'} transition-transform duration-100`} />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="start"
-              side="bottom"
-              onCloseAutoFocus={(e) => e.preventDefault()}
-              className="max-h-125 overflow-y-auto"
-            >
-              <DropdownMenuItem onClick={() => handleAddPage()}>
-                <Icon name="page" className="size-3 opacity-60" />
-                Regular
-              </DropdownMenuItem>
-              <DropdownMenuSub>
-                <DropdownMenuSubTrigger>
-                  <Icon name="dynamicPage" className="size-3 opacity-60" />
-                  CMS
-                </DropdownMenuSubTrigger>
-                <DropdownMenuSubContent>
-                  {collections.length > 0 ? (
-                    collections.map(collection => (
-                      <DropdownMenuItem key={collection.id} onClick={() => handleAddPage(collection.id)}>
+        {!readOnly && (
+          <div className="-my-1">
+            <DropdownMenu onOpenChange={setIsMenuOpen}>
+              <DropdownMenuTrigger asChild>
+                <Button size="xs" variant="secondary">
+                  <Icon name="plus" className={`${isMenuOpen ? 'rotate-45' : 'rotate-0'} transition-transform duration-100`} />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="start"
+                side="bottom"
+                onCloseAutoFocus={(e) => e.preventDefault()}
+                className="max-h-125 overflow-y-auto"
+              >
+                <DropdownMenuItem onClick={() => handleAddPage()}>
+                  <Icon name="page" className="size-3 opacity-60" />
+                  Regular
+                </DropdownMenuItem>
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>
+                    <Icon name="dynamicPage" className="size-3 opacity-60" />
+                    CMS
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent>
+                    {collections.length > 0 ? (
+                      collections.map(collection => (
+                        <DropdownMenuItem key={collection.id} onClick={() => handleAddPage(collection.id)}>
+                          <Icon name="database" className="size-3 opacity-60" />
+                          {collection.name}
+                        </DropdownMenuItem>
+                      ))
+                    ) : (
+                      <DropdownMenuItem key={null} onClick={() => navigateToCollections()}>
                         <Icon name="database" className="size-3 opacity-60" />
-                        {collection.name}
+                        Add a collection
                       </DropdownMenuItem>
-                    ))
-                  ) : (
-                    <DropdownMenuItem key={null} onClick={() => navigateToCollections()}>
-                      <Icon name="database" className="size-3 opacity-60" />
-                      Add a collection
-                    </DropdownMenuItem>
-                  )}
-                </DropdownMenuSubContent>
-              </DropdownMenuSub>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={handleAddFolder}>
-                <Icon name="folder" className="size-3 opacity-60" />
-                Folder
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
+                    )}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={handleAddFolder}>
+                  <Icon name="folder" className="size-3 opacity-60" />
+                  Folder
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        )}
       </header>
 
       <div className="flex flex-col gap-3">
@@ -837,11 +852,12 @@ const LeftSidebarPages = React.forwardRef<LeftSidebarPagesHandle, LeftSidebarPag
             setCurrentPageId(pageId);
             handlePageSelect(pageId); // This will also navigate
           }}
-          onReorder={handleReorder}
+          onReorder={readOnly ? undefined : handleReorder}
           onPageSettings={handleEditPage}
           onFolderSettings={handleEditFolder}
-          onDuplicate={handleDuplicate}
-          onDelete={deletePageOrFolderItem}
+          onDuplicate={readOnly ? undefined : handleDuplicate}
+          onDelete={readOnly ? undefined : deletePageOrFolderItem}
+          onStatusChange={readOnly ? undefined : handleStatusChange}
         />
 
         <div className="flex items-center gap-2 mt-2">

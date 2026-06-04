@@ -10,8 +10,8 @@ import { getCmsFieldBinding } from '@/lib/tiptap-utils';
 import { applyComponentOverrides } from '@/lib/resolve-components';
 import { getComponentVariantLayers } from '@/lib/component-variant-utils';
 import { resolveFieldFromSources } from '@/lib/cms-variables-utils';
-import { isDatePreset, resolveDateFilterValue } from '@/lib/collection-field-utils';
-import { parseMultiReferenceValue } from '@/lib/collection-utils';
+import { compareDateFilter, isDateFieldType, isDatePreset, parseItemIdList, resolveDateFilterValue } from '@/lib/collection-field-utils';
+import { parseMultiReferenceValue, normalizeBooleanValue } from '@/lib/collection-utils';
 import { getInheritedValue } from '@/lib/tailwind-class-mapper';
 import cloneDeep from 'lodash/cloneDeep';
 import { layerHasLink, hasLinkInTree, hasRichTextLinks } from '@/lib/link-utils';
@@ -119,6 +119,24 @@ export function canCopyLayer(layer: Layer): boolean {
  */
 export function canDeleteLayer(layer: Layer): boolean {
   return layer.restrictions?.delete !== false;
+}
+
+/**
+ * Recursively check if a layer tree contains a password-protected form layer.
+ * Used by PageRenderer to decide whether to inject the hardcoded PasswordForm
+ * fallback when the 401 page has been customised without a password form.
+ */
+export function hasPasswordFormLayer(layers: Layer[] | undefined | null): boolean {
+  if (!layers || layers.length === 0) return false;
+  for (const layer of layers) {
+    if (layer.name === 'form' && layer.settings?.form?.form_type === 'password_protected') {
+      return true;
+    }
+    if (layer.children && hasPasswordFormLayer(layer.children)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -1923,6 +1941,12 @@ export interface VisibilityContext {
   pageCollectionCounts?: Record<string, number>;
   /** Field definitions for type-aware comparison */
   collectionFields?: CollectionField[];
+  /** ID of the item currently being evaluated (used by `source: 'self'` conditions). */
+  currentItemId?: string;
+  /** ID of the dynamic page's collection item, when on a dynamic page. */
+  pageCollectionItemId?: string | null;
+  /** Project timezone (IANA) used for day-aware date condition comparisons. */
+  timezone?: string;
 }
 
 /**
@@ -1931,11 +1955,29 @@ export interface VisibilityContext {
  * @param context - The context containing field values and collection counts
  * @returns True if condition is met, false otherwise
  */
-function evaluateCondition(
+export function evaluateCondition(
   condition: import('@/types').VisibilityCondition,
   context: VisibilityContext
 ): boolean {
-  const { collectionLayerData, pageCollectionData, pageCollectionCounts } = context;
+  const { collectionLayerData, pageCollectionData, pageCollectionCounts, currentItemId, pageCollectionItemId } = context;
+  const timezone = context.timezone || 'UTC';
+
+  // Self conditions: compare the item being evaluated against a set of item
+  // IDs (statically picked and/or the current dynamic page item). Used for
+  // patterns like "only show the current item" or "exclude the current item
+  // from a related list". If we don't know the current item, the condition
+  // can't be evaluated meaningfully — fall through to `true` to avoid hiding
+  // everything by accident (matches the default behaviour of unset conditions).
+  if (condition.source === 'self') {
+    if (!currentItemId) return true;
+    const compareIds = new Set<string>();
+    for (const id of parseItemIdList(condition.value)) compareIds.add(id);
+    if (condition.includesCurrentPageItem && pageCollectionItemId) {
+      compareIds.add(pageCollectionItemId);
+    }
+    const matches = compareIds.has(currentItemId);
+    return condition.operator === 'is_not_one_of' ? !matches : matches;
+  }
 
   if (condition.source === 'page_collection') {
     // Page collection conditions
@@ -1975,9 +2017,10 @@ function evaluateCondition(
     let compareValue2 = condition.value2;
     let effectiveOperator = condition.operator;
     const fieldType = condition.fieldType || 'text';
+    const isDateOnly = fieldType === 'date_only';
 
-    if (fieldType === 'date' && isDatePreset(compareValue)) {
-      const resolved = resolveDateFilterValue(effectiveOperator, compareValue, compareValue2);
+    if (isDateFieldType(fieldType) && isDatePreset(compareValue)) {
+      const resolved = resolveDateFilterValue(effectiveOperator, compareValue, compareValue2, timezone);
       if (resolved) {
         effectiveOperator = resolved.operator as typeof effectiveOperator;
         compareValue = resolved.value;
@@ -1992,16 +2035,28 @@ function evaluateCondition(
       // Text operators
       case 'is':
         if (fieldType === 'boolean') {
-          return value.toLowerCase() === compareValue.toLowerCase();
+          // Booleans may be stored as 'true'/'false', '1'/'0', or '' (depending
+          // on import source — UI, Airtable sync, CSV, etc.). Normalize both
+          // sides so the comparison is source-agnostic.
+          return normalizeBooleanValue(value) === normalizeBooleanValue(compareValue);
         }
         if (fieldType === 'number') {
           return parseFloat(value) === parseFloat(compareValue);
         }
+        if (isDateFieldType(fieldType)) {
+          return compareDateFilter(value, 'is', compareValue, undefined, timezone, isDateOnly);
+        }
         return value === compareValue;
 
       case 'is_not':
+        if (fieldType === 'boolean') {
+          return normalizeBooleanValue(value) !== normalizeBooleanValue(compareValue);
+        }
         if (fieldType === 'number') {
           return parseFloat(value) !== parseFloat(compareValue);
+        }
+        if (isDateFieldType(fieldType)) {
+          return !compareDateFilter(value, 'is', compareValue, undefined, timezone, isDateOnly);
         }
         return value !== compareValue;
 
@@ -2030,25 +2085,16 @@ function evaluateCondition(
       case 'gte':
         return parseFloat(value) >= parseFloat(compareValue);
 
-      // Date operators
-      case 'is_before': {
-        const dateValue = new Date(value);
-        const compareDateValue = new Date(compareValue);
-        return dateValue < compareDateValue;
-      }
+      // Date operators (day-aware: `YYYY-MM-DD` filter values span the full day
+      // in the project timezone; `date_only` fields compare in UTC)
+      case 'is_before':
+        return compareDateFilter(value, 'is_before', compareValue, undefined, timezone, isDateOnly);
 
-      case 'is_after': {
-        const dateValue = new Date(value);
-        const compareDateValue = new Date(compareValue);
-        return dateValue > compareDateValue;
-      }
+      case 'is_after':
+        return compareDateFilter(value, 'is_after', compareValue, undefined, timezone, isDateOnly);
 
-      case 'is_between': {
-        const dateValue = new Date(value);
-        const startDate = new Date(compareValue);
-        const endDate = new Date(compareValue2 ?? '');
-        return dateValue >= startDate && dateValue <= endDate;
-      }
+      case 'is_between':
+        return compareDateFilter(value, 'is_between', compareValue, compareValue2, timezone, isDateOnly);
 
       case 'is_not_empty':
         return isPresent;
