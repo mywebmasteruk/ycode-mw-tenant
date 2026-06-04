@@ -49,7 +49,8 @@ jobs:
           git fetch origin main
           git checkout origin/main -- \
             scripts/ai-repair-safe-update.ts \
-            lib/masjidweb/openrouter-repair.ts
+            lib/masjidweb/openrouter-repair.ts \
+            lib/masjidweb/merge-conflict-hunks.ts
           git checkout origin/main -- docs/masjidweb-core-seams.md 2>/dev/null || true
 
       - name: Configure git
