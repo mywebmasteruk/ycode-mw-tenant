@@ -629,11 +629,7 @@ export default function HeaderBar({
           </a>
         </Button>
 
-<<<<<<< HEAD
         {isTemplateTenant && hasUpdate && (
-=======
-        {hasUpdate && canManageSettings && (
->>>>>>> upstream/main
           <>
             <div className="h-5">
               <Separator orientation="vertical" />
