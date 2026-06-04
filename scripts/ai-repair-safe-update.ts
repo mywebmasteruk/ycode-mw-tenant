@@ -2,6 +2,10 @@ import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  extractConflictHunks,
+  replaceConflictHunk,
+} from '../lib/masjidweb/merge-conflict-hunks';
+import {
   assertNoConflictMarkers,
   DEFAULT_AI_REPAIR_MODEL,
   requestOpenRouterRepair,
@@ -10,6 +14,7 @@ import {
 
 const REPO_ROOT = join(__dirname, '..');
 const MAX_FILE_CHARS = 120_000;
+const MAX_HUNK_CHARS = 40_000;
 const SEAMS_PATH = join(REPO_ROOT, 'docs/masjidweb-core-seams.md');
 
 function run(command: string): string {
@@ -75,6 +80,93 @@ async function resolvePackageLockConflict(): Promise<void> {
   }
 }
 
+async function requestResolvedConflictText(
+  apiKey: string,
+  model: string,
+  filePath: string,
+  conflictText: string,
+  mode: 'file' | 'hunk',
+): Promise<{ resolved: string; model: string }> {
+  const instruction =
+    mode === 'file'
+      ? ['Resolve merge conflicts in this file: ' + filePath, 'Return the complete file content only.']
+      : [
+        `Resolve this merge conflict hunk from ${filePath}.`,
+        'Return only the merged code that replaces the conflict block (no <<<<<<< / ======= / >>>>>>> markers).',
+        'Keep surrounding logic intact; do not omit code that appears after the conflict in the file.',
+      ];
+
+  const result = await requestOpenRouterRepair({
+    apiKey,
+    model,
+    messages: [
+      { role: 'system', content: buildSystemPrompt() },
+      {
+        role: 'user',
+        content: [...instruction, '', conflictText].join('\n'),
+      },
+    ],
+  });
+
+  const resolved = stripCodeFences(result.reply);
+  assertNoConflictMarkers(resolved, filePath);
+  return { resolved, model: result.model };
+}
+
+async function resolveConflictFileByHunks(
+  apiKey: string,
+  model: string,
+  filePath: string,
+  original: string,
+): Promise<void> {
+  const hunks = extractConflictHunks(original);
+  if (hunks.length === 0) {
+    console.log(`Skip ${filePath} (no conflict hunks)`);
+    return;
+  }
+
+  console.log(
+    `Resolving ${filePath} in ${hunks.length} hunk(s) (file too large for single pass)…`,
+  );
+
+  let content = original;
+  let lastModel = model;
+
+  for (let index = 0; index < hunks.length; index += 1) {
+    const hunk = hunks[index];
+    if (hunk.length > MAX_HUNK_CHARS) {
+      throw new Error(
+        `Conflict hunk ${index + 1}/${hunks.length} in ${filePath} is too large for automated repair`,
+      );
+    }
+
+    const { resolved, model: usedModel } = await requestResolvedConflictText(
+      apiKey,
+      model,
+      filePath,
+      hunk,
+      'hunk',
+    );
+    lastModel = usedModel;
+
+    if (resolved === hunk) {
+      throw new Error(`Model returned unchanged hunk for ${filePath}`);
+    }
+
+    content = replaceConflictHunk(content, hunk, resolved);
+    assertNoConflictMarkers(content, filePath);
+  }
+
+  const absolute = join(REPO_ROOT, filePath);
+  writeFileSync(absolute, content.endsWith('\n') ? content : `${content}\n`, 'utf8');
+  run(`git add -- "${filePath}"`);
+  if (!runAllowFailure('git diff --cached --quiet')) {
+    run(`git commit -m "fix(ai): resolve conflicts in ${filePath}"`);
+    run('git push origin HEAD');
+  }
+  console.log(`Resolved ${filePath} by hunk (${lastModel})`);
+}
+
 async function resolveConflictFile(
   apiKey: string,
   model: string,
@@ -95,29 +187,18 @@ async function resolveConflictFile(
       await resolvePackageLockConflict();
       return;
     }
-    throw new Error(`File too large for automated repair (${filePath})`);
+    await resolveConflictFileByHunks(apiKey, model, filePath, original);
+    return;
   }
 
   console.log(`Resolving ${filePath} with ${model}…`);
-  const result = await requestOpenRouterRepair({
+  const { resolved, model: usedModel } = await requestResolvedConflictText(
     apiKey,
     model,
-    messages: [
-      { role: 'system', content: buildSystemPrompt() },
-      {
-        role: 'user',
-        content: [
-          `Resolve merge conflicts in this file: ${filePath}`,
-          'Return the complete file content only.',
-          '',
-          original,
-        ].join('\n'),
-      },
-    ],
-  });
-
-  const resolved = stripCodeFences(result.reply);
-  assertNoConflictMarkers(resolved, filePath);
+    filePath,
+    original,
+    'file',
+  );
 
   if (resolved === original) {
     throw new Error(`Model returned unchanged content for ${filePath}`);
@@ -129,7 +210,7 @@ async function resolveConflictFile(
     run(`git commit -m "fix(ai): resolve conflicts in ${filePath}"`);
     run('git push origin HEAD');
   }
-  console.log(`Resolved ${filePath} (${result.model})`);
+  console.log(`Resolved ${filePath} (${usedModel})`);
 }
 
 async function main(): Promise<void> {
