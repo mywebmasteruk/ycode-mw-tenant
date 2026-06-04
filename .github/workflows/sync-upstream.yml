@@ -25,6 +25,17 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      - name: Configure merge hygiene
+        run: bash scripts/git-merge-hygiene.sh
+
+      - name: Restore rerere cache
+        uses: actions/cache@v4
+        with:
+          path: .git/rr-cache
+          key: rerere-${{ runner.os }}-v1
+          restore-keys: |
+            rerere-${{ runner.os }}-v1
+
       - name: Fetch upstream Ycode
         run: |
           git remote add upstream https://github.com/ycode/ycode.git 2>/dev/null || git remote set-url upstream https://github.com/ycode/ycode.git
@@ -48,8 +59,10 @@ jobs:
         continue-on-error: true
         run: |
           set +e
+          git rerere
           git merge --no-ff --no-edit upstream/main
           status=$?
+          git rerere
           echo "status=$status" >> "$GITHUB_OUTPUT"
           git diff --name-only --diff-filter=U > /tmp/update-conflicts.txt
           exit 0

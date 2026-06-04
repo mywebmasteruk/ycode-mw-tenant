@@ -7,6 +7,16 @@ on:
         description: Safe update pull request number
         required: true
         type: string
+      mechanical_only:
+        description: Only rerere + lockfile regen (no LLM)
+        required: false
+        type: boolean
+        default: false
+      max_llm_files:
+        description: Max files to send to OpenRouter per run
+        required: false
+        type: string
+        default: "8"
 
 permissions:
   contents: write
@@ -49,8 +59,11 @@ jobs:
           git fetch origin main
           git checkout origin/main -- \
             scripts/ai-repair-safe-update.ts \
+            scripts/git-merge-hygiene.sh \
             lib/masjidweb/openrouter-repair.ts \
-            lib/masjidweb/merge-conflict-hunks.ts
+            lib/masjidweb/merge-conflict-hunks.ts \
+            lib/masjidweb/update-conflict-tiers.ts \
+            .gitattributes
           git checkout origin/main -- docs/masjidweb-core-seams.md 2>/dev/null || true
 
       - name: Configure git
@@ -58,12 +71,27 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      - name: Configure merge hygiene
+        run: bash scripts/git-merge-hygiene.sh
+
+      - name: Restore rerere cache
+        uses: actions/cache@v4
+        with:
+          path: .git/rr-cache
+          key: rerere-${{ runner.os }}-v1
+          restore-keys: |
+            rerere-${{ runner.os }}-v1
+
       - name: Run AI conflict repair
         id: repair
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           OPENROUTER_MODEL: ${{ vars.OPENROUTER_REPAIR_MODEL }}
+          OPENROUTER_REPAIR_MODEL_HIGH_RISK: ${{ vars.OPENROUTER_REPAIR_MODEL_HIGH_RISK }}
+          AI_REPAIR_MECHANICAL_ONLY: ${{ inputs.mechanical_only }}
+          AI_REPAIR_SKIP_TIER2_LLM: "true"
+          AI_REPAIR_MAX_LLM_FILES: ${{ inputs.max_llm_files }}
         run: npx --yes tsx scripts/ai-repair-safe-update.ts
 
       - name: Commit and push repairs
