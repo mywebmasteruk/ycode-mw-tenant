@@ -218,21 +218,12 @@ export async function loadTranslationsForLocale(
       return { locale: null, translations: {} };
     }
 
-<<<<<<< HEAD
-    // Fetch all translations for this locale
-    // NOTE: translations table has no tenant_id column; isolation is via locale_id (locales are tenant-scoped)
-    const { data: translations } = await supabase
-      .from('translations')
-      .select('*')
-      .eq('locale_id', locale.id)
-      .eq('is_published', isPublished)
-      .is('deleted_at', null);
-=======
-    // Fetch all translations for this locale. Supabase caps PostgREST
+// Fetch all translations for this locale. Supabase caps PostgREST
     // responses at 1000 rows by default — projects with more translations
     // were silently truncated, causing entire layers to render in the
     // source language on SSR while the editor (which fetches via its own
     // paginated API) showed them correctly. Page through explicit ranges.
+    // NOTE: translations table has no tenant_id column; isolation is via locale_id (locales are tenant-scoped)
     const PAGE_SIZE = 1000;
     const translations: Translation[] = [];
     for (let from = 0; ; from += PAGE_SIZE) {
@@ -243,7 +234,6 @@ export async function loadTranslationsForLocale(
         .eq('is_published', isPublished)
         .is('deleted_at', null)
         .range(from, from + PAGE_SIZE - 1);
->>>>>>> upstream/main
 
       if (error) {
         console.error('Failed to fetch translations page:', error);
