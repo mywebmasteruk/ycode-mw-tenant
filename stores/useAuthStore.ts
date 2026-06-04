@@ -6,11 +6,8 @@
 
 import { create } from 'zustand';
 import { createBrowserClient } from '../lib/supabase-browser';
-<<<<<<< HEAD
 import { isStaleSupabaseRefreshTokenError } from '../lib/supabase-auth-error';
-=======
 import { extractRoleFromUser } from '@/lib/roles';
->>>>>>> upstream/main
 import type { User, Session } from '@supabase/supabase-js';
 
 interface AuthState {
