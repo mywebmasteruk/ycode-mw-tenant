@@ -189,17 +189,12 @@ export async function upsertDraftLayers(
     throw new Error('Supabase not configured');
   }
 
-<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
 
-  // Check if draft exists
-  const existingDraft = await getDraftLayers(pageId);
-=======
   // Use the caller-provided draft when available, otherwise fall back to a fresh read.
   const resolvedDraft = existingDraft !== undefined
     ? existingDraft
     : await getDraftLayers(pageId);
->>>>>>> upstream/main
 
   // Detect removed and changed layer content, update translations accordingly
   if (resolvedDraft && resolvedDraft.layers) {
@@ -251,19 +246,12 @@ export async function upsertDraftLayers(
     let upd = client
       .from('page_layers')
       .update(updateData)
-<<<<<<< HEAD
-      .eq('id', existingDraft.id)
+      .eq('id', resolvedDraft.id)
       .eq('is_published', false);
 
     upd = applyTenantEq(upd, tenantId);
 
     const { data, error } = await upd.select().single();
-=======
-      .eq('id', resolvedDraft.id)
-      .eq('is_published', false)
-      .select()
-      .single();
->>>>>>> upstream/main
 
     if (error) {
       throw new Error(`Failed to update draft: ${error.message}`);
@@ -563,10 +551,6 @@ export async function batchPublishPageLayers(
   for (const draft of draftLayers) {
     const existing = publishedById.get(draft.id);
 
-<<<<<<< HEAD
-    if (shouldCopyDraftToPublished(draft, existing)) {
-      const row: Record<string, unknown> = {
-=======
     // Skip the content_hash equality check when forced. The catch-up path
     // for component/style changes calls this with force=true because the
     // draft layers' JSONB still references the component by ID (so the
@@ -574,8 +558,7 @@ export async function batchPublishPageLayers(
     // differs. Without force, the static export reads stale published
     // layers and downstream writers (GitHub) see an empty diff.
     if (options.force || !existing || existing.content_hash !== draft.content_hash) {
-      layersToUpsert.push({
->>>>>>> upstream/main
+      const row: Record<string, unknown> = {
         id: draft.id,
         page_id: draft.page_id,
         layers: draft.layers,
