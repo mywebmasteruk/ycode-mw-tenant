@@ -290,33 +290,20 @@ export async function fetchPublishedHashMap(
 
   let publishedRows: Array<{ id: string; content_hash: string | null }> | null = null;
   try {
-<<<<<<< HEAD
-    let pubQ = client
-      .from('collection_items')
-      .select('id, content_hash')
-      .in('id', itemIds)
-      .eq('is_published', true)
-      .is('deleted_at', null);
-
-    pubQ = applyTenantEq(pubQ, tenantId);
-
-    const { data, error } = await pubQ;
-
-    if (error) {
-      console.error('Failed to fetch published items for status:', error.message);
-    } else {
-      publishedRows = data;
-=======
     // Chunk the ID list: a single large `.in()` overflows the request URL length
     // limit and returns 400 Bad Request. Fetch chunks in parallel and merge.
     const chunkResults = await Promise.all(
       chunk(itemIds, SUPABASE_IN_FILTER_CHUNK_SIZE).map(async (idsChunk) => {
-        const { data, error } = await client
+        let pubQ = client
           .from('collection_items')
           .select('id, content_hash')
           .in('id', idsChunk)
           .eq('is_published', true)
           .is('deleted_at', null);
+
+        pubQ = applyTenantEq(pubQ, tenantId);
+
+        const { data, error } = await pubQ;
 
         if (error) {
           console.error('Failed to fetch published items for status:', error.message);
@@ -329,7 +316,6 @@ export async function fetchPublishedHashMap(
     // If every chunk failed, keep publishedRows null; otherwise merge successful chunks
     if (chunkResults.some((rows) => rows !== null)) {
       publishedRows = chunkResults.flatMap((rows) => rows ?? []);
->>>>>>> upstream/main
     }
   } catch (err) {
     // Transient network errors should not break the items endpoint
@@ -523,34 +509,23 @@ export async function getItemsByIds(ids: string[], isPublished: boolean = false,
     throw new Error('Supabase client not configured');
   }
 
-<<<<<<< HEAD
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
 
-  let idsQ = client
-    .from('collection_items')
-    .select('*')
-    .in('id', ids)
-    .eq('is_published', isPublished)
-    .is('deleted_at', null);
-
-  idsQ = applyTenantEq(idsQ, tenantId);
-
-  const { data, error } = await idsQ;
-
-  if (error) {
-    throw new Error(`Failed to fetch collection items: ${error.message}`);
-=======
   const allItems: CollectionItem[] = [];
 
   for (let i = 0; i < ids.length; i += SUPABASE_WRITE_BATCH_SIZE) {
     const batchIds = ids.slice(i, i + SUPABASE_WRITE_BATCH_SIZE);
 
-    const { data, error } = await client
+    let idsQ = client
       .from('collection_items')
       .select('*')
       .in('id', batchIds)
       .eq('is_published', isPublished)
       .is('deleted_at', null);
+
+    idsQ = applyTenantEq(idsQ, effectiveTenantId);
+
+    const { data, error } = await idsQ;
 
     if (error) {
       throw new Error(`Failed to fetch collection items: ${error.message}`);
@@ -559,7 +534,6 @@ export async function getItemsByIds(ids: string[], isPublished: boolean = false,
     if (data) {
       allItems.push(...data);
     }
->>>>>>> upstream/main
   }
 
   return allItems;
@@ -1507,28 +1481,6 @@ export async function getTotalPublishableItemsCount(): Promise<number> {
 
   const collectionIds = collections.map(c => c.id);
 
-<<<<<<< HEAD
-  let draftItemsQ = client
-    .from('collection_items')
-    .select('id, manual_order')
-    .in('collection_id', collectionIds)
-    .eq('is_published', false)
-    .eq('is_publishable', true)
-    .is('deleted_at', null);
-
-  let pubItemsQ = client
-    .from('collection_items')
-    .select('id, manual_order')
-    .in('collection_id', collectionIds)
-    .eq('is_published', true);
-
-  draftItemsQ = applyTenantEq(draftItemsQ, tenantId);
-  pubItemsQ = applyTenantEq(pubItemsQ, tenantId);
-
-  const [draftResult, publishedResult] = await Promise.all([
-    draftItemsQ,
-    pubItemsQ,
-=======
   // Paginate both queries to avoid PostgREST's default 1000-row limit
   const fetchAllItems = async (isPublished: boolean): Promise<Array<{ id: string; manual_order: number }>> => {
     const rows: Array<{ id: string; manual_order: number }> = [];
@@ -1542,6 +1494,8 @@ export async function getTotalPublishableItemsCount(): Promise<number> {
         .eq('is_published', isPublished)
         .order('id', { ascending: true })
         .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
+
+      query = applyTenantEq(query, tenantId);
 
       if (!isPublished) {
         query = query.eq('is_publishable', true).is('deleted_at', null);
@@ -1565,7 +1519,6 @@ export async function getTotalPublishableItemsCount(): Promise<number> {
   const [draftItems, publishedItems] = await Promise.all([
     fetchAllItems(false),
     fetchAllItems(true),
->>>>>>> upstream/main
   ]);
 
   const publishedMap = new Map<string, number>();
@@ -1706,152 +1659,3 @@ export async function unpublishSingleItem(itemId: string): Promise<void> {
     .update({ is_publishable: false, updated_at: new Date().toISOString() })
     .eq('id', itemId)
     .eq('is_published', false);
-
-  updDraft = applyTenantEq(updDraft, tenantId);
-
-  await updDraft;
-}
-
-/**
- * Stage a single item for publish: removes published version if it exists,
- * then sets is_publishable = true on the draft row.
- * @returns true if a published version was removed (caller should clear cache)
- */
-export async function stageSingleItem(itemId: string): Promise<boolean> {
-  const client = await getSupabaseAdmin();
-  if (!client) throw new Error('Supabase client not configured');
-
-  const tenantId = await resolveEffectiveTenantId();
-
-  // Check if a published version exists
-  let pubSel = client
-    .from('collection_items')
-    .select('id')
-    .eq('id', itemId)
-    .eq('is_published', true);
-
-  pubSel = applyTenantEq(pubSel, tenantId);
-
-  const { data: published } = await pubSel.maybeSingle();
-
-  const hadPublished = !!published;
-
-  // Remove published version if it exists (CASCADE deletes published values)
-  if (hadPublished) {
-    let delPub = client
-      .from('collection_items')
-      .delete()
-      .eq('id', itemId)
-      .eq('is_published', true);
-
-    delPub = applyTenantEq(delPub, tenantId);
-
-    await delPub;
-  }
-
-  // Set draft as publishable
-  let stageUpd = client
-    .from('collection_items')
-    .update({ is_publishable: true, updated_at: new Date().toISOString() })
-    .eq('id', itemId)
-    .eq('is_published', false);
-
-  stageUpd = applyTenantEq(stageUpd, tenantId);
-
-  await stageUpd;
-
-  return hadPublished;
-}
-
-/**
- * Publish a single item immediately: upserts a published item row
- * and copies draft values to published. Sets is_publishable = true.
- */
-export async function publishSingleItem(itemId: string): Promise<void> {
-  const client = await getSupabaseAdmin();
-  if (!client) throw new Error('Supabase client not configured');
-
-  const draftItem = await getItemById(itemId, false);
-  if (!draftItem || draftItem.deleted_at) {
-    throw new Error('Draft item not found');
-  }
-
-  const tenantId = await resolveEffectiveTenantId();
-  const now = new Date().toISOString();
-
-  // Ensure draft is marked publishable
-  if (!draftItem.is_publishable) {
-    let pubDraft = client
-      .from('collection_items')
-      .update({ is_publishable: true, updated_at: now })
-      .eq('id', itemId)
-      .eq('is_published', false);
-
-    pubDraft = applyTenantEq(pubDraft, tenantId);
-
-    await pubDraft;
-  }
-
-  // Ensure published fields exist (values FK requires them), including hidden tenancy keys.
-  const draftFields = await getFieldsByCollectionId(
-    draftItem.collection_id,
-    false,
-    { includeSystemFields: true },
-  );
-  if (draftFields.length > 0) {
-    const fieldsToUpsert = draftFields.map(f => {
-      const rowTid =
-        tenantId ?? (f as { tenant_id?: string | null }).tenant_id ?? undefined;
-      const row: Record<string, unknown> = {
-        id: f.id,
-        name: f.name,
-        key: f.key,
-        type: f.type,
-        default: f.default,
-        fillable: f.fillable,
-        order: f.order,
-        collection_id: f.collection_id,
-        reference_collection_id: f.reference_collection_id,
-        hidden: f.hidden,
-        is_computed: f.is_computed,
-        data: f.data,
-        is_published: true,
-        created_at: f.created_at,
-        updated_at: now,
-      };
-      if (rowTid) {
-        row.tenant_id = rowTid;
-      }
-      return row;
-    });
-    await client
-      .from('collection_fields')
-      .upsert(fieldsToUpsert, { onConflict: 'id,is_published' });
-  }
-
-  const itemTid =
-    tenantId ?? (draftItem as { tenant_id?: string | null }).tenant_id ?? undefined;
-
-  const itemUpsert: Record<string, unknown> = {
-    id: draftItem.id,
-    collection_id: draftItem.collection_id,
-    manual_order: draftItem.manual_order,
-    is_publishable: true,
-    is_published: true,
-    content_hash: draftItem.content_hash,
-    created_at: draftItem.created_at,
-    updated_at: now,
-  };
-  if (itemTid) {
-    itemUpsert.tenant_id = itemTid;
-  }
-
-  // Upsert published item row
-  await client
-    .from('collection_items')
-    .upsert(itemUpsert, { onConflict: 'id,is_published' });
-
-  // Copy draft values to published via existing publishValues utility
-  const { publishValues } = await import('@/lib/repositories/collectionItemValueRepository');
-  await publishValues(itemId);
-}
