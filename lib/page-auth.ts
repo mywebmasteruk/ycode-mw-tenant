@@ -215,25 +215,15 @@ export async function fetchFoldersForAuth(isPublished: boolean): Promise<PageFol
   const supabase = await getSupabaseAdmin();
   if (!supabase) return [];
 
-<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
   let query = supabase
-=======
-  const { data } = await supabase
->>>>>>> upstream/main
     .from('page_folders')
     .select('*')
     .eq('is_published', isPublished)
     .is('deleted_at', null);
 
-<<<<<<< HEAD
-  if (isPublished) {
-    query = query.eq('is_published', true);
-  }
   query = applyTenantEq(query, tenantId);
 
   const { data } = await query;
-=======
->>>>>>> upstream/main
   return (data as PageFolder[]) || [];
 }
