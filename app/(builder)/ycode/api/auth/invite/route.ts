@@ -13,7 +13,9 @@ import { ASSIGNABLE_ROLES } from '@/lib/roles';
  */
 export async function POST(request: NextRequest) {
   try {
-<<<<<<< HEAD
+    const result = await requireManageMembers();
+    if ('status' in result) return result;
+
     const tenantId = request.headers.get('x-tenant-id')?.trim();
     const tenantSlug = request.headers.get('x-tenant-slug')?.trim();
 
@@ -23,10 +25,6 @@ export async function POST(request: NextRequest) {
         403
       );
     }
-=======
-    const result = await requireManageMembers();
-    if ('status' in result) return result;
->>>>>>> upstream/main
 
     const body = await request.json();
     const { email, role = 'designer', redirectTo } = body;
@@ -47,12 +45,9 @@ export async function POST(request: NextRequest) {
       return noCache({ error: 'Supabase not configured' }, 500);
     }
 
-<<<<<<< HEAD
     const redirect = resolveInviteRedirectUrl(request, redirectTo);
 
     const invitedAt = new Date().toISOString();
-=======
->>>>>>> upstream/main
     const { data, error } = await client.auth.admin.inviteUserByEmail(email, {
       redirectTo: redirect,
       data: {
