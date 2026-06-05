@@ -8,16 +8,10 @@
  */
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
-<<<<<<< HEAD
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
-import { fetchAllRows, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
-||||||| 30cc6a3
-import { fetchAllRows, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
-=======
 import { SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
 import { getAllTranslationRows } from '@/lib/repositories/translationRepository';
->>>>>>> upstream/main
 import type { Locale, Translation, TranslationSourceType } from '@/types';
 
 export interface ChangedLocale {
@@ -165,23 +159,10 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
   publishedLocalesQuery = applyTenantEq(publishedLocalesQuery, tenantId);
   
   const [existingPublishedLocalesRes, existingPublishedTranslations] = await Promise.all([
-<<<<<<< HEAD
     publishedLocalesQuery,
-    fetchAllRows<Translation>((from, to) => {
-      let query = client.from('translations').select('*').eq('is_published', true).order('id', { ascending: true }).range(from, to);
-      return applyTenantEq(query, tenantId);
-    }),
-||||||| 30cc6a3
-    client.from('locales').select('*').eq('is_published', true),
-    fetchAllRows<Translation>((from, to) =>
-      client.from('translations').select('*').eq('is_published', true).order('id', { ascending: true }).range(from, to)
-    ),
-=======
-    client.from('locales').select('*').eq('is_published', true),
     // Single direct-DB read of the whole published catalogue instead of
     // paginated PostgREST round-trips.
-    getAllTranslationRows<Translation>(true),
->>>>>>> upstream/main
+    getAllTranslationRows<Translation>(true, tenantId),
   ]);
 
   const existingPublishedLocales: Locale[] = existingPublishedLocalesRes.data || [];
@@ -313,18 +294,7 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
   // direct-DB read instead of paginated PostgREST round-trips.
   let allDraftTranslations: Translation[];
   try {
-<<<<<<< HEAD
-    allDraftTranslations = await fetchAllRows<Translation>((from, to) => {
-      let query = client.from('translations').select('*').eq('is_published', false).order('id', { ascending: true }).range(from, to);
-      return applyTenantEq(query, tenantId);
-    });
-||||||| 30cc6a3
-    allDraftTranslations = await fetchAllRows<Translation>((from, to) =>
-      client.from('translations').select('*').eq('is_published', false).order('id', { ascending: true }).range(from, to)
-    );
-=======
-    allDraftTranslations = await getAllTranslationRows<Translation>(false);
->>>>>>> upstream/main
+    allDraftTranslations = await getAllTranslationRows<Translation>(false, tenantId);
   } catch (translationsError) {
     const message = translationsError instanceof Error ? translationsError.message : String(translationsError);
     throw new Error(`Failed to fetch draft translations: ${message}`);
