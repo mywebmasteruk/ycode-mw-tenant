@@ -312,14 +312,38 @@ export async function POST(request: NextRequest) {
         } else if (isPublishingAll) {
           const allCollections = await getAllCollections({ is_published: false });
 
+          // Bulk pre-fetch published collections, all draft/published fields, and all
+          // draft/published items in a handful of direct-DB reads, then group by
+          // collection. This replaces the per-collection metadata/field/item
+          // round-trips that dominated publish time.
+          const publishedCollections = await getCollectionsRaw(true);
+          const publishedCollectionById = new Map(publishedCollections.map(c => [c.id, c]));
+          const draftFieldsByCollection = groupByCollectionId(await getAllFields(false));
+          const publishedFieldsByCollection = groupByCollectionId(await getAllFields(true));
+          const draftItemsByCollection = groupByCollectionId(await getAllItemsRaw(false));
+          const publishedItemsByCollection = groupByCollectionId(await getAllItemsRaw(true));
+          // One global probe instead of two detection queries per collection: only
+          // the collections in this set have soft-deleted draft items/fields to clean.
+          const collectionsNeedingCleanup = await getCollectionsNeedingDeletionCleanup();
+
           for (const collection of allCollections) {
-            const items = await getAllItemsByCollectionId(collection.id, false);
+            const draftItems = draftItemsByCollection.get(collection.id) ?? [];
             const publishResult = await publishCollectionWithItems({
               collectionId: collection.id,
-              itemIds: items.map((item: any) => item.id),
+              itemIds: draftItems.map(item => item.id),
+              skipItemValidation: true,
+              skipDeletionCleanup: !collectionsNeedingCleanup.has(collection.id),
+              prefetched: {
+                draftCollection: collection,
+                publishedCollection: publishedCollectionById.get(collection.id) ?? null,
+                draftFields: draftFieldsByCollection.get(collection.id) ?? [],
+                publishedFields: publishedFieldsByCollection.get(collection.id) ?? [],
+                draftItems,
+                publishedItems: publishedItemsByCollection.get(collection.id) ?? [],
+              },
             });
             if (!publishResult.success) {
-              console.error(`[Publish] collection ${collection.id} (${collection.name}) FAILED (${items.length} items):`, publishResult.errors);
+              console.error(`[Publish] collection ${collection.id} (${collection.name}) FAILED (${draftItems.length} items):`, publishResult.errors);
             }
             const p = publishResult.published;
             const changedItems = p?.itemsCount || 0;
@@ -354,7 +378,6 @@ export async function POST(request: NextRequest) {
           result.changes.collectionItems = totalItems;
         }
 
-<<<<<<< HEAD
         stats.tables.collections.durationMs = collectionsMs;
         stats.tables.collections.added = totalCollections;
         stats.tables.collection_fields.durationMs = fieldsMs;
@@ -363,113 +386,6 @@ export async function POST(request: NextRequest) {
         stats.tables.collection_items.added = totalItems;
         stats.tables.collection_item_values.durationMs = valuesMs;
         stats.tables.collection_item_values.added = totalValues;
-||||||| 30cc6a3
-        for (const collection of allCollections) {
-          const items = await getAllItemsByCollectionId(collection.id, false);
-          const publishResult = await publishCollectionWithItems({
-            collectionId: collection.id,
-            itemIds: items.map((item: any) => item.id),
-          });
-          if (!publishResult.success) {
-            console.error(`[Publish] collection ${collection.id} (${collection.name}) FAILED (${items.length} items):`, publishResult.errors);
-          }
-          const p = publishResult.published;
-          const changedItems = p?.itemsCount || 0;
-          const changedValues = p?.valuesCount || 0;
-          const changedFields = p?.fieldsCount || 0;
-          const changedDeleted = p?.deletedItemsCount || 0;
-          const changedCollection = p?.collection ? 1 : 0;
-          const changed = changedItems + changedValues + changedFields + changedDeleted + changedCollection;
-          if (changed > 0) {
-            console.log(`[Publish] collection ${collection.id} changed: items=${changedItems} values=${changedValues} fields=${changedFields} deleted=${changedDeleted} meta=${changedCollection}`);
-            publishedCollectionIds.push(collection.id);
-          }
-          const staleSlugsCombined = [
-            ...(p?.deletedItemSlugs || []),
-            ...(p?.renamedItemOldSlugs || []),
-          ];
-          if (staleSlugsCombined.length > 0) {
-            const existing = deletedCollectionItemSlugs.get(collection.id) || [];
-            deletedCollectionItemSlugs.set(collection.id, [...existing, ...staleSlugsCombined]);
-          }
-          totalItems += changedItems;
-          totalValues += changedValues;
-          totalFields += changedFields;
-          if (p?.collection) totalCollections++;
-          if (publishResult.timing) {
-            collectionsMs += publishResult.timing.collections.durationMs;
-            fieldsMs += publishResult.timing.fields.durationMs;
-            itemsMs += publishResult.timing.items.durationMs;
-            valuesMs += publishResult.timing.values.durationMs;
-          }
-        }
-        result.changes.collectionItems = totalItems;
-=======
-        // Bulk pre-fetch published collections, all draft/published fields, and all
-        // draft/published items in a handful of direct-DB reads, then group by
-        // collection. This replaces the per-collection metadata/field/item
-        // round-trips that dominated publish time.
-        const publishedCollections = await getCollectionsRaw(true);
-        const publishedCollectionById = new Map(publishedCollections.map(c => [c.id, c]));
-        const draftFieldsByCollection = groupByCollectionId(await getAllFields(false));
-        const publishedFieldsByCollection = groupByCollectionId(await getAllFields(true));
-        const draftItemsByCollection = groupByCollectionId(await getAllItemsRaw(false));
-        const publishedItemsByCollection = groupByCollectionId(await getAllItemsRaw(true));
-        // One global probe instead of two detection queries per collection: only
-        // the collections in this set have soft-deleted draft items/fields to clean.
-        const collectionsNeedingCleanup = await getCollectionsNeedingDeletionCleanup();
-
-        for (const collection of allCollections) {
-          const draftItems = draftItemsByCollection.get(collection.id) ?? [];
-          const publishResult = await publishCollectionWithItems({
-            collectionId: collection.id,
-            itemIds: draftItems.map(item => item.id),
-            skipItemValidation: true,
-            skipDeletionCleanup: !collectionsNeedingCleanup.has(collection.id),
-            prefetched: {
-              draftCollection: collection,
-              publishedCollection: publishedCollectionById.get(collection.id) ?? null,
-              draftFields: draftFieldsByCollection.get(collection.id) ?? [],
-              publishedFields: publishedFieldsByCollection.get(collection.id) ?? [],
-              draftItems,
-              publishedItems: publishedItemsByCollection.get(collection.id) ?? [],
-            },
-          });
-          if (!publishResult.success) {
-            console.error(`[Publish] collection ${collection.id} (${collection.name}) FAILED (${draftItems.length} items):`, publishResult.errors);
-          }
-          const p = publishResult.published;
-          const changedItems = p?.itemsCount || 0;
-          const changedValues = p?.valuesCount || 0;
-          const changedFields = p?.fieldsCount || 0;
-          const changedDeleted = p?.deletedItemsCount || 0;
-          const changedCollection = p?.collection ? 1 : 0;
-          const changed = changedItems + changedValues + changedFields + changedDeleted + changedCollection;
-          if (changed > 0) {
-            console.log(`[Publish] collection ${collection.id} changed: items=${changedItems} values=${changedValues} fields=${changedFields} deleted=${changedDeleted} meta=${changedCollection}`);
-            publishedCollectionIds.push(collection.id);
-          }
-          const staleSlugsCombined = [
-            ...(p?.deletedItemSlugs || []),
-            ...(p?.renamedItemOldSlugs || []),
-          ];
-          if (staleSlugsCombined.length > 0) {
-            const existing = deletedCollectionItemSlugs.get(collection.id) || [];
-            deletedCollectionItemSlugs.set(collection.id, [...existing, ...staleSlugsCombined]);
-          }
-          totalItems += changedItems;
-          totalValues += changedValues;
-          totalFields += changedFields;
-          if (p?.collection) totalCollections++;
-          if (publishResult.timing) {
-            collectionsMs += publishResult.timing.collections.durationMs;
-            fieldsMs += publishResult.timing.fields.durationMs;
-            itemsMs += publishResult.timing.items.durationMs;
-            valuesMs += publishResult.timing.values.durationMs;
-          }
-        }
-        result.changes.collectionItems = totalItems;
->>>>>>> upstream/main
       }
 
       // Publish components
