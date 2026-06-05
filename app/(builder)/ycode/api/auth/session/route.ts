@@ -7,6 +7,9 @@ import { parseSupabaseConfig } from '@/lib/supabase-config-parser';
 import { supabaseCookieOptionsForRequestHeaders } from '@/lib/supabase-cookie-domain';
 import type { SupabaseConfig } from '@/types';
 import { supabaseServerRealtimeOptions } from '@/lib/supabase-server-options';
+import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { bootstrapTenantOwnerIfNeeded } from '@/lib/masjidweb/bootstrap-tenant-owner';
+import { authUserTenantId } from '@/lib/masjidweb/auth-users-tenant-scope';
 
 type SessionPostBody = {
   accessToken?: unknown;
@@ -140,9 +143,22 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const adminClient = await getSupabaseAdmin();
+    const tenantId = authUserTenantId(data.session.user);
+    if (adminClient && tenantId) {
+      await bootstrapTenantOwnerIfNeeded(
+        adminClient,
+        tenantId,
+        data.session.user.id,
+      );
+      await supabase.auth.refreshSession();
+    }
+
+    const refreshed = await supabase.auth.getSession();
+
     const response = authJson({
       data: {
-        user: data.session.user,
+        user: refreshed.data.session?.user ?? data.session.user,
       },
     });
 

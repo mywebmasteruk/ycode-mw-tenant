@@ -662,12 +662,62 @@ export async function getItemIdsByFieldValue(
   return validItems?.map(i => i.id) || [];
 }
 
+function compareItemsByFieldValue(
+  a: CollectionItemWithValues,
+  b: CollectionItemWithValues,
+  sortFieldId: string,
+  sortOrder: 'asc' | 'desc',
+): number {
+  const aVal = a.values[sortFieldId];
+  const bVal = b.values[sortFieldId];
+  const aEmpty = aVal === undefined || aVal === null || aVal === '';
+  const bEmpty = bVal === undefined || bVal === null || bVal === '';
+
+  if (aEmpty && bEmpty) {
+    return (a.manual_order ?? 0) - (b.manual_order ?? 0);
+  }
+  if (aEmpty) return sortOrder === 'asc' ? 1 : -1;
+  if (bEmpty) return sortOrder === 'asc' ? -1 : 1;
+
+  const cmp = String(aVal).localeCompare(String(bVal), undefined, { numeric: true });
+  if (cmp !== 0) return sortOrder === 'desc' ? -cmp : cmp;
+  return (a.manual_order ?? 0) - (b.manual_order ?? 0);
+}
+
+async function getItemsSortedByFieldSupabaseFallback(
+  collection_id: string,
+  sortFieldId: string,
+  sortOrder: 'asc' | 'desc',
+  is_published: boolean,
+  limit: number,
+  offset: number,
+  search?: string,
+  knownFieldTypes?: Record<string, string>,
+): Promise<{ items: CollectionItemWithValues[]; total: number }> {
+  const filters = search?.trim() ? { search: search.trim() } : undefined;
+  const { items: allItems, total } = await getItemsWithValues(
+    collection_id,
+    is_published,
+    filters,
+    knownFieldTypes,
+  );
+
+  const sorted = [...allItems].sort((a, b) =>
+    compareItemsByFieldValue(a, b, sortFieldId, sortOrder),
+  );
+
+  return { items: sorted.slice(offset, offset + limit), total };
+}
+
 /**
  * Sort + paginate items by a field value at the DB level using a LEFT JOIN.
  * Avoids fetching every item for the collection: only the requested page
  * is materialized with full values. Items with no value for the sort field
  * appear last (ASC) or first (DESC) so the relative ordering matches what
  * a client-side sort would produce.
+ *
+ * Falls back to Supabase + in-memory sort when the direct PG (Knex) path is
+ * unavailable (e.g. pooler circuit breaker), matching getValuesByItemIds.
  *
  * Pass `knownFieldTypes` to skip the extra `collection_fields` lookup when
  * the caller has already loaded the field schema.
@@ -682,67 +732,102 @@ export async function getItemsSortedByField(
   search?: string,
   knownFieldTypes?: Record<string, string>,
 ): Promise<{ items: CollectionItemWithValues[], total: number }> {
-  const knex = await getKnexClient();
-
-  const safeSortOrder = sortOrder === 'desc' ? 'DESC' : 'ASC';
-  const nullsPosition = safeSortOrder === 'ASC' ? 'NULLS LAST' : 'NULLS FIRST';
-
-  let searchItemIds: string[] | null = null;
-  if (search?.trim()) {
-    const searchTerm = `%${search.trim()}%`;
-    const matchRows = await knex('collection_item_values')
-      .distinct('item_id')
-      .where('is_published', is_published)
-      .whereNull('deleted_at')
-      .andWhereILike('value', searchTerm);
-
-    if (matchRows.length === 0) return { items: [], total: 0 };
-    searchItemIds = matchRows.map((r: { item_id: string }) => r.item_id);
+  if (!(await tenantHasCollectionAccess(collection_id))) {
+    return { items: [], total: 0 };
   }
 
-  let baseQuery = knex('collection_items as ci')
-    .leftJoin('collection_item_values as civ', function () {
-      this.on('civ.item_id', 'ci.id')
-        .andOn('civ.is_published', knex.raw('?', [is_published]))
-        .andOn('civ.field_id', knex.raw('?', [sortFieldId]))
-        .andOn(knex.raw('civ.deleted_at IS NULL'));
-    })
-    .where('ci.collection_id', collection_id)
-    .andWhere('ci.is_published', is_published)
-    .whereNull('ci.deleted_at');
+  const tenantId = await resolveEffectiveTenantId();
 
-  if (is_published) {
-    baseQuery = baseQuery.andWhere('ci.is_publishable', true);
+  try {
+    const knex = await getKnexClient();
+
+    const safeSortOrder = sortOrder === 'desc' ? 'DESC' : 'ASC';
+    const nullsPosition = safeSortOrder === 'ASC' ? 'NULLS LAST' : 'NULLS FIRST';
+
+    let searchItemIds: string[] | null = null;
+    if (search?.trim()) {
+      const searchTerm = `%${search.trim()}%`;
+      let searchQuery = knex('collection_item_values')
+        .distinct('item_id')
+        .where('is_published', is_published)
+        .whereNull('deleted_at')
+        .andWhereILike('value', searchTerm);
+
+      if (tenantId) {
+        searchQuery = searchQuery.andWhere('tenant_id', tenantId);
+      }
+
+      const matchRows = await searchQuery;
+
+      if (matchRows.length === 0) return { items: [], total: 0 };
+      searchItemIds = matchRows.map((r: { item_id: string }) => r.item_id);
+    }
+
+    let baseQuery = knex('collection_items as ci')
+      .leftJoin('collection_item_values as civ', function () {
+        this.on('civ.item_id', 'ci.id')
+          .andOn('civ.is_published', knex.raw('?', [is_published]))
+          .andOn('civ.field_id', knex.raw('?', [sortFieldId]))
+          .andOn(knex.raw('civ.deleted_at IS NULL'));
+        if (tenantId) {
+          this.andOn('civ.tenant_id', knex.raw('?', [tenantId]));
+        }
+      })
+      .where('ci.collection_id', collection_id)
+      .andWhere('ci.is_published', is_published)
+      .whereNull('ci.deleted_at');
+
+    if (tenantId) {
+      baseQuery = baseQuery.andWhere('ci.tenant_id', tenantId);
+    }
+    if (is_published) {
+      baseQuery = baseQuery.andWhere('ci.is_publishable', true);
+    }
+    if (searchItemIds) {
+      baseQuery = baseQuery.whereIn('ci.id', searchItemIds);
+    }
+
+    const [countResult, rows] = await Promise.all([
+      baseQuery.clone().count('ci.id as count').first(),
+      baseQuery.clone()
+        .select('ci.*')
+        .orderByRaw(`civ.value ${safeSortOrder} ${nullsPosition}`)
+        .orderBy('ci.manual_order', 'asc')
+        .limit(limit)
+        .offset(offset),
+    ]);
+
+    const total = Number(countResult?.count) || 0;
+
+    if (rows.length === 0) {
+      return { items: [], total };
+    }
+
+    const itemIds = rows.map((r: CollectionItem) => r.id);
+    const valuesByItem = await getValuesByItemIds(itemIds, is_published, knownFieldTypes);
+
+    const items: CollectionItemWithValues[] = rows.map((row: CollectionItem) => ({
+      ...row,
+      values: valuesByItem[row.id] || {},
+    }));
+
+    return { items, total };
+  } catch (error) {
+    console.warn(
+      '[getItemsSortedByField] Knex path failed, using Supabase fallback:',
+      error instanceof Error ? error.message : error,
+    );
+    return getItemsSortedByFieldSupabaseFallback(
+      collection_id,
+      sortFieldId,
+      sortOrder,
+      is_published,
+      limit,
+      offset,
+      search,
+      knownFieldTypes,
+    );
   }
-  if (searchItemIds) {
-    baseQuery = baseQuery.whereIn('ci.id', searchItemIds);
-  }
-
-  const [countResult, rows] = await Promise.all([
-    baseQuery.clone().count('ci.id as count').first(),
-    baseQuery.clone()
-      .select('ci.*')
-      .orderByRaw(`civ.value ${safeSortOrder} ${nullsPosition}`)
-      .orderBy('ci.manual_order', 'asc')
-      .limit(limit)
-      .offset(offset),
-  ]);
-
-  const total = Number(countResult?.count) || 0;
-
-  if (rows.length === 0) {
-    return { items: [], total };
-  }
-
-  const itemIds = rows.map((r: CollectionItem) => r.id);
-  const valuesByItem = await getValuesByItemIds(itemIds, is_published, knownFieldTypes);
-
-  const items: CollectionItemWithValues[] = rows.map((row: CollectionItem) => ({
-    ...row,
-    values: valuesByItem[row.id] || {},
-  }));
-
-  return { items, total };
 }
 
 /**

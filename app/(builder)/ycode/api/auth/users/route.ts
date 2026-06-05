@@ -7,6 +7,7 @@ import {
   authUserBelongsToTenant,
   filterAuthUsersForTenant,
 } from '@/lib/masjidweb/auth-users-tenant-scope';
+import { bootstrapTenantOwnerIfNeeded } from '@/lib/masjidweb/bootstrap-tenant-owner';
 
 /**
  * GET /ycode/api/auth/users
@@ -39,6 +40,16 @@ export async function GET(request: NextRequest) {
       return noCache({ error: error.message }, 500);
     }
 
+    const tenantUsers = filterAuthUsersForTenant(data.users, tenantId);
+    const callerBeforeBootstrap = await getCallerInfo();
+
+    await bootstrapTenantOwnerIfNeeded(
+      client,
+      tenantId,
+      callerBeforeBootstrap?.userId,
+      tenantUsers,
+    );
+
     const caller = await getCallerInfo();
 
     const activeUsers: Array<{
@@ -58,7 +69,7 @@ export async function GET(request: NextRequest) {
       invited_at: string;
     }> = [];
 
-    for (const user of filterAuthUsersForTenant(data.users, tenantId)) {
+    for (const user of tenantUsers) {
       const userAny = user as any;
       const appMetadata = user.app_metadata || userAny.raw_app_meta_data || {};
       const userMetadata = user.user_metadata || userAny.raw_user_meta_data || {};

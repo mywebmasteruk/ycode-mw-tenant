@@ -215,9 +215,14 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
       }));
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Failed to fetch layer data';
+      const requestedConfig = { collectionId, sortBy, sortOrder, limit, offset, filters };
+      // Record the attempted config so a failed fetch does not retry in a tight loop
+      // (e.g. when the API is down). invalidateLayerData clears layerConfig to retry.
       set((state) => ({
         error: { ...state.error, [layerId]: errorMessage },
         loading: { ...state.loading, [layerId]: false },
+        layerConfig: { ...state.layerConfig, [layerId]: requestedConfig },
+        layerData: { ...state.layerData, [layerId]: state.layerData[layerId] ?? [] },
       }));
       console.error(`[CollectionLayerStore] Error fetching data for layer ${layerId}:`, error);
     }

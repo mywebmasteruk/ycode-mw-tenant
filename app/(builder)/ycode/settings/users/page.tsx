@@ -25,6 +25,8 @@ import { getUserInitials, generateUserColor } from '@/lib/collaboration-utils';
 import { isSessionInvalidError } from '@/lib/masjidweb/session-error';
 import { useAuthStore } from '@/stores/useAuthStore';
 import { useRole } from '@/hooks/use-role';
+import { canManageMembers, resolveRole } from '@/lib/roles';
+import { createBrowserClient } from '@/lib/supabase-browser';
 
 interface ActiveUser {
   id: string;
@@ -46,11 +48,12 @@ interface PendingInvite {
 export default function UsersSettingsPage() {
   const router = useRouter();
   const currentUser = useAuthStore((state) => state.user);
-  const { canManageMembers, role: clientRole } = useRole();
+  const { canManageMembers: clientCanManageMembers, role: clientRole } = useRole();
 
   const [activeUsers, setActiveUsers] = useState<ActiveUser[]>([]);
   const [pendingInvites, setPendingInvites] = useState<PendingInvite[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [serverCanManageMembers, setServerCanManageMembers] = useState<boolean | null>(null);
 
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<string>('designer');
@@ -82,6 +85,14 @@ export default function UsersSettingsPage() {
       if (result.data) {
         setActiveUsers(result.data.activeUsers || []);
         setPendingInvites(result.data.pendingInvites || []);
+
+        const callerRole = resolveRole(result.data.callerRole);
+        setServerCanManageMembers(canManageMembers(callerRole));
+
+        if (callerRole !== resolveRole(clientRole)) {
+          const supabase = await createBrowserClient();
+          await supabase?.auth.refreshSession();
+        }
       }
     } catch (error) {
       console.error('Failed to fetch users:', error);
@@ -238,7 +249,7 @@ export default function UsersSettingsPage() {
     return formatDate(dateString);
   };
 
-  const canManage = canManageMembers;
+  const canManage = serverCanManageMembers ?? clientCanManageMembers;
 
   return (
     <div className="p-8">
