@@ -66,7 +66,7 @@ let loggedMissingAdminCreds = false;
  * Module-level variables get reset on each hot reload, which would
  * orphan any in-flight requests on the old client.
  */
-export async function getSupabaseAdmin(): Promise<SupabaseClient | null> {
+export async function getSupabaseAdmin(_tenantId?: string): Promise<SupabaseClient | null> {
   const creds = await getSupabaseCredentials();
 
   if (!creds) {

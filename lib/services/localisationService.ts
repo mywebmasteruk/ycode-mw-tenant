@@ -162,7 +162,7 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
     publishedLocalesQuery,
     // Single direct-DB read of the whole published catalogue instead of
     // paginated PostgREST round-trips.
-    getAllTranslationRows<Translation>(true, tenantId),
+    getAllTranslationRows<Translation>(true, ['*'], tenantId ?? undefined),
   ]);
 
   const existingPublishedLocales: Locale[] = existingPublishedLocalesRes.data || [];
@@ -294,7 +294,7 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
   // direct-DB read instead of paginated PostgREST round-trips.
   let allDraftTranslations: Translation[];
   try {
-    allDraftTranslations = await getAllTranslationRows<Translation>(false, tenantId);
+    allDraftTranslations = await getAllTranslationRows<Translation>(false, ['*'], tenantId ?? undefined);
   } catch (translationsError) {
     const message = translationsError instanceof Error ? translationsError.message : String(translationsError);
     throw new Error(`Failed to fetch draft translations: ${message}`);

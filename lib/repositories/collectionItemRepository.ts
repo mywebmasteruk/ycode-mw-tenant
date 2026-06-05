@@ -1,26 +1,14 @@
-<<<<<<< HEAD
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 import { tenantHasCollectionAccess } from '@/lib/masjidweb/tenant-query';
-import { getSupabaseAdmin } from '@/lib/supabase-server';
-||||||| 30cc6a3
-import { getSupabaseAdmin } from '@/lib/supabase-server';
-=======
 import { getSupabaseAdmin, getTenantIdFromHeaders } from '@/lib/supabase-server';
->>>>>>> upstream/main
 import { getKnexClient } from '@/lib/knex-client';
 import { SUPABASE_IN_FILTER_CHUNK_SIZE, SUPABASE_QUERY_LIMIT, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
 import type { CollectionField, CollectionItem, CollectionItemWithValues } from '@/types';
 import { randomUUID } from 'crypto';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
-<<<<<<< HEAD
 import { getCollectionById } from '@/lib/repositories/collectionRepository';
-import { getValuesByFieldId, getValuesByItemIds, getValuesByItemId } from '@/lib/repositories/collectionItemValueRepository';
-||||||| 30cc6a3
-import { getValuesByFieldId, getValuesByItemIds, getValuesByItemId } from '@/lib/repositories/collectionItemValueRepository';
-=======
 import { getValuesByFieldId, getValuesByItemIds, getValuesByItemId, getValueRowsForItems } from '@/lib/repositories/collectionItemValueRepository';
->>>>>>> upstream/main
 import { generateCollectionItemContentHash } from '@/lib/hash-utils';
 import { castValue } from '../collection-utils';
 import { findStatusFieldId, buildStatusValue } from '@/lib/collection-field-utils';
@@ -467,47 +455,15 @@ export async function getAllItemsByCollectionId(
   is_published: boolean = false,
   includeDeleted: boolean = false
 ): Promise<CollectionItem[]> {
-<<<<<<< HEAD
-  const client = await getSupabaseAdmin();
-
-  if (!client) {
-    throw new Error('Supabase client not configured');
-  }
-
   if (!(await tenantHasCollectionAccess(collection_id))) {
     return [];
   }
 
-  const tenantId = await resolveEffectiveTenantId();
-
-  const allItems: CollectionItem[] = [];
-  let offset = 0;
-  let hasMore = true;
-
-  while (hasMore) {
-    let query = client
-      .from('collection_items')
-||||||| 30cc6a3
-  const client = await getSupabaseAdmin();
-
-  if (!client) {
-    throw new Error('Supabase client not configured');
-  }
-
-  const allItems: CollectionItem[] = [];
-  let offset = 0;
-  let hasMore = true;
-
-  while (hasMore) {
-    let query = client
-      .from('collection_items')
-=======
   // Fast path: one direct-DB (Knex) query instead of paginated PostgREST reads.
   try {
     const knex = await getKnexClient();
     const resolvedTenantId = await getTenantIdFromHeaders();
     let query = knex('collection_items')
->>>>>>> upstream/main
       .select('*')
       .where('collection_id', collection_id)
       .andWhere('is_published', is_published)
@@ -531,6 +487,7 @@ export async function getAllItemsByCollectionId(
       throw new Error('Supabase client not configured');
     }
 
+    const effectiveTenantId = await resolveEffectiveTenantId();
     const allItems: CollectionItem[] = [];
     let offset = 0;
     let hasMore = true;
@@ -556,6 +513,8 @@ export async function getAllItemsByCollectionId(
         query = query.is('deleted_at', null);
       }
 
+      query = applyTenantEq(query, effectiveTenantId);
+
       const { data, error } = await query;
 
       if (error) {
@@ -571,39 +530,7 @@ export async function getAllItemsByCollectionId(
       }
     }
 
-<<<<<<< HEAD
-    query = applyTenantEq(query, tenantId);
-
-    const { data, error } = await query;
-
-    if (error) {
-      throw new Error(`Failed to fetch collection items: ${error.message}`);
-    }
-
-    if (data && data.length > 0) {
-      allItems.push(...data);
-      offset += data.length;
-      hasMore = data.length === SUPABASE_QUERY_LIMIT;
-    } else {
-      hasMore = false;
-    }
-||||||| 30cc6a3
-    const { data, error } = await query;
-
-    if (error) {
-      throw new Error(`Failed to fetch collection items: ${error.message}`);
-    }
-
-    if (data && data.length > 0) {
-      allItems.push(...data);
-      offset += data.length;
-      hasMore = data.length === SUPABASE_QUERY_LIMIT;
-    } else {
-      hasMore = false;
-    }
-=======
     return allItems;
->>>>>>> upstream/main
   }
 }
 
@@ -649,37 +576,6 @@ export async function getItemsByIds(ids: string[], isPublished: boolean = false,
     return [];
   }
 
-<<<<<<< HEAD
-  const client = await getSupabaseAdmin();
-
-  if (!client) {
-    throw new Error('Supabase client not configured');
-  }
-
-  const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
-
-  const allItems: CollectionItem[] = [];
-
-  for (let i = 0; i < ids.length; i += SUPABASE_WRITE_BATCH_SIZE) {
-    const batchIds = ids.slice(i, i + SUPABASE_WRITE_BATCH_SIZE);
-
-    let idsQ = client
-      .from('collection_items')
-||||||| 30cc6a3
-  const client = await getSupabaseAdmin(tenantId);
-
-  if (!client) {
-    throw new Error('Supabase client not configured');
-  }
-
-  const allItems: CollectionItem[] = [];
-
-  for (let i = 0; i < ids.length; i += SUPABASE_WRITE_BATCH_SIZE) {
-    const batchIds = ids.slice(i, i + SUPABASE_WRITE_BATCH_SIZE);
-
-    const { data, error } = await client
-      .from('collection_items')
-=======
   // Fast path: one direct-DB (Knex) query instead of chunked PostgREST `.in()`
   // reads (100 IDs/round-trip). On large collections this collapses ~16
   // round-trips per call into one — the dominant cost of publishing.
@@ -687,27 +583,7 @@ export async function getItemsByIds(ids: string[], isPublished: boolean = false,
     const knex = await getKnexClient();
     const resolvedTenantId = tenantId ?? await getTenantIdFromHeaders();
     let query = knex('collection_items')
->>>>>>> upstream/main
       .select('*')
-<<<<<<< HEAD
-      .in('id', batchIds)
-      .eq('is_published', isPublished)
-      .is('deleted_at', null);
-
-    idsQ = applyTenantEq(idsQ, effectiveTenantId);
-
-    const { data, error } = await idsQ;
-
-    if (error) {
-      throw new Error(`Failed to fetch collection items: ${error.message}`);
-||||||| 30cc6a3
-      .in('id', batchIds)
-      .eq('is_published', isPublished)
-      .is('deleted_at', null);
-
-    if (error) {
-      throw new Error(`Failed to fetch collection items: ${error.message}`);
-=======
       .whereIn('id', ids)
       .andWhere('is_published', isPublished)
       .whereNull('deleted_at');
@@ -720,18 +596,22 @@ export async function getItemsByIds(ids: string[], isPublished: boolean = false,
     const client = await getSupabaseAdmin(tenantId);
     if (!client) {
       throw new Error('Supabase client not configured');
->>>>>>> upstream/main
     }
 
+    const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
     const allItems: CollectionItem[] = [];
     for (let i = 0; i < ids.length; i += SUPABASE_WRITE_BATCH_SIZE) {
       const batchIds = ids.slice(i, i + SUPABASE_WRITE_BATCH_SIZE);
-      const { data, error } = await client
+      let idsQ = client
         .from('collection_items')
         .select('*')
         .in('id', batchIds)
         .eq('is_published', isPublished)
         .is('deleted_at', null);
+
+      idsQ = applyTenantEq(idsQ, effectiveTenantId);
+
+      const { data, error } = await idsQ;
 
       if (error) {
         throw new Error(`Failed to fetch collection items: ${error.message}`);
@@ -1831,14 +1711,8 @@ export async function getTotalPublishableItemsCount(): Promise<number> {
 
   // For items with matching metadata, check value changes
   if (matchingOrderItemIds.length > 0) {
-<<<<<<< HEAD
-    count += await countItemsWithValueChanges(client, matchingOrderItemIds, tenantId);
-||||||| 30cc6a3
-    count += await countItemsWithValueChanges(client, matchingOrderItemIds);
-=======
     const valueChanges = await countItemsWithValueChanges(matchingOrderItemIds);
     count += valueChanges;
->>>>>>> upstream/main
   }
 
   return count;
@@ -1849,68 +1723,12 @@ export async function getTotalPublishableItemsCount(): Promise<number> {
  * the direct-DB (Knex) path in two queries rather than paginated PostgREST
  * batches of 50 items.
  */
-<<<<<<< HEAD
-async function countItemsWithValueChanges(
-  client: Exclude<Awaited<ReturnType<typeof getSupabaseAdmin>>, null>,
-  itemIds: string[],
-  tenantId: string | null
-): Promise<number> {
-  const BATCH_SIZE = 50;
-  let changedCount = 0;
-||||||| 30cc6a3
-async function countItemsWithValueChanges(
-  client: Exclude<Awaited<ReturnType<typeof getSupabaseAdmin>>, null>,
-  itemIds: string[]
-): Promise<number> {
-  const BATCH_SIZE = 50;
-  let changedCount = 0;
-=======
 async function countItemsWithValueChanges(itemIds: string[]): Promise<number> {
   if (itemIds.length === 0) return 0;
->>>>>>> upstream/main
 
   let draftValueRows: Awaited<ReturnType<typeof getValueRowsForItems>> = [];
   let publishedValueRows: Awaited<ReturnType<typeof getValueRowsForItems>> = [];
 
-<<<<<<< HEAD
-    let dVals = client
-      .from('collection_item_values')
-      .select('item_id, field_id, value')
-      .in('item_id', batchIds)
-      .eq('is_published', false)
-      .is('deleted_at', null)
-      .limit(SUPABASE_QUERY_LIMIT);
-
-    let pVals = client
-      .from('collection_item_values')
-      .select('item_id, field_id, value')
-      .in('item_id', batchIds)
-      .eq('is_published', true)
-      .is('deleted_at', null)
-      .limit(SUPABASE_QUERY_LIMIT);
-
-    dVals = applyTenantEq(dVals, tenantId);
-    pVals = applyTenantEq(pVals, tenantId);
-
-    const [draftValsResult, pubValsResult] = await Promise.all([dVals, pVals]);
-||||||| 30cc6a3
-    const [draftValsResult, pubValsResult] = await Promise.all([
-      client
-        .from('collection_item_values')
-        .select('item_id, field_id, value')
-        .in('item_id', batchIds)
-        .eq('is_published', false)
-        .is('deleted_at', null)
-        .limit(SUPABASE_QUERY_LIMIT),
-      client
-        .from('collection_item_values')
-        .select('item_id, field_id, value')
-        .in('item_id', batchIds)
-        .eq('is_published', true)
-        .is('deleted_at', null)
-        .limit(SUPABASE_QUERY_LIMIT),
-    ]);
-=======
   try {
     [draftValueRows, publishedValueRows] = await Promise.all([
       getValueRowsForItems(itemIds, false),
@@ -1919,7 +1737,6 @@ async function countItemsWithValueChanges(itemIds: string[]): Promise<number> {
   } catch {
     return 0; // Treat read failure as "no detectable changes" for the count
   }
->>>>>>> upstream/main
 
   const groupByItem = (
     rows: Array<{ item_id: string; field_id: string; value: string | null }>,

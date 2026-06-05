@@ -13,15 +13,9 @@ import {
   generatePageLayersHash,
   generateComponentContentHash,
 } from '../hash-utils';
-<<<<<<< HEAD
-import { updateLayersWithStyle } from '@/lib/layer-style-utils';
+import { updateLayersWithStyle, detachStyleFromLayers, getStyleIds } from '@/lib/layer-style-utils';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
-||||||| 30cc6a3
-import { updateLayersWithStyle } from '@/lib/layer-style-utils';
-=======
-import { updateLayersWithStyle, detachStyleFromLayers, getStyleIds } from '@/lib/layer-style-utils';
->>>>>>> upstream/main
 
 /**
  * Input data for creating a new layer style
