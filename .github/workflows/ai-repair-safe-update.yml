@@ -94,6 +94,14 @@ jobs:
           AI_REPAIR_MAX_LLM_FILES: ${{ inputs.max_llm_files }}
         run: npx --yes tsx scripts/ai-repair-safe-update.ts
 
+      - name: Critical-exports completeness check
+        run: |
+          # Write the list of files changed by the repair so the script only
+          # checks files that were actually touched.
+          git diff --name-only > /tmp/repair-changed-files.txt || true
+          git diff --cached --name-only >> /tmp/repair-changed-files.txt || true
+          bash scripts/check-repair-completeness.sh --changed-files /tmp/repair-changed-files.txt
+
       - name: Commit and push repairs
         id: push
         run: |

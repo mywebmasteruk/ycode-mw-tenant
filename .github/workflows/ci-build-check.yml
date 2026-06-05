@@ -42,6 +42,8 @@ jobs:
             lib/masjidweb/update-safety-check.test.ts \
             lib/masjidweb/tenant-or-legacy-scope.test.ts \
             lib/masjidweb/tenant-session-alignment.test.ts \
+            lib/masjidweb/bootstrap-tenant-owner.test.ts \
+            lib/masjidweb/provisioned-tenant-rbac.test.ts \
             lib/repositories/apiKeyRepository.test.ts \
             lib/repositories/formSubmissionRepository.test.ts \
             lib/repositories/mcpTokenRepository.test.ts \
