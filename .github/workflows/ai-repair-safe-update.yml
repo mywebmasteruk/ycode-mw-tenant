@@ -118,9 +118,17 @@ jobs:
         if: steps.push.outputs.changed == 'true'
         run: npm install --no-audit --no-fund --legacy-peer-deps
 
+      - name: Tenant safety tests
+        id: safety_tests
+        if: steps.push.outputs.changed == 'true'
+        run: >-
+          npx vitest run
+          lib/masjidweb/bootstrap-tenant-owner.test.ts
+          lib/masjidweb/provisioned-tenant-rbac.test.ts
+
       - name: Verify production build
         id: build
-        if: steps.push.outputs.changed == 'true'
+        if: steps.push.outputs.changed == 'true' && steps.safety_tests.outcome == 'success'
         run: npm run build
 
       - name: Re-run update safety check
@@ -131,7 +139,10 @@ jobs:
         run: npm run updates:safety-check
 
       - name: Mark PR ready after successful repair
-        if: steps.push.outputs.changed == 'true' && steps.build.outcome == 'success'
+        if: >-
+          steps.push.outputs.changed == 'true'
+          && steps.safety_tests.outcome == 'success'
+          && steps.build.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh pr ready "${{ inputs.pr_number }}" --repo "$GITHUB_REPOSITORY"
@@ -144,15 +155,23 @@ jobs:
             const prNumber = Number.parseInt('${{ inputs.pr_number }}', 10);
             const repairOutcome = '${{ steps.repair.outcome }}';
             const pushChanged = '${{ steps.push.outputs.changed }}' === 'true';
+            const safetyOutcome = '${{ steps.safety_tests.outcome }}' || 'skipped';
             const buildOutcome = '${{ steps.build.outcome }}' || 'skipped';
             let body = '### MasjidWeb AI repair\n\n';
             if (repairOutcome === 'failure') {
               body += 'AI repair **failed**. Check the workflow logs for OpenRouter or conflict resolution errors.\n';
             } else if (!pushChanged) {
               body += 'AI repair found **no committable changes** (no conflict markers or already clean).\n';
+            } else if (safetyOutcome === 'failure') {
+              body += 'AI repair **pushed** conflict resolutions, but **tenant safety tests failed** in this workflow.\n';
+              body += 'Do **not** merge until failures are fixed and the normal PR checks finish green.\n';
+            } else if (buildOutcome === 'failure') {
+              body += 'AI repair **pushed** conflict resolutions, but the **production build failed** in this workflow.\n';
+              body += 'Do **not** merge until the build is fixed and the normal PR checks finish green.\n';
             } else {
               body += 'AI repair **committed and pushed** conflict resolutions to this branch.\n';
-              body += 'Refresh the admin dashboard status after CI finishes.\n';
+              body += 'This workflow passed local tenant safety tests and a production build, but **wait for the normal PR CI checks to finish green** before approving merge.\n';
+              body += 'Refresh the admin dashboard status after PR CI completes.\n';
             }
             body += `\nWorkflow run: ${context.payload.repository.html_url}/actions/runs/${context.runId}`;
             await github.rest.issues.createComment({

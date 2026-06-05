@@ -11,6 +11,7 @@ import {
   startNotificationCleanup,
   stopNotificationCleanup,
 } from '@/stores/useCollaborationPresenceStore';
+import { isStandaloneYcodeRoute } from '@/lib/masjidweb/ycode-standalone-routes';
 
 /**
  * YCode Editor Layout (Client Component)
@@ -40,16 +41,6 @@ interface YCodeLayoutClientProps {
   children: React.ReactNode;
   isTemplateTenant: boolean;
 }
-
-// MASJIDWEB_SEAM: standalone-route-exclusion — see docs/masjidweb-core-seams.md#tier-5
-const prefixRoutes = ['/ycode/preview', '/ycode/devtools/', '/ycode/oauth/'];
-const exactRoutes = ['/ycode/welcome', '/ycode/accept-invite'];
-
-function isStandaloneYcodeRoute(pathname: string): boolean {
-  return prefixRoutes.some(route => pathname.startsWith(route))
-    || exactRoutes.includes(pathname);
-}
-// MASJIDWEB_SEAM_END
 
 // Inner component that uses useSearchParams (via useEditorUrl)
 function YCodeEditorLayout({ children, isTemplateTenant }: YCodeLayoutClientProps) {
