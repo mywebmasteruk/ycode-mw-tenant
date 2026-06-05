@@ -37,6 +37,10 @@ const PUBLIC_API_EXACT = [
   '/ycode/api/health',
   '/ycode/api/auth/session',
   '/ycode/api/auth/callback',
+  // OAuth DCR and token exchange: called by unauthenticated MCP clients.
+  // /authorize is intentionally excluded — it requires a user session.
+  '/ycode/api/oauth/register',
+  '/ycode/api/oauth/token',
 ];
 
 /**

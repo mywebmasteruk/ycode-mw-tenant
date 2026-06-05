@@ -113,6 +113,18 @@ describe('isPublicApiRoute', () => {
     expect(isPublicApiRoute('/ycode/api/publish', 'POST')).toBe(false);
     expect(isPublicApiRoute('/ycode/api/collections', 'GET')).toBe(false);
   });
+
+  it('allows OAuth DCR register (called by unauthenticated MCP clients)', () => {
+    expect(isPublicApiRoute('/ycode/api/oauth/register', 'POST')).toBe(true);
+  });
+
+  it('allows OAuth token exchange (called by unauthenticated MCP clients)', () => {
+    expect(isPublicApiRoute('/ycode/api/oauth/token', 'POST')).toBe(true);
+  });
+
+  it('keeps OAuth authorize protected (requires user session)', () => {
+    expect(isPublicApiRoute('/ycode/api/oauth/authorize', 'POST')).toBe(false);
+  });
 });
 
 describe('isPublicPage', () => {
