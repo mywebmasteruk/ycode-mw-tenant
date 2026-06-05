@@ -13,6 +13,11 @@ import {
   stripCodeFences,
 } from '../lib/masjidweb/openrouter-repair';
 import {
+  reapplyTier2Seams,
+  TIER2_SEAM_FILES,
+  type Tier2SeamFile,
+} from '../lib/masjidweb/reapply-tier2-seams';
+import {
   classifyConflictFile,
   isLlmHighRiskPath,
   summarizeConflictFiles,
@@ -368,19 +373,64 @@ function writeStepSummary(lines: string[]): void {
   writeFileSync(summaryPath, `${lines.join('\n')}\n`, { flag: 'a' });
 }
 
-async function main(): Promise<void> {
-  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
-  if (!apiKey) {
-    throw new Error(
-      'OPENROUTER_API_KEY is not set. Add it as a GitHub Actions secret on this repository.',
-    );
+function isKnownTier2SeamFile(filePath: string): filePath is Tier2SeamFile {
+  return (TIER2_SEAM_FILES as readonly string[]).includes(filePath);
+}
+
+function fileNeedsLlm(
+  filePath: string,
+  mechanicalOnly: boolean,
+  skipTier2Llm: boolean,
+): boolean {
+  const tier = classifyConflictFile(filePath);
+  if (tier === 'lockfile' || tier === 'fork-only') {
+    return false;
   }
-  if (!apiKey.startsWith('sk-or-') && !apiKey.startsWith('sk-')) {
-    throw new Error(
-      'OPENROUTER_API_KEY looks invalid. Set a real OpenRouter key (sk-or-…) as a GitHub Actions secret on this repository.',
-    );
+  if (mechanicalOnly) {
+    return false;
+  }
+  if (tier === 'tier2-repository' && skipTier2Llm) {
+    return false;
+  }
+  return true;
+}
+
+function runMechanicalTier2Reapply(
+  files: string[],
+  skipTier2Llm: boolean,
+): Set<string> {
+  const reapplied = new Set<string>();
+  if (!skipTier2Llm) {
+    return reapplied;
   }
 
+  const targets = files.filter(
+    (file) =>
+      classifyConflictFile(file) === 'tier2-repository' && isKnownTier2SeamFile(file),
+  );
+  if (targets.length === 0) {
+    return reapplied;
+  }
+
+  console.log(
+    `Mechanical tier-2 seam re-apply for ${targets.length} repository file(s)…`,
+  );
+  reapplyTier2Seams({
+    repoRoot: REPO_ROOT,
+    files: targets as Tier2SeamFile[],
+    oursRef: 'main',
+    theirsRef: 'upstream/main',
+  });
+
+  for (const file of targets) {
+    run(`git add -- "${file}"`);
+    reapplied.add(file);
+  }
+
+  return reapplied;
+}
+
+async function main(): Promise<void> {
   const mechanicalOnly = parseBool(process.env.AI_REPAIR_MECHANICAL_ONLY);
   const skipTier2Llm =
     mechanicalOnly || parseBoolDefault(process.env.AI_REPAIR_SKIP_TIER2_LLM, true);
@@ -399,6 +449,28 @@ async function main(): Promise<void> {
   if (files.length === 0) {
     console.log('No conflicted files found — nothing to repair.');
     return;
+  }
+
+  const tier2Reapplied = runMechanicalTier2Reapply(files, skipTier2Llm);
+
+  const needsLlm = files.some((file) =>
+    !tier2Reapplied.has(file) && fileNeedsLlm(file, mechanicalOnly, skipTier2Llm),
+  );
+
+  const apiKey = process.env.OPENROUTER_API_KEY?.trim();
+  if (needsLlm) {
+    if (!apiKey) {
+      throw new Error(
+        'OPENROUTER_API_KEY is not set. Add it as a GitHub Actions secret on this repository.',
+      );
+    }
+    if (!apiKey.startsWith('sk-or-') && !apiKey.startsWith('sk-')) {
+      throw new Error(
+        'OPENROUTER_API_KEY looks invalid. Set a real OpenRouter key (sk-or-…) as a GitHub Actions secret on this repository.',
+      );
+    }
+  } else {
+    console.log('No LLM repair needed for this run (mechanical tier-2 / lockfile only).');
   }
 
   const initialSummary = summarizeConflictFiles(files);
@@ -427,6 +499,11 @@ async function main(): Promise<void> {
   let llmCalls = 0;
 
   for (const file of [...files]) {
+    if (tier2Reapplied.has(file)) {
+      console.log(`Skip ${file} (tier-2 mechanical seam re-apply done)`);
+      continue;
+    }
+
     const tier = classifyConflictFile(file);
 
     if (tier === 'lockfile') {
@@ -452,9 +529,13 @@ async function main(): Promise<void> {
     }
 
     if (tier === 'tier2-repository' && skipTier2Llm) {
-      console.log(`Defer ${file} (Tier-2 repository — fix with seam re-apply in IDE, not Opus)`);
+      console.log(`Defer ${file} (unknown Tier-2 path — add to TIER2_SEAM_FILES or resolve manually)`);
       deferred.push(file);
       continue;
+    }
+
+    if (!apiKey) {
+      throw new Error(`LLM repair required for ${file} but OPENROUTER_API_KEY is missing`);
     }
 
     if (llmCalls >= maxLlmFiles) {
