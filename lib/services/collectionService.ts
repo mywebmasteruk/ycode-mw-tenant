@@ -381,35 +381,19 @@ async function publishAllFields(
     throw new Error('Supabase not configured');
   }
 
-<<<<<<< HEAD
   // Include tenant_id / tenant_slug so their published field rows exist (required to publish item values that reference them).
-  const draftFields = await getFieldsByCollectionId(collectionId, false, {
+  const draftFields = prefetched?.draftFields ?? await getFieldsByCollectionId(collectionId, false, {
     includeSystemFields: true,
   });
-||||||| 30cc6a3
-  // Get all draft fields
-  const draftFields = await getFieldsByCollectionId(collectionId, false);
-=======
-  // Get all draft fields (use bulk-fetched copy when available)
-  const draftFields = prefetched?.draftFields ?? await getFieldsByCollectionId(collectionId, false);
->>>>>>> upstream/main
 
   if (draftFields.length === 0) {
     return 0;
   }
 
-<<<<<<< HEAD
   // Get published fields for comparison
-  const publishedFields = await getFieldsByCollectionId(collectionId, true, {
+  const publishedFields = prefetched?.publishedFields ?? await getFieldsByCollectionId(collectionId, true, {
     includeSystemFields: true,
   });
-||||||| 30cc6a3
-  // Get published fields for comparison
-  const publishedFields = await getFieldsByCollectionId(collectionId, true);
-=======
-  // Get published fields for comparison (use bulk-fetched copy when available)
-  const publishedFields = prefetched?.publishedFields ?? await getFieldsByCollectionId(collectionId, true);
->>>>>>> upstream/main
   const publishedById = new Map(publishedFields.map(f => [f.id, f]));
 
   const tenantId = await resolveEffectiveTenantId();
@@ -682,50 +666,8 @@ async function publishItemValuesBatch(
     return 0;
   }
 
-<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
 
-  // Batch fetch all draft values
-  const allDraftValues = await Promise.all(
-    itemIds.map(itemId => getValuesByItemId(itemId, false))
-  );
-  const draftValues = allDraftValues.flat();
-
-  if (draftValues.length === 0) {
-    return 0;
-  }
-
-  // Batch fetch all published values for comparison
-  const allPublishedValues = await Promise.all(
-    itemIds.map(itemId => getValuesByItemId(itemId, true))
-  );
-  const publishedById = new Map(
-    allPublishedValues.flat().map(v => [v.id, v.value])
-  );
-
-  // Only upsert values that are new or changed
-||||||| 30cc6a3
-  // Batch fetch all draft values
-  const allDraftValues = await Promise.all(
-    itemIds.map(itemId => getValuesByItemId(itemId, false))
-  );
-  const draftValues = allDraftValues.flat();
-
-  if (draftValues.length === 0) {
-    return 0;
-  }
-
-  // Batch fetch all published values for comparison
-  const allPublishedValues = await Promise.all(
-    itemIds.map(itemId => getValuesByItemId(itemId, true))
-  );
-  const publishedById = new Map(
-    allPublishedValues.flat().map(v => [v.id, v.value])
-  );
-
-  // Only upsert values that are new or changed
-=======
->>>>>>> upstream/main
   const now = new Date().toISOString();
 
   // Reuse the caller's value sets when provided, otherwise fetch every draft and
