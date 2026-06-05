@@ -12,17 +12,20 @@ import {
   warmRoutes,
   getAllPublishedRoutes,
   invalidateForLocalisationChanges,
+  invalidatePages,
+  getRoutePathsForDeletedCollectionItems,
 } from '@/lib/services/cacheService';
 import {
   resolveEffectiveTenantId,
   runWithEffectiveTenantId,
 } from '@/lib/masjidweb/effective-tenant-id';
 import { findAffectedPages } from '@/lib/repositories/pageLayersRepository';
-import { getAllDraftPages, hardDeleteSoftDeletedPages } from '@/lib/repositories/pageRepository';
+import { dispatchSitePublishedEvent } from '@/lib/services/webhookService';
+import { getAllDraftPages, hardDeleteSoftDeletedPages, backfillMissingPageHashes, getSoftDeletedPageIds } from '@/lib/repositories/pageRepository';
 import { publishComponents, getUnpublishedComponents, hardDeleteSoftDeletedComponents } from '@/lib/repositories/componentRepository';
 import { publishLayerStyles, getUnpublishedLayerStyles, hardDeleteSoftDeletedLayerStyles } from '@/lib/repositories/layerStyleRepository';
 import { getAllCollections } from '@/lib/repositories/collectionRepository';
-import { getItemsByCollectionId } from '@/lib/repositories/collectionItemRepository';
+import { getAllItemsByCollectionId } from '@/lib/repositories/collectionItemRepository';
 import { publishAssets, getUnpublishedAssets, hardDeleteSoftDeletedAssets } from '@/lib/repositories/assetRepository';
 import { publishAssetFolders, getUnpublishedAssetFolders, hardDeleteSoftDeletedAssetFolders } from '@/lib/repositories/assetFolderRepository';
 import { publishFonts } from '@/lib/repositories/fontRepository';
@@ -164,7 +167,18 @@ export async function POST(request: NextRequest) {
       const changedLayerStyleIds: string[] = [];
       const deletedCollectionItemSlugs: Map<string, string[]> = new Map();
       const renamedPageOldRoutes: string[] = [];
+      const unpublishedPageRoutes: string[] = [];
       let localisationResult: PublishLocalisationResult | null = null;
+
+      // Backfill any missing content_hash values before publish so change
+      // detection and the upsert-only-when-changed paths see consistent hashes
+      // on both draft and published rows (legacy migrations and templates
+      // insert rows without computing hashes).
+      try {
+        await backfillMissingPageHashes();
+      } catch (error) {
+        console.error('[publish] Failed to backfill page hashes:', error);
+      }
 
       // Publish folders first (pages depend on them)
       {
@@ -184,6 +198,7 @@ export async function POST(request: NextRequest) {
           const pagesResult = await publishPages(pageIds);
           publishedPageIds.push(...pagesResult.changedPageIds);
           renamedPageOldRoutes.push(...pagesResult.renamedPageOldRoutes);
+          unpublishedPageRoutes.push(...pagesResult.unpublishedPageRoutes);
           result.changes.pages = pagesResult.count;
           stats.tables.pages.added = pagesResult.count;
           stats.tables.pages.durationMs = pagesResult.timing.pagesDurationMs;
@@ -196,6 +211,7 @@ export async function POST(request: NextRequest) {
             const pagesResult = await publishPages(allPageIds);
             publishedPageIds.push(...pagesResult.changedPageIds);
             renamedPageOldRoutes.push(...pagesResult.renamedPageOldRoutes);
+            unpublishedPageRoutes.push(...pagesResult.unpublishedPageRoutes);
             result.changes.pages = pagesResult.count;
             stats.tables.pages.added = pagesResult.count;
             stats.tables.pages.durationMs = pagesResult.timing.pagesDurationMs;
@@ -221,7 +237,7 @@ export async function POST(request: NextRequest) {
 
           if (collectionIds && collectionIds.length > 0) {
             for (const collectionId of collectionIds) {
-              const { items } = await getItemsByCollectionId(collectionId, false);
+              const items = await getAllItemsByCollectionId(collectionId, false);
               collectionPublishes.push({
                 collectionId,
                 itemIds: items.map((item: any) => item.id),
@@ -282,11 +298,14 @@ export async function POST(request: NextRequest) {
           const allCollections = await getAllCollections({ is_published: false });
 
           for (const collection of allCollections) {
-            const { items } = await getItemsByCollectionId(collection.id, false);
+            const items = await getAllItemsByCollectionId(collection.id, false);
             const publishResult = await publishCollectionWithItems({
               collectionId: collection.id,
               itemIds: items.map((item: any) => item.id),
             });
+            if (!publishResult.success) {
+              console.error(`[Publish] collection ${collection.id} (${collection.name}) FAILED (${items.length} items):`, publishResult.errors);
+            }
             const p = publishResult.published;
             const changedItems = p?.itemsCount || 0;
             const changedValues = p?.valuesCount || 0;
@@ -413,7 +432,6 @@ export async function POST(request: NextRequest) {
         // Resolve routes of soft-deleted pages before deletion so caches can be purged
         try {
           const { getRoutePathsForPages } = await import('@/lib/services/cacheService');
-          const { getSoftDeletedPageIds } = await import('@/lib/repositories/pageRepository');
           const pendingDeleteIds = await getSoftDeletedPageIds();
           if (pendingDeleteIds.length > 0) {
             const routes = await getRoutePathsForPages(pendingDeleteIds);
@@ -529,7 +547,7 @@ export async function POST(request: NextRequest) {
           result.changes.css = await publishCSS();
           stats.tables.css.added = result.changes.css ? 1 : 0;
         } catch {
-          // Silently handle - non-fatal
+          // Don't fail the entire publish if CSS fails
         }
         stats.tables.css.durationMs = Math.round(performance.now() - stepStart);
       }
@@ -607,14 +625,23 @@ export async function POST(request: NextRequest) {
         // components/styles. The builder only regenerates CSS for pages open
         // in memory — pages not loaded keep stale generated_css/content_hash.
         // This ensures batchPublishPageLayers detects the real hash change.
-        if (!globalChanged && cssAffectedPageIds.length > 0) {
+        //
+        // Runs regardless of globalChanged: this is a data-publish step (it
+        // pushes style-sync-rewritten draft layers to the published version),
+        // not a cache operation. Skipping it when a global resource changed
+        // would leave those pages' published layers stale.
+        if (cssAffectedPageIds.length > 0) {
           try {
             const { generateCSSForPages } = await import('@/lib/server/cssGenerator');
             await generateCSSForPages(cssAffectedPageIds);
 
-            // Re-publish layers for these pages so published version has fresh CSS
+            // Re-publish layers for these pages so published version has fresh CSS.
+            // force=true: the draft layers' JSONB still references the changed
+            // component/style by ID, so content_hash is unchanged even though
+            // the resolved/rendered output differs. Without force, downstream
+            // consumers (static export, GitHub writer) see stale data.
             const { batchPublishPageLayers } = await import('@/lib/repositories/pageLayersRepository');
-            const relayerResult = await batchPublishPageLayers(cssAffectedPageIds);
+            const relayerResult = await batchPublishPageLayers(cssAffectedPageIds, { force: true });
             if (relayerResult.changedPageIds.length > 0) {
               publishedPageIds.push(...relayerResult.changedPageIds);
               console.log(`[Cache] CSS catch-up: republished ${relayerResult.changedPageIds.length} page layer(s)`);
@@ -684,8 +711,6 @@ export async function POST(request: NextRequest) {
 
         // Invalidate routes of deleted/renamed pages and deleted CMS items
         if (invalidationResult.strategy !== 'full') {
-          const { invalidatePages, getRoutePathsForDeletedCollectionItems } = await import('@/lib/services/cacheService');
-
           // Deleted page routes (resolved before DB deletion)
           if (deletedPageRoutes.length > 0) {
             await invalidatePages(deletedPageRoutes);
@@ -697,6 +722,13 @@ export async function POST(request: NextRequest) {
             await invalidatePages(renamedPageOldRoutes);
             invalidationResult.invalidatedRoutes.push(...renamedPageOldRoutes);
             console.log(`[Cache] invalidated ${renamedPageOldRoutes.length} renamed page old route(s)`);
+          }
+
+          // Routes of pages removed from the live site (set to draft)
+          if (unpublishedPageRoutes.length > 0) {
+            await invalidatePages(unpublishedPageRoutes);
+            invalidationResult.invalidatedRoutes.push(...unpublishedPageRoutes);
+            console.log(`[Cache] invalidated ${unpublishedPageRoutes.length} unpublished page route(s)`);
           }
 
           // Deleted CMS item routes (old slugs that should no longer exist)
@@ -756,6 +788,20 @@ export async function POST(request: NextRequest) {
             value: null,
           } as Setting;
         }
+      }
+
+      // Dispatch the site.published webhook event. The dispatcher is the only
+      // path that delivers to user-configured webhooks for this event type
+      // (advertised in the Integrations → Webhooks UI), so without this call
+      // any "Site Published" subscription silently never fires. Wrapped so
+      // webhook failures never block the publish response.
+      try {
+        await dispatchSitePublishedEvent({
+          pages_count: result.changes.pages,
+          collections_count: result.changes.collectionItems,
+        });
+      } catch {
+        // Silently handle — webhook failures must not break a successful publish
       }
 
       // Calculate total duration

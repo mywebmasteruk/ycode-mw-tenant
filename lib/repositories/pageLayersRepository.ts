@@ -171,11 +171,17 @@ export async function getPublishedLayers(pageId: string): Promise<PageLayers | n
  * @param pageId - Page ID
  * @param layers - Page layers
  * @param additionalData - Optional additional fields (e.g., metadata)
+ * @param existingDraft - Optional pre-fetched draft to skip the internal
+ *   `getDraftLayers` read. Callers that already have the row (e.g. the MCP
+ *   page-layers cache) can pass it through to avoid a redundant DB round trip.
+ *   Pass `null` to assert "no draft exists" without re-checking. Omit (or
+ *   pass `undefined`) to preserve the original fetch-then-decide behavior.
  */
 export async function upsertDraftLayers(
   pageId: string,
   layers: Layer[],
-  additionalData?: Record<string, any>
+  additionalData?: Record<string, any>,
+  existingDraft?: PageLayers | null,
 ): Promise<PageLayers> {
   const client = await getSupabaseAdmin();
 
@@ -185,12 +191,14 @@ export async function upsertDraftLayers(
 
   const tenantId = await resolveEffectiveTenantId();
 
-  // Check if draft exists
-  const existingDraft = await getDraftLayers(pageId);
+  // Use the caller-provided draft when available, otherwise fall back to a fresh read.
+  const resolvedDraft = existingDraft !== undefined
+    ? existingDraft
+    : await getDraftLayers(pageId);
 
   // Detect removed and changed layer content, update translations accordingly
-  if (existingDraft && existingDraft.layers) {
-    const oldContentMap = extractLayerContentMap(existingDraft.layers, 'page', pageId);
+  if (resolvedDraft && resolvedDraft.layers) {
+    const oldContentMap = extractLayerContentMap(resolvedDraft.layers, 'page', pageId);
     const newContentMap = extractLayerContentMap(layers, 'page', pageId);
 
     // Find removed keys (exist in old but not in new)
@@ -215,7 +223,7 @@ export async function upsertDraftLayers(
   // Use provided generated_css, or preserve the existing value for hash consistency
   const cssForHash = additionalData?.generated_css !== undefined
     ? (additionalData.generated_css as string) || null
-    : existingDraft?.generated_css || null;
+    : resolvedDraft?.generated_css || null;
 
   const contentHash = generatePageLayersHash({
     layers,
@@ -233,12 +241,12 @@ export async function upsertDraftLayers(
     Object.assign(updateData, additionalData);
   }
 
-  if (existingDraft) {
+  if (resolvedDraft) {
     // Update existing draft
     let upd = client
       .from('page_layers')
       .update(updateData)
-      .eq('id', existingDraft.id)
+      .eq('id', resolvedDraft.id)
       .eq('is_published', false);
 
     upd = applyTenantEq(upd, tenantId);
@@ -504,7 +512,10 @@ export async function publishPageLayers(draftPageId: string, publishedPageId: st
  * @param pageIds - Array of page IDs to publish layers for
  * @returns Object with count and the page IDs that actually changed
  */
-export async function batchPublishPageLayers(pageIds: string[]): Promise<{ count: number; changedPageIds: string[] }> {
+export async function batchPublishPageLayers(
+  pageIds: string[],
+  options: { force?: boolean } = {},
+): Promise<{ count: number; changedPageIds: string[] }> {
   if (pageIds.length === 0) {
     return { count: 0, changedPageIds: [] };
   }
@@ -540,7 +551,13 @@ export async function batchPublishPageLayers(pageIds: string[]): Promise<{ count
   for (const draft of draftLayers) {
     const existing = publishedById.get(draft.id);
 
-    if (shouldCopyDraftToPublished(draft, existing)) {
+    // Skip the content_hash equality check when forced. The catch-up path
+    // for component/style changes calls this with force=true because the
+    // draft layers' JSONB still references the component by ID (so the
+    // hash is unchanged) even though the resolved/rendered output now
+    // differs. Without force, the static export reads stale published
+    // layers and downstream writers (GitHub) see an empty diff.
+    if (options.force || shouldCopyDraftToPublished(draft, existing)) {
       const row: Record<string, unknown> = {
         id: draft.id,
         page_id: draft.page_id,

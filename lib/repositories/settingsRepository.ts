@@ -5,8 +5,19 @@
  */
 
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import type { Setting } from '@/types';
+
+// Postgres "undefined_table" — the settings table is briefly absent right after
+// a DB reset and before migrations re-run. Treat it as "no settings" instead of
+// crashing page renders.
+const UNDEFINED_TABLE = '42P01';
+
+/** True when an error indicates the settings table does not exist yet. */
+function isMissingTableError(error: { code?: string } | null): boolean {
+  return error?.code === UNDEFINED_TABLE;
+}
 
 /**
  * Get all settings
@@ -19,15 +30,16 @@ export async function getAllSettings(): Promise<Setting[]> {
     throw new Error('Failed to initialize Supabase client');
   }
 
-  let listQuery = client.from('settings').select('*').order('key', { ascending: true });
-  const listTid = await resolveEffectiveTenantId();
-  if (listTid) {
-    listQuery = listQuery.eq('tenant_id', listTid);
-  }
+  const tenantId = await resolveEffectiveTenantId();
+  let query = client.from('settings').select('*').order('key', { ascending: true });
+  query = applyTenantEq(query, tenantId);
 
-  const { data, error } = await listQuery;
+  const { data, error } = await query;
 
   if (error) {
+    if (isMissingTableError(error)) {
+      return [];
+    }
     throw new Error(`Failed to fetch settings: ${error.message}`);
   }
 
@@ -46,15 +58,17 @@ export async function getSettingByKey(key: string): Promise<any | null> {
     throw new Error('Failed to initialize Supabase client');
   }
 
-  let oneQuery = client.from('settings').select('value').eq('key', key);
-  const oneTid = await resolveEffectiveTenantId();
-  if (oneTid) {
-    oneQuery = oneQuery.eq('tenant_id', oneTid);
-  }
+  const tenantId = await resolveEffectiveTenantId();
+  let query = client.from('settings').select('value').eq('key', key);
+  query = applyTenantEq(query, tenantId);
 
-  const { data, error } = await oneQuery.maybeSingle();
+  const { data, error } = await query.maybeSingle();
 
   if (error) {
+    if (error.code === 'PGRST116' || isMissingTableError(error)) {
+      // Not found, or table not yet created
+      return null;
+    }
     throw new Error(`Failed to fetch setting: ${error.message}`);
   }
 
@@ -77,15 +91,16 @@ export async function getSettingsByKeys(keys: string[]): Promise<Record<string, 
     throw new Error('Failed to initialize Supabase client');
   }
 
-  let keysQuery = client.from('settings').select('key, value').in('key', keys);
-  const keysTid = await resolveEffectiveTenantId();
-  if (keysTid) {
-    keysQuery = keysQuery.eq('tenant_id', keysTid);
-  }
+  const tenantId = await resolveEffectiveTenantId();
+  let query = client.from('settings').select('key, value').in('key', keys);
+  query = applyTenantEq(query, tenantId);
 
-  const { data, error } = await keysQuery;
+  const { data, error } = await query;
 
   if (error) {
+    if (isMissingTableError(error)) {
+      return {};
+    }
     throw new Error(`Failed to fetch settings: ${error.message}`);
   }
 
@@ -115,10 +130,8 @@ export async function setSetting(key: string, value: any): Promise<Setting> {
     key,
     value,
     updated_at: new Date().toISOString(),
+    ...(tenantId ? { tenant_id: tenantId } : {}),
   };
-  if (tenantId) {
-    row.tenant_id = tenantId;
-  }
 
   const { data, error } = await client
     .from('settings')
@@ -153,7 +166,7 @@ export async function setSettings(settings: Record<string, any>): Promise<number
     throw new Error('Failed to initialize Supabase client');
   }
 
-  const batchTenantId = await resolveEffectiveTenantId();
+  const tenantId = await resolveEffectiveTenantId();
 
   // Separate entries: null/undefined values should be deleted, others upserted
   const toUpsert: [string, any][] = [];
@@ -169,12 +182,10 @@ export async function setSettings(settings: Record<string, any>): Promise<number
 
   // Delete settings with null values
   if (toDelete.length > 0) {
-    let delQuery = client.from('settings').delete().in('key', toDelete);
-    if (batchTenantId) {
-      delQuery = delQuery.eq('tenant_id', batchTenantId);
-    }
+    let query = client.from('settings').delete().in('key', toDelete);
+    query = applyTenantEq(query, tenantId);
 
-    const { error: deleteError } = await delQuery;
+    const { error: deleteError } = await query;
 
     if (deleteError) {
       throw new Error(`Failed to delete settings: ${deleteError.message}`);
@@ -188,13 +199,13 @@ export async function setSettings(settings: Record<string, any>): Promise<number
       key,
       value,
       updated_at: now,
-      ...(batchTenantId ? { tenant_id: batchTenantId } : {}),
+      ...(tenantId ? { tenant_id: tenantId } : {}),
     }));
 
     const { error } = await client
       .from('settings')
       .upsert(records, {
-        onConflict: batchTenantId ? 'tenant_id,key' : 'key',
+        onConflict: tenantId ? 'tenant_id,key' : 'key',
       });
 
     if (error) {

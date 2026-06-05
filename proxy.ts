@@ -91,14 +91,17 @@ export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const host = requestHostname(request.headers);
 
-  // MCP endpoint uses its own token-based authentication — skip session auth.
-  // Cloud overlay proxies MUST also exempt this path to avoid login redirects.
-  if (pathname.startsWith('/ycode/mcp/')) {
+  // MCP endpoints use their own token-based authentication — skip session auth.
+  // Cloud overlay proxies MUST also exempt these paths to avoid login redirects.
+  //   - `/ycode/mcp/<token>`: legacy URL-token endpoint (Cursor, Windsurf, etc.)
+  //   - `/ycode/mcp`: OAuth Bearer-token endpoint (Claude.ai web, ChatGPT)
+  if (pathname === '/ycode/mcp' || pathname.startsWith('/ycode/mcp/')) {
     const response = NextResponse.next();
     response.headers.set('x-pathname', pathname);
     return response;
   }
 
+  // MASJIDWEB_SEAM: provisioning-publish — see docs/masjidweb-core-seams.md#provisioning
   const provisioningSecret = process.env.PROVISIONING_WEBHOOK_SECRET;
   const isProvisionPublish =
     request.method === 'POST' &&
@@ -199,9 +202,15 @@ export async function proxy(request: NextRequest) {
       }
     }
   }
+  // MASJIDWEB_SEAM_END
+
+  // Debug escape hatch: skip auth on preview routes when explicitly enabled.
+  const skipPreviewAuth = process.env.DISABLE_PREVIEW_AUTH === 'true'
+    && pathname.startsWith('/ycode/preview');
 
   // Protect API and preview routes with auth + tenant / JWT alignment
-  if (pathname.startsWith('/ycode/api') || pathname.startsWith('/ycode/preview')) {
+  if (!skipPreviewAuth && (pathname.startsWith('/ycode/api') || pathname.startsWith('/ycode/preview'))) {
+    // MASJIDWEB_SEAM: tenant-jwt-alignment — see docs/masjidweb-core-seams.md#auth
     if (!isProvisionPublish) {
       const auth = await verifyApiAuth(request);
       if (auth.kind === 'unauthenticated') {
@@ -220,6 +229,7 @@ export async function proxy(request: NextRequest) {
         }
       }
     }
+    // MASJIDWEB_SEAM_END
   }
 
   const hasPaginationParams = Array.from(request.nextUrl.searchParams.keys())

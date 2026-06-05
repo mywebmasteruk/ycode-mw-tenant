@@ -7,11 +7,13 @@
 import { create } from 'zustand';
 import { createBrowserClient } from '../lib/supabase-browser';
 import { isStaleSupabaseRefreshTokenError } from '../lib/supabase-auth-error';
+import { extractRoleFromUser } from '@/lib/roles';
 import type { User, Session } from '@supabase/supabase-js';
 
 interface AuthState {
   user: User | null;
   session: Session | null;
+  role: string | null;
   loading: boolean;
   initialized: boolean;
   error: string | null;
@@ -31,6 +33,7 @@ type AuthStore = AuthState & AuthActions;
 export const useAuthStore = create<AuthStore>((set, get) => ({
   user: null,
   session: null,
+  role: null,
   loading: false,
   initialized: false,
   error: null,
@@ -56,19 +59,27 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
 
       // Validate session server-side (getUser verifies the JWT, unlike getSession)
       const { data: { user } } = await supabase.auth.getUser();
+
+      if (user) {
+        // Refresh the session so the JWT contains the latest app_metadata
+        // (role changes via Admin API don't update existing JWTs)
+        await supabase.auth.refreshSession();
+      }
+
       const { data: { session } } = await supabase.auth.getSession();
 
       set({
         user: user ?? null,
         session: user ? session : null,
+        role: extractRoleFromUser(user),
         initialized: true,
       });
 
-      // Listen for auth changes
       supabase.auth.onAuthStateChange((_event, session) => {
         set({
           user: session?.user ?? null,
           session,
+          role: extractRoleFromUser(session?.user ?? null),
         });
       });
     } catch (error) {
@@ -132,6 +143,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       set({
         user: data.user,
         session: data.session,
+        role: extractRoleFromUser(data.user),
         loading: false,
       });
 
@@ -170,6 +182,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       set({
         user: data.user,
         session: data.session,
+        role: extractRoleFromUser(data.user),
         loading: false,
       });
 
@@ -191,10 +204,10 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       const supabase = await createBrowserClient();
 
       if (!supabase) {
-        // If Supabase is not configured, just clear local state
         set({
           user: null,
           session: null,
+          role: null,
           loading: false,
         });
         return;
@@ -210,6 +223,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       set({
         user: null,
         session: null,
+        role: null,
         loading: false,
       });
     } catch (error) {

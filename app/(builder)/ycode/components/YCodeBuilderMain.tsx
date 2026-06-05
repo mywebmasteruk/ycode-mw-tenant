@@ -21,7 +21,7 @@
 // 1. React/Next.js
 import { useEffect, useState, useMemo, useRef, useCallback, Suspense, lazy } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 // 2. Internal components
 import CenterCanvas from '../components/CenterCanvas';
 import HeaderBar from '../components/HeaderBar';
@@ -74,6 +74,7 @@ import { useFontsStore } from '@/stores/useFontsStore';
 import { useLocalisationStore } from '@/stores/useLocalisationStore';
 import { useMigrationStore } from '@/stores/useMigrationStore';
 import { useVersionsStore } from '@/stores/useVersionsStore';
+import { useRole } from '@/hooks/use-role';
 // Collaboration temporarily disabled
 // import { useCollaborationPresenceStore } from '@/stores/useCollaborationPresenceStore';
 
@@ -98,7 +99,13 @@ interface YCodeBuilderProps {
 
 export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilderProps) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { routeType, resourceId, sidebarTab, navigateToLayers, navigateToCollection, navigateToCollections, navigateToComponent, urlState, updateQueryParams } = useEditorUrl();
+
+  // Role-based access
+  const { isEditor, canEditStructure } = useRole();
+  const canEditStructureRef = useRef(canEditStructure);
+  canEditStructureRef.current = canEditStructure;
 
   // Optimize store subscriptions - use selective selectors to prevent unnecessary re-renders
   const signOut = useAuthStore((state) => state.signOut);
@@ -205,6 +212,20 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
       setCurrentCollaborationUser(user.id, user.email || '', avatarUrl);
     }
   }, [user, setCurrentCollaborationUser]);
+
+  // Redirect editors away from restricted routes
+  useEffect(() => {
+    if (!isEditor || !authInitialized) return;
+    const restricted = routeType === 'settings' || routeType === 'integrations' || routeType === 'component';
+    if (restricted) {
+      const targetPageId = currentPageId || pages[0]?.id;
+      if (targetPageId) {
+        navigateToLayers(targetPageId);
+      } else {
+        router.replace('/ycode');
+      }
+    }
+  }, [isEditor, authInitialized, routeType, currentPageId, pages, navigateToLayers, router]);
 
   // Sidebar tab from store - immediately synced when tab changes in LeftSidebar
   const activeSidebarTab = useEditorStore((state) => state.activeSidebarTab);
@@ -467,6 +488,17 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
       document.documentElement.classList.add('dark');
     }
   }, [user]);
+
+  // After login, honor `?next=` (used by the OAuth consent flow to bounce
+  // unauthenticated users through `/ycode` and back). Only same-origin
+  // paths starting with `/ycode` are accepted to prevent open redirects.
+  useEffect(() => {
+    if (!user || !authInitialized) return;
+    const next = searchParams?.get('next');
+    if (!next) return;
+    if (!next.startsWith('/ycode')) return;
+    router.replace(next);
+  }, [user, authInitialized, searchParams, router]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1233,10 +1265,13 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
       // Note: Undo/Redo shortcuts (Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z, Cmd/Ctrl+Y) are handled in CenterCanvas.tsx
       // This prevents duplication and ensures they work both in the main window and inside the iframe
 
+      const isContentOnlyRole = !canEditStructureRef.current;
+
       // Layer-specific shortcuts (only work on layers tab)
       if (activeTab === 'layers') {
         // A - Toggle Element Library (when on layers tab and not typing)
         if (e.key === 'a' && !isInputFocused && !e.metaKey && !e.ctrlKey && !e.altKey) {
+          if (isContentOnlyRole) return;
           e.preventDefault();
           // Dispatch custom event to toggle ElementLibrary
           window.dispatchEvent(new CustomEvent('toggleElementLibrary'));
@@ -1251,7 +1286,7 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
         }
 
         // Shift + Cmd + H - Toggle layer visibility (Show/Hide)
-        if (e.shiftKey && e.metaKey && e.code === 'KeyH') {
+        if (e.shiftKey && e.metaKey && e.code === 'KeyH' && !isContentOnlyRole) {
           if (!isInputFocused && (currentPageId || editingComponentId) && selectedLayerId) {
             e.preventDefault();
             const layers = getCurrentLayers();
@@ -1319,7 +1354,7 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
         }
 
         // Arrow Up/Down - Reorder layer within siblings
-        if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && (currentPageId || editingComponentId) && selectedLayerId && !isInputFocused) {
+        if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !isContentOnlyRole && (currentPageId || editingComponentId) && selectedLayerId && !isInputFocused) {
           e.preventDefault();
 
           const layers = getCurrentLayers();
@@ -1433,7 +1468,7 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
         }
 
         // Copy: Cmd/Ctrl + C (supports multi-select)
-        if ((e.metaKey || e.ctrlKey) && e.key === 'c') {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'c' && !isContentOnlyRole) {
           if (!isInputFocused && (currentPageId || editingComponentId)) {
             e.preventDefault();
 
@@ -1478,7 +1513,7 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
         }
 
         // Cut: Cmd/Ctrl + X (supports multi-select)
-        if ((e.metaKey || e.ctrlKey) && e.key === 'x') {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'x' && !isContentOnlyRole) {
           if (!isInputFocused && (currentPageId || editingComponentId)) {
             e.preventDefault();
 
@@ -1549,7 +1584,7 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
         }
 
         // Paste: Cmd/Ctrl + V
-        if ((e.metaKey || e.ctrlKey) && e.key === 'v') {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'v' && !isContentOnlyRole) {
           if (!isInputFocused && (currentPageId || editingComponentId)) {
             e.preventDefault();
             // Use clipboard store for paste (works with context menu)
@@ -1589,7 +1624,7 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
         }
 
         // Duplicate: Cmd/Ctrl + D (supports multi-select)
-        if ((e.metaKey || e.ctrlKey) && e.key === 'd') {
+        if ((e.metaKey || e.ctrlKey) && e.key === 'd' && !isContentOnlyRole) {
           if (!isInputFocused && currentPageId) {
             e.preventDefault();
             if (selectedLayerIds.length > 1) {
@@ -1613,14 +1648,14 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
         }
 
         // F2 - Rename selected layer
-        if (e.key === 'F2' && !isInputFocused && (currentPageId || editingComponentId) && selectedLayerId && selectedLayerId !== 'body') {
+        if (e.key === 'F2' && !isContentOnlyRole && !isInputFocused && (currentPageId || editingComponentId) && selectedLayerId && selectedLayerId !== 'body') {
           e.preventDefault();
           useEditorStore.getState().setRenamingLayerId(selectedLayerId);
           return;
         }
 
         // Delete: Delete or Backspace (supports multi-select)
-        if ((e.key === 'Delete' || e.key === 'Backspace')) {
+        if ((e.key === 'Delete' || e.key === 'Backspace') && !isContentOnlyRole) {
           if (!isInputFocused && (currentPageId || editingComponentId)) {
             e.preventDefault();
             if (selectedLayerIds.length > 1) {
@@ -1713,7 +1748,7 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
 
         // Copy Style: Option + Cmd + C
         // Use e.code for physical key detection (e.key produces special chars with Option)
-        if (e.altKey && e.metaKey && e.code === 'KeyC') {
+        if (e.altKey && e.metaKey && e.code === 'KeyC' && !isContentOnlyRole) {
           if (!isInputFocused && (currentPageId || editingComponentId) && selectedLayerId) {
             e.preventDefault();
             const layers = getCurrentLayers();
@@ -1727,7 +1762,7 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
 
         // Paste Style: Option + Cmd + V
         // Use e.code for physical key detection (e.key produces special chars with Option)
-        if (e.altKey && e.metaKey && e.code === 'KeyV') {
+        if (e.altKey && e.metaKey && e.code === 'KeyV' && !isContentOnlyRole) {
           if (!isInputFocused && (currentPageId || editingComponentId) && selectedLayerId) {
             e.preventDefault();
             const style = pasteStyleFromClipboard();
@@ -1749,7 +1784,7 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
         }
 
         // Create Component: Option + Cmd + K
-        if (e.altKey && e.metaKey && e.code === 'KeyK') {
+        if (e.altKey && e.metaKey && e.code === 'KeyK' && !isContentOnlyRole) {
           if (!isInputFocused && currentPageId && selectedLayerId && !editingComponentId) {
             e.preventDefault();
             const layers = getCurrentLayers();
@@ -1762,7 +1797,7 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
         }
 
         // Detach from Component: Option + Cmd + B
-        if (e.altKey && e.metaKey && e.code === 'KeyB') {
+        if (e.altKey && e.metaKey && e.code === 'KeyB' && !isContentOnlyRole) {
           if (!isInputFocused && currentPageId && selectedLayerId && !editingComponentId) {
             e.preventDefault();
             const layers = getCurrentLayers();
@@ -2011,14 +2046,27 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
           <IntegrationsContent>{children}</IntegrationsContent>
         ) : (
           <>
-            {/* Left Sidebar - Pages & Layers (hidden in CMS mode) */}
-            <div className={activeTab === 'cms' ? 'hidden' : 'contents'}>
+            {/* Left Sidebar - Pages & Layers
+                - Hidden in CMS mode
+                - For editor role: only shown when "Pages" tab is active */}
+            <div className={activeTab === 'cms' || (isEditor && activeTab !== 'pages') ? 'hidden' : 'contents'}>
               <LeftSidebar
-                onLayerSelect={setSelectedLayerId}
+                onLayerSelect={(layerId) => {
+                  setSelectedLayerId(layerId);
+                  if (isEditor) {
+                    useEditorStore.getState().setActiveSidebarTab('layers');
+                  }
+                }}
                 currentPageId={currentPageId}
-                onPageSelect={setCurrentPageId}
+                onPageSelect={(pageId: string) => {
+                  setCurrentPageId(pageId);
+                  if (isEditor) {
+                    useEditorStore.getState().setActiveSidebarTab('layers');
+                  }
+                }}
                 liveLayerUpdates={liveLayerUpdates}
                 liveComponentUpdates={liveComponentUpdates}
+                readOnly={!canEditStructure}
               />
             </div>
 
@@ -2041,10 +2089,12 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
                 liveComponentUpdates={liveComponentUpdates}
               />
 
-              {/* Right Sidebar - Properties */}
-              <RightSidebar
-                onLayerUpdate={handleLayerUpdate}
-              />
+              {/* Right Sidebar - Properties (hidden for editor role) */}
+              {!isEditor && (
+                <RightSidebar
+                  onLayerUpdate={handleLayerUpdate}
+                />
+              )}
             </div>
           </>
         )}

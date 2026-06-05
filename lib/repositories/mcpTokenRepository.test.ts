@@ -99,10 +99,12 @@ describe('mcpTokenRepository tenant scope', () => {
 
   it('requires tenant scope when fetching or deleting by id', async () => {
     const fetchQuery = queryMock({ data: null, error: { code: 'PGRST116', message: 'not found' } });
+    const existingTokenQuery = queryMock({ data: { token: 'ymc_plain' }, error: null });
     const deleteQuery = queryMock({ data: null, error: null });
     const client = {
       from: vi.fn()
         .mockReturnValueOnce(fetchQuery)
+        .mockReturnValueOnce(existingTokenQuery)
         .mockReturnValueOnce(deleteQuery),
     };
     mocks.getSupabaseAdmin.mockResolvedValue(client);
@@ -112,6 +114,7 @@ describe('mcpTokenRepository tenant scope', () => {
 
     expect(fetchQuery.eq).toHaveBeenCalledWith('id', 'token-1');
     expect(fetchQuery.or).toHaveBeenCalledWith('tenant_id.eq.tenant-1,tenant_id.is.null');
+    expect(existingTokenQuery.select).toHaveBeenCalledWith('token');
     expect(deleteQuery.eq).toHaveBeenCalledWith('id', 'token-1');
     expect(deleteQuery.or).toHaveBeenCalledWith('tenant_id.eq.tenant-1,tenant_id.is.null');
   });

@@ -3,8 +3,8 @@ import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 import { tenantHasCollectionAccess } from '@/lib/masjidweb/tenant-query';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { getKnexClient } from '@/lib/knex-client';
-import { SUPABASE_QUERY_LIMIT } from '@/lib/supabase-constants';
-import type { CollectionItem, CollectionItemWithValues } from '@/types';
+import { SUPABASE_IN_FILTER_CHUNK_SIZE, SUPABASE_QUERY_LIMIT, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
+import type { CollectionField, CollectionItem, CollectionItemWithValues } from '@/types';
 import { randomUUID } from 'crypto';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
 import { getCollectionById } from '@/lib/repositories/collectionRepository';
@@ -12,6 +12,7 @@ import { getValuesByFieldId, getValuesByItemIds, getValuesByItemId } from '@/lib
 import { generateCollectionItemContentHash } from '@/lib/hash-utils';
 import { castValue } from '../collection-utils';
 import { findStatusFieldId, buildStatusValue } from '@/lib/collection-field-utils';
+import { chunk } from '@/lib/utils';
 
 /**
  * Collection Item Repository
@@ -289,21 +290,32 @@ export async function fetchPublishedHashMap(
 
   let publishedRows: Array<{ id: string; content_hash: string | null }> | null = null;
   try {
-    let pubQ = client
-      .from('collection_items')
-      .select('id, content_hash')
-      .in('id', itemIds)
-      .eq('is_published', true)
-      .is('deleted_at', null);
+    // Chunk the ID list: a single large `.in()` overflows the request URL length
+    // limit and returns 400 Bad Request. Fetch chunks in parallel and merge.
+    const chunkResults = await Promise.all(
+      chunk(itemIds, SUPABASE_IN_FILTER_CHUNK_SIZE).map(async (idsChunk) => {
+        let pubQ = client
+          .from('collection_items')
+          .select('id, content_hash')
+          .in('id', idsChunk)
+          .eq('is_published', true)
+          .is('deleted_at', null);
 
-    pubQ = applyTenantEq(pubQ, tenantId);
+        pubQ = applyTenantEq(pubQ, tenantId);
 
-    const { data, error } = await pubQ;
+        const { data, error } = await pubQ;
 
-    if (error) {
-      console.error('Failed to fetch published items for status:', error.message);
-    } else {
-      publishedRows = data;
+        if (error) {
+          console.error('Failed to fetch published items for status:', error.message);
+          return null;
+        }
+        return data;
+      }),
+    );
+
+    // If every chunk failed, keep publishedRows null; otherwise merge successful chunks
+    if (chunkResults.some((rows) => rows !== null)) {
+      publishedRows = chunkResults.flatMap((rows) => rows ?? []);
     }
   } catch (err) {
     // Transient network errors should not break the items endpoint
@@ -486,7 +498,7 @@ export async function getItemById(id: string, isPublished: boolean = false): Pro
  * @param isPublished - Get draft (false) or published (true) items
  * @returns Array of items found
  */
-export async function getItemsByIds(ids: string[], isPublished: boolean = false): Promise<CollectionItem[]> {
+export async function getItemsByIds(ids: string[], isPublished: boolean = false, tenantId?: string): Promise<CollectionItem[]> {
   if (ids.length === 0) {
     return [];
   }
@@ -497,24 +509,34 @@ export async function getItemsByIds(ids: string[], isPublished: boolean = false)
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
 
-  let idsQ = client
-    .from('collection_items')
-    .select('*')
-    .in('id', ids)
-    .eq('is_published', isPublished)
-    .is('deleted_at', null);
+  const allItems: CollectionItem[] = [];
 
-  idsQ = applyTenantEq(idsQ, tenantId);
+  for (let i = 0; i < ids.length; i += SUPABASE_WRITE_BATCH_SIZE) {
+    const batchIds = ids.slice(i, i + SUPABASE_WRITE_BATCH_SIZE);
 
-  const { data, error } = await idsQ;
+    let idsQ = client
+      .from('collection_items')
+      .select('*')
+      .in('id', batchIds)
+      .eq('is_published', isPublished)
+      .is('deleted_at', null);
 
-  if (error) {
-    throw new Error(`Failed to fetch collection items: ${error.message}`);
+    idsQ = applyTenantEq(idsQ, effectiveTenantId);
+
+    const { data, error } = await idsQ;
+
+    if (error) {
+      throw new Error(`Failed to fetch collection items: ${error.message}`);
+    }
+
+    if (data) {
+      allItems.push(...data);
+    }
   }
 
-  return data || [];
+  return allItems;
 }
 
 /**
@@ -744,6 +766,42 @@ export async function getItemsWithValuesByIds(
     result[item.id] = { ...item, values: valuesByItem[item.id] || {} };
   }
   return result;
+}
+
+/**
+ * Batch fetch slug values for arbitrary item IDs across collections.
+ * Returns a map keyed by item ID. Only items whose owning collection has a
+ * `slug` field with a non-empty value are included.
+ */
+export async function getSlugsByItemIds(
+  ids: string[],
+  is_published: boolean = false
+): Promise<Record<string, string>> {
+  if (ids.length === 0) return {};
+
+  const itemsByIds = await getItemsWithValuesByIds(ids, is_published);
+  const itemList = Object.values(itemsByIds);
+  if (itemList.length === 0) return {};
+
+  const refCollectionIds = Array.from(new Set(itemList.map(i => i.collection_id)));
+  const fieldsByCollection = new Map<string, CollectionField[]>();
+  await Promise.all(
+    refCollectionIds.map(async (collId) => {
+      const fields = await getFieldsByCollectionId(collId, is_published);
+      fieldsByCollection.set(collId, fields);
+    })
+  );
+
+  const slugs: Record<string, string> = {};
+  for (const item of itemList) {
+    const fields = fieldsByCollection.get(item.collection_id);
+    const slugField = fields?.find(f => f.key === 'slug');
+    const slugValue = slugField ? item.values[slugField.id] : undefined;
+    if (slugValue) {
+      slugs[item.id] = slugValue;
+    }
+  }
+  return slugs;
 }
 
 /**
@@ -1423,34 +1481,48 @@ export async function getTotalPublishableItemsCount(): Promise<number> {
 
   const collectionIds = collections.map(c => c.id);
 
-  let draftItemsQ = client
-    .from('collection_items')
-    .select('id, manual_order')
-    .in('collection_id', collectionIds)
-    .eq('is_published', false)
-    .eq('is_publishable', true)
-    .is('deleted_at', null);
+  // Paginate both queries to avoid PostgREST's default 1000-row limit
+  const fetchAllItems = async (isPublished: boolean): Promise<Array<{ id: string; manual_order: number }>> => {
+    const rows: Array<{ id: string; manual_order: number }> = [];
+    let offset = 0;
 
-  let pubItemsQ = client
-    .from('collection_items')
-    .select('id, manual_order')
-    .in('collection_id', collectionIds)
-    .eq('is_published', true);
+    while (true) {
+      let query = client
+        .from('collection_items')
+        .select('id, manual_order')
+        .in('collection_id', collectionIds)
+        .eq('is_published', isPublished)
+        .order('id', { ascending: true })
+        .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
 
-  draftItemsQ = applyTenantEq(draftItemsQ, tenantId);
-  pubItemsQ = applyTenantEq(pubItemsQ, tenantId);
+      query = applyTenantEq(query, tenantId);
 
-  const [draftResult, publishedResult] = await Promise.all([
-    draftItemsQ,
-    pubItemsQ,
+      if (!isPublished) {
+        query = query.eq('is_publishable', true).is('deleted_at', null);
+      }
+
+      const { data, error } = await query;
+      if (error) {
+        throw new Error(`Failed to fetch ${isPublished ? 'published' : 'draft'} items: ${error.message}`);
+      }
+
+      const batch = data || [];
+      rows.push(...batch);
+
+      if (batch.length < SUPABASE_QUERY_LIMIT) break;
+      offset += SUPABASE_QUERY_LIMIT;
+    }
+
+    return rows;
+  };
+
+  const [draftItems, publishedItems] = await Promise.all([
+    fetchAllItems(false),
+    fetchAllItems(true),
   ]);
 
-  if (draftResult.error) {
-    throw new Error(`Failed to fetch draft items: ${draftResult.error.message}`);
-  }
-
   const publishedMap = new Map<string, number>();
-  for (const pub of publishedResult.data || []) {
+  for (const pub of publishedItems) {
     publishedMap.set(pub.id, pub.manual_order);
   }
 
@@ -1458,7 +1530,7 @@ export async function getTotalPublishableItemsCount(): Promise<number> {
   let count = 0;
   const matchingOrderItemIds: string[] = [];
 
-  for (const draft of draftResult.data || []) {
+  for (const draft of draftItems) {
     const pubOrder = publishedMap.get(draft.id);
     if (pubOrder === undefined || draft.manual_order !== pubOrder) {
       count++;

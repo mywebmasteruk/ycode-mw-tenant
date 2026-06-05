@@ -13,6 +13,7 @@
 
 import { withTransaction } from '../database/transaction';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 import { getCollectionById, hardDeleteCollection } from '@/lib/repositories/collectionRepository';
@@ -632,6 +633,7 @@ async function publishItemValuesBatch(itemIds: string[]): Promise<number> {
     is_published: boolean;
     created_at: string;
     updated_at: string;
+    tenant_id?: string;
   }> = [];
 
   for (const value of draftValues) {
@@ -656,15 +658,19 @@ async function publishItemValuesBatch(itemIds: string[]): Promise<number> {
     return 0;
   }
 
-  // Batch upsert changed values only
-  const { error } = await client
-    .from('collection_item_values')
-    .upsert(valuesToUpsert, {
-      onConflict: 'id,is_published',
-    });
+  // Upsert in chunks within PostgREST payload limits
+  for (let j = 0; j < valuesToUpsert.length; j += SUPABASE_WRITE_BATCH_SIZE) {
+    const chunk = valuesToUpsert.slice(j, j + SUPABASE_WRITE_BATCH_SIZE);
+    const { error } = await client
+      .from('collection_item_values')
+      .upsert(chunk, {
+        onConflict: 'id,is_published',
+      });
 
-  if (error) {
-    throw new Error(`Failed to publish item values: ${error.message}`);
+    if (error) {
+      console.error(`[PUBLISH:VALUES] Value upsert failed:`, error.message);
+      throw new Error(`Failed to publish item values: ${error.message}`);
+    }
   }
 
   return valuesToUpsert.length;

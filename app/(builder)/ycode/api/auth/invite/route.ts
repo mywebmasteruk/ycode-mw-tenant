@@ -2,14 +2,20 @@ import { NextRequest } from 'next/server';
 import { resolveInviteRedirectUrl } from '@/lib/auth-invite-redirect';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { noCache } from '@/lib/api-response';
+import { requireManageMembers } from '@/lib/roles-server';
+import { ASSIGNABLE_ROLES } from '@/lib/roles';
 
 /**
  * POST /ycode/api/auth/invite
  *
- * Invite a user by email using Supabase's built-in invite system
+ * Invite a user by email using Supabase's built-in invite system.
+ * Requires owner or admin role.
  */
 export async function POST(request: NextRequest) {
   try {
+    const result = await requireManageMembers();
+    if ('status' in result) return result;
+
     const tenantId = request.headers.get('x-tenant-id')?.trim();
     const tenantSlug = request.headers.get('x-tenant-slug')?.trim();
 
@@ -21,31 +27,22 @@ export async function POST(request: NextRequest) {
     }
 
     const body = await request.json();
-    const { email, redirectTo } = body;
+    const { email, role = 'designer', redirectTo } = body;
 
     if (!email) {
-      return noCache(
-        { error: 'Email is required' },
-        400
-      );
+      return noCache({ error: 'Email is required' }, 400);
     }
 
-    // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
-      return noCache(
-        { error: 'Invalid email format' },
-        400
-      );
+      return noCache({ error: 'Invalid email format' }, 400);
     }
 
-    const client = await getSupabaseAdmin();
+    const assignRole = ASSIGNABLE_ROLES.includes(role) ? role : 'designer';
 
+    const client = await getSupabaseAdmin();
     if (!client) {
-      return noCache(
-        { error: 'Supabase not configured' },
-        500
-      );
+      return noCache({ error: 'Supabase not configured' }, 500);
     }
 
     const redirect = resolveInviteRedirectUrl(request, redirectTo);
@@ -62,10 +59,13 @@ export async function POST(request: NextRequest) {
 
     if (error) {
       console.error('[invite] Error inviting user:', error);
-      return noCache(
-        { error: error.message },
-        400
-      );
+      return noCache({ error: error.message }, 400);
+    }
+
+    if (data.user) {
+      await client.auth.admin.updateUserById(data.user.id, {
+        app_metadata: { role: assignRole },
+      });
     }
 
     if (data.user?.id) {
@@ -98,6 +98,7 @@ export async function POST(request: NextRequest) {
     return noCache({
       data: {
         user: data.user,
+        role: assignRole,
         message: `Invitation sent to ${email}`,
       },
     });

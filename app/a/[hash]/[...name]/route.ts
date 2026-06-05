@@ -64,8 +64,19 @@ export async function GET(
       .getPublicUrl(asset.storage_path);
 
     const url = new URL(request.url);
-    const response = await fetch(urlData.publicUrl);
-    if (!response.ok) {
+    const isImage = isAssetOfType(asset.mime_type, ASSET_CATEGORIES.IMAGES);
+
+    // Forward Range requests for media (video/audio). Safari refuses to play
+    // a video unless the server responds with 206 Partial Content, so we proxy
+    // the client's Range header to Supabase Storage (which supports ranges).
+    const rangeHeader = request.headers.get('range');
+    const upstreamHeaders: Record<string, string> = {};
+    if (rangeHeader && !isImage) {
+      upstreamHeaders.Range = rangeHeader;
+    }
+
+    const response = await fetch(urlData.publicUrl, { headers: upstreamHeaders });
+    if (!response.ok && response.status !== 206) {
       return new Response('Not found', { status: 404 });
     }
 
