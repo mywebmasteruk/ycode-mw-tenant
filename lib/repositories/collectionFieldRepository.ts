@@ -1,6 +1,13 @@
+<<<<<<< HEAD
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+||||||| 30cc6a3
+import { getSupabaseAdmin } from '@/lib/supabase-server';
+=======
+import { getSupabaseAdmin, getTenantIdFromHeaders } from '@/lib/supabase-server';
+>>>>>>> upstream/main
 import { SUPABASE_QUERY_LIMIT } from '@/lib/supabase-constants';
+import { getKnexClient } from '@/lib/knex-client';
 import type { CollectionField, CreateCollectionFieldData, UpdateCollectionFieldData } from '@/types';
 import { randomUUID } from 'crypto';
 
@@ -26,9 +33,28 @@ export interface FieldFilters {
  * @param is_published - Filter for draft (false) or published (true) fields. Defaults to false (draft).
  */
 export async function getAllFields(
-  is_published: boolean = false
+  is_published: boolean = false,
+  tenantId?: string
 ): Promise<CollectionField[]> {
-  const client = await getSupabaseAdmin();
+  // Fast path: single direct-DB (Knex) read instead of paginated PostgREST.
+  try {
+    const knex = await getKnexClient();
+    const resolvedTenantId = tenantId ?? await getTenantIdFromHeaders();
+    let query = knex('collection_fields')
+      .select('*')
+      .where('is_published', is_published)
+      .whereNull('deleted_at')
+      .orderBy('collection_id', 'asc')
+      .orderBy('order', 'asc');
+    if (resolvedTenantId) {
+      query = query.where('tenant_id', resolvedTenantId);
+    }
+    return await query;
+  } catch {
+    // Fallback to paginated PostgREST reads below.
+  }
+
+  const client = await getSupabaseAdmin(tenantId);
 
   if (!client) {
     throw new Error('Supabase client not configured');

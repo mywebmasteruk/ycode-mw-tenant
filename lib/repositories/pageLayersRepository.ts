@@ -526,13 +526,91 @@ export async function batchPublishPageLayers(
     throw new Error('Supabase not configured');
   }
 
+<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
 
   // Step 1: Batch fetch all draft layers (deduped per page inside getDraftLayersForPages)
   const draftLayers = await getDraftLayersForPages(pageIds);
+||||||| 30cc6a3
+  // Step 1: Batch fetch all draft layers
+  const draftLayers = await getDraftLayersForPages(pageIds);
+=======
+  // Step 1: Decide which pages to publish WITHOUT transferring the (large)
+  // layers JSONB for every page. We compare lightweight content_hash rows
+  // first, then fetch full draft layers only for the pages that changed.
+  //
+  // Forced mode skips the hash diff: the catch-up path for component/style
+  // changes passes a targeted set and must republish them even though the
+  // draft layers' JSONB still references the component by ID (so the hash is
+  // unchanged) while the resolved/rendered output now differs. Without it,
+  // the static export reads stale published layers and downstream writers
+  // (GitHub) see an empty diff.
+  let pageIdsToPublish: string[];
+
+  if (options.force) {
+    pageIdsToPublish = pageIds;
+  } else {
+    const [draftHashes, publishedHashes] = await Promise.all([
+      client
+        .from('page_layers')
+        .select('id, page_id, content_hash')
+        .in('page_id', pageIds)
+        .eq('is_published', false)
+        .is('deleted_at', null),
+      client
+        .from('page_layers')
+        .select('id, content_hash')
+        .in('page_id', pageIds)
+        .eq('is_published', true)
+        .is('deleted_at', null),
+    ]);
+
+    if (draftHashes.error) {
+      throw new Error(`Failed to fetch draft layer hashes: ${draftHashes.error.message}`);
+    }
+    if (publishedHashes.error) {
+      throw new Error(`Failed to fetch published layer hashes: ${publishedHashes.error.message}`);
+    }
+
+    const publishedHashById = new Map<string, string | null>(
+      (publishedHashes.data || []).map(r => [r.id, r.content_hash]),
+    );
+
+    pageIdsToPublish = (draftHashes.data || [])
+      .filter(d => {
+        const pubHash = publishedHashById.get(d.id);
+        return pubHash === undefined || pubHash !== d.content_hash;
+      })
+      .map(d => d.page_id);
+
+    if (pageIdsToPublish.length === 0) {
+      return { count: 0, changedPageIds: [] };
+    }
+  }
+
+  // Step 2: Fetch full draft layers only for the pages we will publish
+  const draftLayers = await getDraftLayersForPages(pageIdsToPublish);
+>>>>>>> upstream/main
 
   if (draftLayers.length === 0) {
     return { count: 0, changedPageIds: [] };
+  }
+
+<<<<<<< HEAD
+  // Step 2: Batch fetch existing published layers
+  const draftIds = draftLayers.map(d => d.id);
+  const existingPublished = await getPublishedLayersByIds(draftIds);
+
+  const publishedById = new Map<string, PageLayers>();
+  for (const pub of existingPublished) {
+    publishedById.set(pub.id, pub);
+  }
+
+||||||| 30cc6a3
+  // Build map for quick lookup
+  const draftLayersById = new Map<string, PageLayers>();
+  for (const draft of draftLayers) {
+    draftLayersById.set(draft.id, draft);
   }
 
   // Step 2: Batch fetch existing published layers
@@ -544,9 +622,11 @@ export async function batchPublishPageLayers(
     publishedById.set(pub.id, pub);
   }
 
+=======
+>>>>>>> upstream/main
   // Step 3: Prepare upsert data
-  const layersToUpsert: any[] = [];
   const now = new Date().toISOString();
+<<<<<<< HEAD
 
   for (const draft of draftLayers) {
     const existing = publishedById.get(draft.id);
@@ -580,6 +660,40 @@ export async function batchPublishPageLayers(
       layersToUpsert.push(row);
     }
   }
+||||||| 30cc6a3
+
+  for (const draft of draftLayers) {
+    const existing = publishedById.get(draft.id);
+
+    // Skip the content_hash equality check when forced. The catch-up path
+    // for component/style changes calls this with force=true because the
+    // draft layers' JSONB still references the component by ID (so the
+    // hash is unchanged) even though the resolved/rendered output now
+    // differs. Without force, the static export reads stale published
+    // layers and downstream writers (GitHub) see an empty diff.
+    if (options.force || !existing || existing.content_hash !== draft.content_hash) {
+      layersToUpsert.push({
+        id: draft.id,
+        page_id: draft.page_id,
+        layers: draft.layers,
+        generated_css: draft.generated_css || null,
+        content_hash: draft.content_hash,
+        is_published: true,
+        updated_at: now,
+      });
+    }
+  }
+=======
+  const layersToUpsert: any[] = draftLayers.map(draft => ({
+    id: draft.id,
+    page_id: draft.page_id,
+    layers: draft.layers,
+    generated_css: draft.generated_css || null,
+    content_hash: draft.content_hash,
+    is_published: true,
+    updated_at: now,
+  }));
+>>>>>>> upstream/main
 
   // Step 4: Batch upsert
   if (layersToUpsert.length > 0) {

@@ -2954,6 +2954,17 @@ const LayerItemImpl: React.FC<{
       const shouldAutoPlay = mediaProps.autoplay === true;
       delete mediaProps.autoplay;
 
+      // React doesn't reliably reflect `muted` to the DOM during SSR/hydration,
+      // so apply it via ref. Mobile browsers reject autoplay unless the element
+      // is actually muted at play() time.
+      const shouldMute = mediaProps.muted === true;
+
+      // Mobile (iOS/Android) only autoplays videos rendered inline. Without
+      // playsInline it forces fullscreen and blocks autoplay.
+      if (htmlTag === 'video') {
+        mediaProps.playsInline = true;
+      }
+
       if (mediaSrc) {
         mediaProps.src = mediaSrc;
       }
@@ -2963,14 +2974,14 @@ const LayerItemImpl: React.FC<{
       }
 
       // Handle special attributes that need to be set on the DOM element
-      // (autoplay and volume must be set via JavaScript on the DOM element)
+      // (autoplay, muted, and volume must be set via JavaScript on the DOM element)
       if (htmlTag === 'audio' || htmlTag === 'video') {
         const originalRef = mediaProps.ref;
         const volumeValue = normalizedAttributes?.volume
           ? parseInt(normalizedAttributes.volume) / 100
           : undefined;
 
-        if (shouldAutoPlay || volumeValue !== undefined) {
+        if (shouldAutoPlay || shouldMute || volumeValue !== undefined) {
           mediaProps.ref = (element: HTMLAudioElement | HTMLVideoElement | null) => {
             if (originalRef) {
               if (typeof originalRef === 'function') {
@@ -2981,6 +2992,11 @@ const LayerItemImpl: React.FC<{
             }
 
             if (element) {
+              // Mute before play() so mobile browsers allow autoplay.
+              if (shouldMute) {
+                element.muted = true;
+                element.setAttribute('muted', '');
+              }
               if (shouldAutoPlay) {
                 element.autoplay = true;
                 element.setAttribute('autoplay', '');

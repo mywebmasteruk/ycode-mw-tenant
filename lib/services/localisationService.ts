@@ -8,9 +8,16 @@
  */
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+<<<<<<< HEAD
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 import { fetchAllRows, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
+||||||| 30cc6a3
+import { fetchAllRows, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
+=======
+import { SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
+import { getAllTranslationRows } from '@/lib/repositories/translationRepository';
+>>>>>>> upstream/main
 import type { Locale, Translation, TranslationSourceType } from '@/types';
 
 export interface ChangedLocale {
@@ -158,11 +165,23 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
   publishedLocalesQuery = applyTenantEq(publishedLocalesQuery, tenantId);
   
   const [existingPublishedLocalesRes, existingPublishedTranslations] = await Promise.all([
+<<<<<<< HEAD
     publishedLocalesQuery,
     fetchAllRows<Translation>((from, to) => {
       let query = client.from('translations').select('*').eq('is_published', true).order('id', { ascending: true }).range(from, to);
       return applyTenantEq(query, tenantId);
     }),
+||||||| 30cc6a3
+    client.from('locales').select('*').eq('is_published', true),
+    fetchAllRows<Translation>((from, to) =>
+      client.from('translations').select('*').eq('is_published', true).order('id', { ascending: true }).range(from, to)
+    ),
+=======
+    client.from('locales').select('*').eq('is_published', true),
+    // Single direct-DB read of the whole published catalogue instead of
+    // paginated PostgREST round-trips.
+    getAllTranslationRows<Translation>(true),
+>>>>>>> upstream/main
   ]);
 
   const existingPublishedLocales: Locale[] = existingPublishedLocalesRes.data || [];
@@ -290,14 +309,22 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
   // === TRANSLATIONS ===
   const translationsStart = performance.now();
 
-  // Step 4: Fetch all draft translations (including soft-deleted). Paged
-  // for the same 1000-row reason as the published snapshot above.
+  // Step 4: Fetch all draft translations (including soft-deleted) in a single
+  // direct-DB read instead of paginated PostgREST round-trips.
   let allDraftTranslations: Translation[];
   try {
+<<<<<<< HEAD
     allDraftTranslations = await fetchAllRows<Translation>((from, to) => {
       let query = client.from('translations').select('*').eq('is_published', false).order('id', { ascending: true }).range(from, to);
       return applyTenantEq(query, tenantId);
     });
+||||||| 30cc6a3
+    allDraftTranslations = await fetchAllRows<Translation>((from, to) =>
+      client.from('translations').select('*').eq('is_published', false).order('id', { ascending: true }).range(from, to)
+    );
+=======
+    allDraftTranslations = await getAllTranslationRows<Translation>(false);
+>>>>>>> upstream/main
   } catch (translationsError) {
     const message = translationsError instanceof Error ? translationsError.message : String(translationsError);
     throw new Error(`Failed to fetch draft translations: ${message}`);
@@ -305,13 +332,18 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
 
   // ──────────────────────────────────────────────────────────────────────
   // DIFF: Compare each draft translation to its published counterpart.
+  // Also records which draft IDs are new/changed so Step 6 upserts only
+  // those — re-upserting every draft row (tens of thousands) on each publish
+  // was the dominant cost of localisation publishing.
   // ──────────────────────────────────────────────────────────────────────
+  const changedTranslationIds = new Set<string>();
   if (allDraftTranslations) {
     for (const draft of allDraftTranslations as Translation[]) {
       const published = publishedTranslationsById.get(draft.id);
 
       if (!published || published.deleted_at) {
         if (!draft.deleted_at) {
+          changedTranslationIds.add(draft.id);
           changedTranslations.push({
             locale_id: draft.locale_id,
             source_type: draft.source_type,
@@ -337,6 +369,7 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
       }
 
       if (translationDiffers(draft, published)) {
+        changedTranslationIds.add(draft.id);
         changedTranslations.push({
           locale_id: draft.locale_id,
           source_type: draft.source_type,
@@ -370,11 +403,16 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
       }
     }
 
-    // Step 6: Upsert published translations in write-sized batches so the
-    // PostgREST request payload stays well under URL/body limits when a
-    // project has tens of thousands of translations.
-    if (activeDraftTranslations.length > 0) {
-      const publishedTranslations = activeDraftTranslations.map((translation: Translation) => ({
+    // Step 6: Upsert only the translations that are new or changed (the diff
+    // above). Unchanged rows already have an identical published counterpart,
+    // so re-upserting them is wasted work. Batched to keep each PostgREST
+    // payload well under URL/body limits.
+    const translationsToPublish = activeDraftTranslations.filter(
+      (t: Translation) => changedTranslationIds.has(t.id)
+    );
+
+    if (translationsToPublish.length > 0) {
+      const publishedTranslations = translationsToPublish.map((translation: Translation) => ({
         id: translation.id,
         locale_id: translation.locale_id,
         source_type: translation.source_type,
@@ -401,7 +439,7 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
         }
       }
 
-      publishedTranslationsCount = activeDraftTranslations.length;
+      publishedTranslationsCount = translationsToPublish.length;
     }
   }
 

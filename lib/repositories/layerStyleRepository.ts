@@ -5,6 +5,7 @@
  * Supports draft/published workflow with content hash-based change detection
  */
 
+import { randomUUID } from 'crypto';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import type { LayerStyle, Layer, ComponentVariant } from '@/types';
 import {
@@ -12,9 +13,15 @@ import {
   generatePageLayersHash,
   generateComponentContentHash,
 } from '../hash-utils';
+<<<<<<< HEAD
 import { updateLayersWithStyle } from '@/lib/layer-style-utils';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
+||||||| 30cc6a3
+import { updateLayersWithStyle } from '@/lib/layer-style-utils';
+=======
+import { updateLayersWithStyle, detachStyleFromLayers, getStyleIds } from '@/lib/layer-style-utils';
+>>>>>>> upstream/main
 
 /**
  * Input data for creating a new layer style
@@ -171,6 +178,59 @@ export async function createStyle(
   }
 
   return data;
+}
+
+/**
+ * Create many layer styles in a single round-trip (draft versions).
+ *
+ * Used by the import pipeline so a paste with dozens of new combo/global styles
+ * costs one INSERT instead of one HTTP request per style — the dominant source
+ * of paste latency on serverless (each request pays cold-start + middleware +
+ * network RTT). IDs are generated here so the returned rows can be re-ordered to
+ * exactly match the input order, since the DB doesn't guarantee row order on a
+ * bulk insert + select.
+ */
+export async function createStyles(
+  stylesData: CreateLayerStyleData[]
+): Promise<LayerStyle[]> {
+  if (stylesData.length === 0) {
+    return [];
+  }
+
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
+
+  const rows = stylesData.map((styleData) => ({
+    id: randomUUID(),
+    name: styleData.name,
+    classes: styleData.classes,
+    design: styleData.design,
+    group: styleData.group,
+    content_hash: generateLayerStyleContentHash({
+      name: styleData.name,
+      classes: styleData.classes,
+      design: styleData.design,
+    }),
+    is_published: false,
+  }));
+
+  const { data, error } = await client
+    .from('layer_styles')
+    .insert(rows)
+    .select();
+
+  if (error) {
+    throw new Error(`Failed to create layer styles: ${error.message}`);
+  }
+
+  // Re-order to match the input: the caller maps results back to its refs by
+  // index, so the order must be deterministic regardless of DB return order.
+  const byId = new Map<string, LayerStyle>((data || []).map((d) => [d.id, d]));
+  return rows
+    .map((r) => byId.get(r.id))
+    .filter((s): s is LayerStyle => Boolean(s));
 }
 
 /**
@@ -525,7 +585,7 @@ export async function getUnpublishedLayerStylesCount(): Promise<number> {
  */
 function layersContainStyle(layers: Layer[], styleId: string): boolean {
   for (const layer of layers) {
-    if (layer.styleId === styleId) {
+    if (getStyleIds(layer).includes(styleId)) {
       return true;
     }
     if (layer.children && layersContainStyle(layer.children, styleId)) {
@@ -533,29 +593,6 @@ function layersContainStyle(layers: Layer[], styleId: string): boolean {
     }
   }
   return false;
-}
-
-/**
- * Helper function to recursively remove styleId from layers
- */
-function detachStyleFromLayersRecursive(layers: Layer[], styleId: string): Layer[] {
-  return layers.map(layer => {
-    // Create a clean copy of the layer
-    const cleanLayer = { ...layer };
-
-    // If this layer uses the style, remove styleId and styleOverrides
-    if (cleanLayer.styleId === styleId) {
-      delete cleanLayer.styleId;
-      delete cleanLayer.styleOverrides;
-    }
-
-    // Recursively process children
-    if (cleanLayer.children && cleanLayer.children.length > 0) {
-      cleanLayer.children = detachStyleFromLayersRecursive(cleanLayer.children, styleId);
-    }
-
-    return cleanLayer;
-  });
 }
 
 /**
@@ -570,6 +607,17 @@ export async function findEntitiesUsingLayerStyle(styleId: string): Promise<Laye
 
   const tenantId = await resolveEffectiveTenantId();
   const affectedEntities: LayerStyleAffectedEntity[] = [];
+
+  // Snapshot all draft styles so combo stacks can be re-flattened the same way
+  // the client does on detach — keeping client and server perfectly in sync.
+  const { data: allDraftStyles } = await client
+    .from('layer_styles')
+    .select('*')
+    .eq('is_published', false)
+    .is('deleted_at', null);
+  const stylesById = new Map<string, LayerStyle>(
+    (allDraftStyles || []).map((s) => [s.id, s as LayerStyle])
+  );
 
   // Find affected page_layers
   let pageLayersQuery = client
@@ -607,7 +655,7 @@ export async function findEntitiesUsingLayerStyle(styleId: string): Promise<Laye
 
     for (const record of pageLayersRecords || []) {
       if (layersContainStyle(record.layers || [], styleId)) {
-        const newLayers = detachStyleFromLayersRecursive(record.layers || [], styleId);
+        const newLayers = detachStyleFromLayers(record.layers || [], styleId, stylesById);
         affectedEntities.push({
           type: 'page',
           id: record.id,
@@ -641,12 +689,12 @@ export async function findEntitiesUsingLayerStyle(styleId: string): Promise<Laye
     const hasStyleInVariants = Array.isArray(variants) && variants.some(v => layersContainStyle(v.layers ?? [], styleId));
 
     if (hasStyleInPrimary || hasStyleInVariants) {
-      const newLayers = detachStyleFromLayersRecursive(primaryLayers, styleId);
+      const newLayers = detachStyleFromLayers(primaryLayers, styleId, stylesById);
       let newVariants: ComponentVariant[] | undefined;
       if (Array.isArray(variants) && variants.length > 0) {
         newVariants = variants.map((v, i) => ({
           ...v,
-          layers: i === 0 ? newLayers : detachStyleFromLayersRecursive(v.layers ?? [], styleId),
+          layers: i === 0 ? newLayers : detachStyleFromLayers(v.layers ?? [], styleId, stylesById),
         }));
       }
       affectedEntities.push({
@@ -827,7 +875,7 @@ export async function deleteStyle(id: string): Promise<void> {
  */
 function layersReferenceAnyStyle(layers: Layer[], styleIds: Set<string>): boolean {
   for (const layer of layers) {
-    if (layer.styleId && styleIds.has(layer.styleId)) return true;
+    if (getStyleIds(layer).some(id => styleIds.has(id))) return true;
     if (layer.textStyles) {
       for (const ts of Object.values(layer.textStyles)) {
         const tsStyleId = (ts as { styleId?: string })?.styleId;
@@ -895,6 +943,18 @@ export async function syncLayerStyleChangesToDrafts(
 
   const styleIdSet = new Set(styles.map(s => s.id));
 
+  // Combo-class layers reference a stack of styles, so re-flattening needs
+  // every style a layer might point at — not just the changed ones. Snapshot
+  // all published styles, then overlay the just-published changed values.
+  const { data: allStyles } = await client
+    .from('layer_styles')
+    .select('id, classes, design')
+    .eq('is_published', true)
+    .is('deleted_at', null);
+  const stylesById = new Map<string, LayerStyle>();
+  for (const s of allStyles ?? []) stylesById.set(s.id, s as LayerStyle);
+  for (const s of styles) stylesById.set(s.id, s as LayerStyle);
+
   // --- Sync draft page_layers ---
   let pageLayersQuery = client
     .from('page_layers')
@@ -925,7 +985,7 @@ export async function syncLayerStyleChangesToDrafts(
 
     let layers = record.layers as Layer[];
     for (const style of styles) {
-      layers = updateLayersWithStyle(layers, style.id, style.classes, style.design);
+      layers = updateLayersWithStyle(layers, style.id, stylesById);
     }
 
     // Match the canonical save formula exactly: empty-string generated_css
@@ -983,7 +1043,7 @@ export async function syncLayerStyleChangesToDrafts(
 
     let layers = record.layers as Layer[];
     for (const style of styles) {
-      layers = updateLayersWithStyle(layers, style.id, style.classes, style.design);
+      layers = updateLayersWithStyle(layers, style.id, stylesById);
     }
 
     // Apply style updates to all variant layer trees so non-primary
@@ -994,7 +1054,7 @@ export async function syncLayerStyleChangesToDrafts(
         if (i === 0) return { ...v, layers };
         let variantLayers = v.layers as Layer[] ?? [];
         for (const style of styles) {
-          variantLayers = updateLayersWithStyle(variantLayers, style.id, style.classes, style.design);
+          variantLayers = updateLayersWithStyle(variantLayers, style.id, stylesById);
         }
         return { ...v, layers: variantLayers };
       });

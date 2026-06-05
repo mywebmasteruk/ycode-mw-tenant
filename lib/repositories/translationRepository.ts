@@ -9,14 +9,46 @@
  * (locales are tenant-scoped). Do not add tenant_id filtering here.
  */
 
-import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSupabaseAdmin, getTenantIdFromHeaders } from '@/lib/supabase-server';
 import { fetchAllRows } from '@/lib/supabase-constants';
+import { getKnexClient } from '@/lib/knex-client';
 import type { Translation, CreateTranslationData, UpdateTranslationData } from '@/types';
 
 type TranslationDiffRow = Pick<
   Translation,
   'id' | 'content_value' | 'is_completed' | 'deleted_at'
 >;
+
+/**
+ * Fetch every translation row (including soft-deleted) for one publish state in
+ * a single direct-DB (Knex) query. Replaces paginated PostgREST reads that
+ * issued ~one round-trip per 1000 rows when diffing large catalogues during
+ * publish. Falls back to paginated PostgREST on error.
+ *
+ * @param columns - SELECT list; pass a narrow set for diff/count callers.
+ */
+export async function getAllTranslationRows<T = Translation>(
+  isPublished: boolean,
+  columns: string[] = ['*'],
+  tenantId?: string,
+): Promise<T[]> {
+  try {
+    const knex = await getKnexClient();
+    const resolvedTenantId = tenantId ?? await getTenantIdFromHeaders();
+    let query = knex('translations').select(columns).where('is_published', isPublished);
+    if (resolvedTenantId) {
+      query = query.where('tenant_id', resolvedTenantId);
+    }
+    return await query as T[];
+  } catch {
+    const client = await getSupabaseAdmin(tenantId);
+    if (!client) return [];
+    const select = columns.includes('*') ? '*' : columns.join(', ');
+    return await fetchAllRows<T>((from, to) =>
+      client.from('translations').select(select).eq('is_published', isPublished).order('id', { ascending: true }).range(from, to) as unknown as PromiseLike<{ data: T[] | null; error: unknown }>,
+    );
+  }
+}
 
 /**
  * Get all translations for a locale (draft by default). Pages through the
@@ -386,25 +418,11 @@ export async function upsertTranslations(
  * 1000-row PostgREST default silently truncating the count.
  */
 export async function getUnpublishedTranslationsCount(): Promise<number> {
-  const client = await getSupabaseAdmin();
+  const cols = ['id', 'content_value', 'is_completed', 'deleted_at'];
 
-  if (!client) {
-    return 0;
-  }
-
-  const cols = 'id, content_value, is_completed, deleted_at';
-
-  // Order by id so .range() pagination is deterministic — without an ORDER BY
-  // PostgREST returns rows in arbitrary order between pages, which causes
-  // duplicates and gaps when paging tens of thousands of translations, leading
-  // to spurious "missing in published map" hits and inflated change counts.
   const [draftRows, publishedRows] = await Promise.all([
-    fetchAllRows<TranslationDiffRow>((from, to) =>
-      client.from('translations').select(cols).eq('is_published', false).order('id', { ascending: true }).range(from, to)
-    ),
-    fetchAllRows<TranslationDiffRow>((from, to) =>
-      client.from('translations').select(cols).eq('is_published', true).order('id', { ascending: true }).range(from, to)
-    ),
+    getAllTranslationRows<TranslationDiffRow>(false, cols),
+    getAllTranslationRows<TranslationDiffRow>(true, cols),
   ]);
 
   if (draftRows.length === 0) {

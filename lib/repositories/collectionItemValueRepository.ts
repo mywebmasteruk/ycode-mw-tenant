@@ -235,6 +235,74 @@ export async function getValuesByItemIds(
   return valuesByItem;
 }
 
+/** Raw value row needed when publishing/diffing item values. */
+export interface PublishValueRow {
+  id: string;
+  item_id: string;
+  field_id: string;
+  value: string | null;
+  created_at: string;
+}
+
+/**
+ * Bulk-fetch full value rows for many items in a single direct-DB (Knex) query.
+ * Avoids PostgREST's row cap and URL-size chunking, which forced per-batch
+ * paginated reads during publish. Falls back to chunked PostgREST on error.
+ */
+export async function getValueRowsForItems(
+  itemIds: string[],
+  isPublished: boolean,
+  tenantId?: string,
+): Promise<PublishValueRow[]> {
+  if (itemIds.length === 0) return [];
+
+  try {
+    const knex = await getKnexClient();
+    const resolvedTenantId = tenantId ?? await getTenantIdFromHeaders();
+    let query = knex('collection_item_values')
+      .select('id', 'item_id', 'field_id', 'value', 'created_at')
+      .whereIn('item_id', itemIds)
+      .andWhere('is_published', isPublished)
+      .whereNull('deleted_at');
+    if (resolvedTenantId) {
+      query = query.where('tenant_id', resolvedTenantId);
+    }
+    return await query;
+  } catch {
+    // Fallback: paginated PostgREST reads (chunk item IDs to stay within URL limits)
+    const client = await getSupabaseAdmin(tenantId);
+    if (!client) throw new Error('Supabase client not configured');
+
+    const ITEM_CHUNK = 50;
+    const PAGE_SIZE = 1000;
+    const rows: PublishValueRow[] = [];
+
+    for (let i = 0; i < itemIds.length; i += ITEM_CHUNK) {
+      const chunkIds = itemIds.slice(i, i + ITEM_CHUNK);
+      let offset = 0;
+      while (true) {
+        const { data, error } = await client
+          .from('collection_item_values')
+          .select('id, item_id, field_id, value, created_at')
+          .in('item_id', chunkIds)
+          .eq('is_published', isPublished)
+          .is('deleted_at', null)
+          .order('id', { ascending: true })
+          .range(offset, offset + PAGE_SIZE - 1);
+
+        if (error) throw new Error(`Failed to fetch item values: ${error.message}`);
+
+        const batch = (data || []) as PublishValueRow[];
+        rows.push(...batch);
+        if (batch.length < PAGE_SIZE) break;
+        offset += PAGE_SIZE;
+      }
+    }
+
+    return rows;
+  }
+}
+
 /**
  * Load all values for the given field IDs with pagination.
  * Returns Map<fieldId, Map<itemId, value>> — much lighter than loading all
