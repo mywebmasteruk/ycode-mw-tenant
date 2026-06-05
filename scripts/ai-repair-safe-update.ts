@@ -136,8 +136,9 @@ function mergeBaseContext(filePath: string): string {
 
 async function resolvePackageLockConflict(): Promise<void> {
   console.log('Regenerating package-lock.json from package.json…');
-  run('npm install --package-lock-only --ignore-scripts');
-  run('git add package-lock.json');
+  runAllowFailure('rm -f package-lock.json');
+  run('npm install --no-audit --no-fund --legacy-peer-deps --ignore-scripts');
+  run('git add package-lock.json package.json');
   if (!runAllowFailure('git diff --cached --quiet')) {
     run('git commit -m "fix(ai): regenerate package-lock.json after merge"');
     run('git push origin HEAD');
