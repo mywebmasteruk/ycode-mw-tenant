@@ -49,8 +49,8 @@ async function authorize(request: NextRequest): Promise<Response | null> {
     return unauthorizedWithChallenge(request, 'Authorization required');
   }
 
-  const valid = await authenticateToken(token);
-  if (!valid) {
+  const mcpToken = await authenticateToken(token);
+  if (!mcpToken) {
     return unauthorizedWithChallenge(request, 'Invalid or expired access token');
   }
 

@@ -12,8 +12,10 @@
  * stops working immediately, not after the cache TTL expires.
  */
 
+import type { McpToken } from '@/lib/repositories/mcpTokenRepository';
+
 interface TokenCacheEntry {
-  valid: boolean;
+  token: McpToken | null;
   expires: number;
 }
 
@@ -33,9 +35,9 @@ export function getCachedToken(token: string): TokenCacheEntry | undefined {
   return undefined;
 }
 
-export function setCachedToken(token: string, valid: boolean): void {
-  const ttl = valid ? TOKEN_CACHE_TTL_VALID_MS : TOKEN_CACHE_TTL_INVALID_MS;
-  cache.set(token, { valid, expires: Date.now() + ttl });
+export function setCachedToken(token: string, mcpToken: McpToken | null): void {
+  const ttl = mcpToken ? TOKEN_CACHE_TTL_VALID_MS : TOKEN_CACHE_TTL_INVALID_MS;
+  cache.set(token, { token: mcpToken, expires: Date.now() + ttl });
 }
 
 export function invalidateToken(token: string): void {

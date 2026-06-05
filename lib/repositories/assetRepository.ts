@@ -252,7 +252,7 @@ export async function getAssetForProxy(id: string): Promise<Pick<Asset, 'id' | '
  * @param isPublished If true, get published versions; if false, get draft versions (default: false)
  */
 export async function getAssetsByIds(ids: string[], isPublished: boolean = false, tenantId?: string): Promise<Record<string, Asset>> {
-  const client = await getSupabaseAdmin(tenantId);
+  const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');

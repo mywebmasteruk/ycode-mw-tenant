@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { validateToken } from '@/lib/repositories/mcpTokenRepository';
+import { validateToken, type McpToken } from '@/lib/repositories/mcpTokenRepository';
 import { createMcpServer } from '@/lib/mcp/server';
 import { getCachedToken, setCachedToken } from '@/lib/mcp/token-cache';
 
@@ -35,22 +35,21 @@ function cleanupStaleSessions() {
   }
 }
 
-export async function authenticateToken(token: string): Promise<boolean> {
+export async function authenticateToken(token: string): Promise<McpToken | null> {
   const cached = getCachedToken(token);
   if (cached) {
-    return cached.valid;
+    return cached.token;
   }
 
-  let valid = false;
+  let mcpToken: McpToken | null = null;
   try {
-    const result = await validateToken(token);
-    valid = result !== null;
+    mcpToken = await validateToken(token);
   } catch {
-    valid = false;
+    mcpToken = null;
   }
 
-  setCachedToken(token, valid);
-  return valid;
+  setCachedToken(token, mcpToken);
+  return mcpToken;
 }
 
 export function addCorsHeaders(response: Response): Response {
