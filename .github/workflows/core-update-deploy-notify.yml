@@ -20,7 +20,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-      statuses: read
     steps:
       - name: Detect safe Ycode core update merge
         id: gate
@@ -49,51 +48,67 @@ jobs:
           version="$(node -p "require('./package.json').version")"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for Netlify production deploy
+      # Netlify does NOT post GitHub commit statuses for production (main) deploys —
+      # only deploy-preview checks on PRs. So we query the Netlify API directly for
+      # the production deploy whose commit_ref matches this merge SHA.
+      - name: Check Netlify credentials
         if: steps.gate.outputs.is_core_update == 'true'
+        id: creds
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          set -euo pipefail
+          if [ -n "${NETLIFY_AUTH_TOKEN:-}" ] && [ -n "${NETLIFY_SITE_ID:-}" ]; then
+            echo "has_netlify=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_netlify=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::NETLIFY_AUTH_TOKEN and/or NETLIFY_SITE_ID not set — skipping live deploy confirmation."
+          fi
+
+      - name: Wait for Netlify production deploy
+        if: steps.gate.outputs.is_core_update == 'true' && steps.creds.outputs.has_netlify == 'true'
         id: netlify
         env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          api="https://api.netlify.com/api/v1/sites/${NETLIFY_SITE_ID}/deploys?per_page=50"
           deadline=$((SECONDS + 1800))
-          production_url=""
-          netlify_state="pending"
 
           while [ "$SECONDS" -lt "$deadline" ]; do
-            payload="$(gh api "repos/${REPO}/commits/${SHA}/status")"
-            netlify_state="$(echo "$payload" | jq -r '
-              [.statuses[]
-               | select(.context | test("netlify"; "i"))
-               | select(.context | test("deploy-preview"; "i") | not)
-              ]
-              | if length == 0 then "pending"
-                elif any(.state == "failure" or .state == "error") then "failure"
-                elif any(.state == "success") then "success"
-                else "pending"
-                end
-            ')"
-            production_url="$(echo "$payload" | jq -r '
-              [.statuses[]
-               | select(.context | test("netlify"; "i"))
-               | select(.context | test("deploy-preview"; "i") | not)
-               | select(.state == "success")
-              ][0].target_url // empty
+            payload="$(curl -fsS -H "Authorization: Bearer ${NETLIFY_AUTH_TOKEN}" "$api" || echo '[]')"
+            match="$(echo "$payload" | jq -c --arg sha "$SHA" '
+              [ .[]
+                | select(.commit_ref == $sha)
+                | select((.context // "production") == "production")
+              ] | first // empty
             ')"
 
-            echo "[$(date -u +%H:%M:%S)] Netlify production status: ${netlify_state}"
-            if [ "$netlify_state" = "success" ]; then
-              echo "state=success" >> "$GITHUB_OUTPUT"
-              echo "url=${production_url}" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            if [ "$netlify_state" = "failure" ]; then
-              echo "state=failure" >> "$GITHUB_OUTPUT"
-              echo "url=${production_url}" >> "$GITHUB_OUTPUT"
-              echo "::error::Netlify production deploy failed for ${SHA}"
-              exit 1
+            if [ -n "$match" ] && [ "$match" != "null" ]; then
+              state="$(echo "$match" | jq -r '.state // "pending"')"
+              url="$(echo "$match" | jq -r '.ssl_url // .deploy_ssl_url // .links.permalink // empty')"
+              echo "[$(date -u +%H:%M:%S)] Netlify production deploy state: ${state}"
+              case "$state" in
+                ready)
+                  echo "state=success" >> "$GITHUB_OUTPUT"
+                  echo "url=${url}" >> "$GITHUB_OUTPUT"
+                  exit 0
+                  ;;
+                error)
+                  echo "state=failure" >> "$GITHUB_OUTPUT"
+                  echo "url=${url}" >> "$GITHUB_OUTPUT"
+                  echo "::error::Netlify production deploy failed for ${SHA}"
+                  exit 1
+                  ;;
+                *)
+                  : # new/enqueued/building/processing/uploading → keep waiting
+                  ;;
+              esac
+            else
+              echo "[$(date -u +%H:%M:%S)] No production deploy for ${SHA:0:12} yet…"
             fi
             sleep 30
           done
@@ -101,6 +116,28 @@ jobs:
           echo "state=timeout" >> "$GITHUB_OUTPUT"
           echo "::error::Timed out waiting for Netlify production deploy (30 minutes)."
           exit 1
+
+      - name: Note merge (Netlify confirmation skipped)
+        if: steps.gate.outputs.is_core_update == 'true' && steps.creds.outputs.has_netlify != 'true'
+        env:
+          PR_NUMBER: ${{ steps.gate.outputs.pr_number }}
+          VERSION: ${{ steps.pkg.outputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "## Ycode core update merged to main"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| PR | #${PR_NUMBER} |"
+            echo "| Version | \`${VERSION}\` |"
+            echo "| Commit | \`${SHA:0:12}\` |"
+            echo ""
+            echo "Netlify builds this commit automatically (repo + branch linked in Netlify)."
+            echo ""
+            echo "> Live-deploy confirmation was **skipped** because the \`NETLIFY_AUTH_TOKEN\` and \`NETLIFY_SITE_ID\` repository secrets are not set."
+            echo "> Add them under **Settings → Secrets and variables → Actions** to get an automatic production-live check and PR comment."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Write job summary
         if: steps.gate.outputs.is_core_update == 'true' && steps.netlify.outputs.state == 'success'
