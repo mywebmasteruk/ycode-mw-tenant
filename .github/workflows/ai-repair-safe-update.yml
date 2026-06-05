@@ -1,4 +1,4 @@
-name: AI repair safe update PR
+name: Mechanical repair safe update PR
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
         description: Only rerere + lockfile regen (no LLM)
         required: false
         type: boolean
-        default: false
+        default: true
       max_llm_files:
         description: Max files to send to OpenRouter per run
         required: false

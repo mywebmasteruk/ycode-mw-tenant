@@ -1,0 +1,89 @@
+# MasjidWeb CTO bot — runs after weekly (or manual) safe-update PR creation.
+# Dispatches mechanical conflict repair and emails the platform admin.
+
+name: Core update operator
+
+on:
+  workflow_run:
+    workflows: ["Create safe Ycode update PR"]
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+
+jobs:
+  operate:
+    if: ${{ github.event.workflow_run.conclusion != 'skipped' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve latest safe-update PR
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 20,
+            });
+            const pr = prs.find((p) => p.head.ref.startsWith('safe-ycode-update/'));
+            if (!pr) {
+              core.setOutput('found', 'false');
+              return;
+            }
+            core.setOutput('found', 'true');
+            core.setOutput('number', String(pr.number));
+            core.setOutput('url', pr.html_url);
+            core.setOutput('draft', pr.draft ? 'true' : 'false');
+            core.setOutput('mergeable', pr.mergeable === false ? 'false' : 'true');
+
+      - name: Dispatch mechanical repair
+        if: steps.pr.outputs.found == 'true' && steps.pr.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run ai-repair-safe-update.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            -f "pr_number=${{ steps.pr.outputs.number }}" \
+            -f "mechanical_only=true"
+
+      - name: Notify MasjidWeb admin
+        if: steps.pr.outputs.found == 'true' && vars.ADMIN_DASHBOARD_NOTIFY_URL != ''
+        env:
+          NOTIFY_URL: ${{ vars.ADMIN_DASHBOARD_NOTIFY_URL }}
+          NOTIFY_SECRET: ${{ secrets.CORE_UPDATE_NOTIFY_SECRET }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+          WF_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          IS_DRAFT: ${{ steps.pr.outputs.draft }}
+        run: |
+          if [ -z "$NOTIFY_SECRET" ]; then
+            echo "CORE_UPDATE_NOTIFY_SECRET not set — skip email notify"
+            exit 0
+          fi
+          if [ "$WF_CONCLUSION" != "success" ]; then
+            MSG="The weekly core update workflow finished with status: ${WF_CONCLUSION}. Check GitHub Actions."
+            EVENT="update_failed"
+          elif [ "$IS_DRAFT" = "true" ]; then
+            MSG="A new safe-update PR was opened (draft). The operator started mechanical repair. You will get another email when checks are green."
+            EVENT="update_prepared"
+          else
+            MSG="A new safe-update PR was opened and is ready for preview. Open the admin dashboard when you are ready to review."
+            EVENT="update_prepared"
+          fi
+          curl -fsS -X POST "$NOTIFY_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-Core-Update-Notify-Secret: $NOTIFY_SECRET" \
+            -d "$(jq -n \
+              --arg event "$EVENT" \
+              --arg message "$MSG" \
+              --argjson prNumber "$PR_NUMBER" \
+              --arg prUrl "$PR_URL" \
+              '{event: $event, message: $message, prNumber: $prNumber, prUrl: $prUrl}')"
+
+      - name: No open safe-update PR
+        if: steps.pr.outputs.found != 'true'
+        run: echo "No open safe-ycode-update PR — nothing to operate on."
