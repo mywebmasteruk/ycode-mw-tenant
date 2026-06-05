@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { noCache } from '@/lib/api-response';
 import { publishPages } from '@/lib/services/pageService';
-import { publishCollectionWithItems, groupItemsByCollection, cleanupDeletedCollections } from '@/lib/services/collectionService';
+import { publishCollectionWithItems, groupItemsByCollection, cleanupDeletedCollections, getCollectionsNeedingDeletionCleanup } from '@/lib/services/collectionService';
 import { publishLocalisation } from '@/lib/services/localisationService';
 import type { PublishLocalisationResult } from '@/lib/services/localisationService';
 import { publishFolders } from '@/lib/services/folderService';
@@ -24,8 +24,9 @@ import { dispatchSitePublishedEvent } from '@/lib/services/webhookService';
 import { getAllDraftPages, hardDeleteSoftDeletedPages, backfillMissingPageHashes, getSoftDeletedPageIds } from '@/lib/repositories/pageRepository';
 import { publishComponents, getUnpublishedComponents, hardDeleteSoftDeletedComponents } from '@/lib/repositories/componentRepository';
 import { publishLayerStyles, getUnpublishedLayerStyles, hardDeleteSoftDeletedLayerStyles } from '@/lib/repositories/layerStyleRepository';
-import { getAllCollections } from '@/lib/repositories/collectionRepository';
-import { getAllItemsByCollectionId } from '@/lib/repositories/collectionItemRepository';
+import { getAllCollections, getCollectionsRaw } from '@/lib/repositories/collectionRepository';
+import { getAllFields } from '@/lib/repositories/collectionFieldRepository';
+import { getAllItemsByCollectionId, getAllItemsRaw } from '@/lib/repositories/collectionItemRepository';
 import { publishAssets, getUnpublishedAssets, hardDeleteSoftDeletedAssets } from '@/lib/repositories/assetRepository';
 import { publishAssetFolders, getUnpublishedAssetFolders, hardDeleteSoftDeletedAssetFolders } from '@/lib/repositories/assetFolderRepository';
 import { publishFonts } from '@/lib/repositories/fontRepository';
@@ -38,6 +39,20 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 /** Full publish (pages + CMS + CSS + cache) exceeds default Netlify/Next limits without this. */
 export const maxDuration = 300;
+
+/** Group rows (fields, items, …) by their parent collection_id. */
+function groupByCollectionId<T extends { collection_id: string }>(rows: T[]): Map<string, T[]> {
+  const map = new Map<string, T[]>();
+  for (const row of rows) {
+    const list = map.get(row.collection_id);
+    if (list) {
+      list.push(row);
+    } else {
+      map.set(row.collection_id, [row]);
+    }
+  }
+  return map;
+}
 
 interface PublishRequest {
   publishAll?: boolean; // If true and no specific items provided, publish all unpublished items
@@ -297,14 +312,38 @@ export async function POST(request: NextRequest) {
         } else if (isPublishingAll) {
           const allCollections = await getAllCollections({ is_published: false });
 
+          // Bulk pre-fetch published collections, all draft/published fields, and all
+          // draft/published items in a handful of direct-DB reads, then group by
+          // collection. This replaces the per-collection metadata/field/item
+          // round-trips that dominated publish time.
+          const publishedCollections = await getCollectionsRaw(true);
+          const publishedCollectionById = new Map(publishedCollections.map(c => [c.id, c]));
+          const draftFieldsByCollection = groupByCollectionId(await getAllFields(false));
+          const publishedFieldsByCollection = groupByCollectionId(await getAllFields(true));
+          const draftItemsByCollection = groupByCollectionId(await getAllItemsRaw(false));
+          const publishedItemsByCollection = groupByCollectionId(await getAllItemsRaw(true));
+          // One global probe instead of two detection queries per collection: only
+          // the collections in this set have soft-deleted draft items/fields to clean.
+          const collectionsNeedingCleanup = await getCollectionsNeedingDeletionCleanup();
+
           for (const collection of allCollections) {
-            const items = await getAllItemsByCollectionId(collection.id, false);
+            const draftItems = draftItemsByCollection.get(collection.id) ?? [];
             const publishResult = await publishCollectionWithItems({
               collectionId: collection.id,
-              itemIds: items.map((item: any) => item.id),
+              itemIds: draftItems.map(item => item.id),
+              skipItemValidation: true,
+              skipDeletionCleanup: !collectionsNeedingCleanup.has(collection.id),
+              prefetched: {
+                draftCollection: collection,
+                publishedCollection: publishedCollectionById.get(collection.id) ?? null,
+                draftFields: draftFieldsByCollection.get(collection.id) ?? [],
+                publishedFields: publishedFieldsByCollection.get(collection.id) ?? [],
+                draftItems,
+                publishedItems: publishedItemsByCollection.get(collection.id) ?? [],
+              },
             });
             if (!publishResult.success) {
-              console.error(`[Publish] collection ${collection.id} (${collection.name}) FAILED (${items.length} items):`, publishResult.errors);
+              console.error(`[Publish] collection ${collection.id} (${collection.name}) FAILED (${draftItems.length} items):`, publishResult.errors);
             }
             const p = publishResult.published;
             const changedItems = p?.itemsCount || 0;

@@ -1,6 +1,7 @@
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
-import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSupabaseAdmin, getTenantIdFromHeaders } from '@/lib/supabase-server';
 import { SUPABASE_QUERY_LIMIT } from '@/lib/supabase-constants';
+import { getKnexClient } from '@/lib/knex-client';
 import type { CollectionField, CreateCollectionFieldData, UpdateCollectionFieldData } from '@/types';
 import { randomUUID } from 'crypto';
 
@@ -26,15 +27,34 @@ export interface FieldFilters {
  * @param is_published - Filter for draft (false) or published (true) fields. Defaults to false (draft).
  */
 export async function getAllFields(
-  is_published: boolean = false
+  is_published: boolean = false,
+  tenantId?: string
 ): Promise<CollectionField[]> {
-  const client = await getSupabaseAdmin();
+  // Fast path: single direct-DB (Knex) read instead of paginated PostgREST.
+  try {
+    const knex = await getKnexClient();
+    const resolvedTenantId = tenantId ?? await getTenantIdFromHeaders();
+    let query = knex('collection_fields')
+      .select('*')
+      .where('is_published', is_published)
+      .whereNull('deleted_at')
+      .orderBy('collection_id', 'asc')
+      .orderBy('order', 'asc');
+    if (resolvedTenantId) {
+      query = query.where('tenant_id', resolvedTenantId);
+    }
+    return await query;
+  } catch {
+    // Fallback to paginated PostgREST reads below.
+  }
+
+  const client = await getSupabaseAdmin(tenantId);
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   // Use pagination to handle >1000 fields (Supabase default limit)
   const allFields: CollectionField[] = [];
@@ -51,8 +71,8 @@ export async function getAllFields(
       .order('order', { ascending: true })
       .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
 
-    if (tenantId) {
-      pageQ = pageQ.eq('tenant_id', tenantId);
+    if (effectiveTenantId) {
+      pageQ = pageQ.eq('tenant_id', effectiveTenantId);
     }
 
     const { data, error } = await pageQ;
@@ -91,7 +111,7 @@ export async function getFieldsByCollectionId(
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   let query = client
     .from('collection_fields')
@@ -101,8 +121,8 @@ export async function getFieldsByCollectionId(
     .is('deleted_at', null)
     .order('order', { ascending: true });
 
-  if (tenantId) {
-    query = query.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    query = query.eq('tenant_id', effectiveTenantId);
   }
 
   if (filters?.excludeComputed) {
@@ -179,7 +199,7 @@ export async function getFieldById(id: string, isPublished: boolean = false): Pr
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   let q = client
     .from('collection_fields')
@@ -188,8 +208,8 @@ export async function getFieldById(id: string, isPublished: boolean = false): Pr
     .eq('is_published', isPublished)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    q = q.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    q = q.eq('tenant_id', effectiveTenantId);
   }
 
   const { data, error } = await q.single();
@@ -211,7 +231,7 @@ export async function createField(fieldData: CreateCollectionFieldData): Promise
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   const id = randomUUID();
   const isPublished = fieldData.is_published ?? false;
@@ -229,8 +249,8 @@ export async function createField(fieldData: CreateCollectionFieldData): Promise
     updated_at: new Date().toISOString(),
   };
 
-  if (tenantId) {
-    insertRow.tenant_id = tenantId;
+  if (effectiveTenantId) {
+    insertRow.tenant_id = effectiveTenantId;
   }
 
   const { data, error } = await client
@@ -263,7 +283,7 @@ export async function updateField(
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   let upd = client
     .from('collection_fields')
@@ -275,8 +295,8 @@ export async function updateField(
     .eq('is_published', isPublished)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    upd = upd.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    upd = upd.eq('tenant_id', effectiveTenantId);
   }
 
   const { data, error } = await upd.select().single();
@@ -302,7 +322,7 @@ export async function deleteField(id: string, isPublished: boolean = false): Pro
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   const now = new Date().toISOString();
 
@@ -317,8 +337,8 @@ export async function deleteField(id: string, isPublished: boolean = false): Pro
     .eq('is_published', isPublished)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    fUpd = fUpd.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    fUpd = fUpd.eq('tenant_id', effectiveTenantId);
   }
 
   const { error: fieldError } = await fUpd;
@@ -338,8 +358,8 @@ export async function deleteField(id: string, isPublished: boolean = false): Pro
     .eq('is_published', isPublished)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    vUpd = vUpd.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    vUpd = vUpd.eq('tenant_id', effectiveTenantId);
   }
 
   const { error: valuesError } = await vUpd;
@@ -366,7 +386,7 @@ export async function reorderFields(
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   // Update order for each field
   const updates = field_ids.map((field_id, index) => {
@@ -381,8 +401,8 @@ export async function reorderFields(
       .eq('is_published', is_published)
       .is('deleted_at', null);
 
-    if (tenantId) {
-      u = u.eq('tenant_id', tenantId);
+    if (effectiveTenantId) {
+      u = u.eq('tenant_id', effectiveTenantId);
     }
 
     return u;
@@ -411,13 +431,13 @@ export async function hardDeleteField(id: string, isPublished: boolean = false):
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   // Hard delete the field (CASCADE will delete values)
   let delQ = client.from('collection_fields').delete().eq('id', id).eq('is_published', isPublished);
 
-  if (tenantId) {
-    delQ = delQ.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    delQ = delQ.eq('tenant_id', effectiveTenantId);
   }
 
   const { error } = await delQ;
@@ -446,9 +466,9 @@ export async function publishField(id: string): Promise<CollectionField> {
     throw new Error('Draft field not found');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
   const rowTid =
-    tenantId ?? (draft as { tenant_id?: string | null }).tenant_id ?? undefined;
+    effectiveTenantId ?? (draft as { tenant_id?: string | null }).tenant_id ?? undefined;
 
   const upsertRow: Record<string, unknown> = {
     id: draft.id, // Same UUID

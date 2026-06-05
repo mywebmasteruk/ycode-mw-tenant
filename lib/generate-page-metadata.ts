@@ -8,14 +8,22 @@ import 'server-only';
 
 import { cache } from 'react';
 import type { Metadata } from 'next';
-import type { Asset, Page } from '@/types';
+import type { Asset, Locale, Page, PageFolder, Translation } from '@/types';
 import type { CollectionItemWithValues } from '@/types';
 import { resolveInlineVariables, resolveImageUrl } from '@/lib/resolve-cms-variables';
 import { getSettingsByKeys } from '@/lib/repositories/settingsRepository';
 import { getAssetById } from '@/lib/repositories/assetRepository';
+import { getAllLocales } from '@/lib/repositories/localeRepository';
+import { getAllPublishedPageFolders } from '@/lib/repositories/pageFolderRepository';
+import { getTranslationsByLocale } from '@/lib/repositories/translationRepository';
 import { buildSvgDataUrl, getAssetProxyUrl } from '@/lib/asset-utils';
 import { generateColorVariablesCss } from '@/lib/repositories/colorVariableRepository';
+import { buildPageHreflangAlternates } from '@/lib/hreflang-utils';
+import { getTranslatableKey } from '@/lib/locale-runtime';
 import { getSiteBaseUrl } from '@/lib/url-utils';
+
+/** Languages map shape Next.js expects under `metadata.alternates.languages`. */
+type MetadataLanguages = NonNullable<NonNullable<Metadata['alternates']>['languages']>;
 
 /**
  * Global page render settings fetched once per page render
@@ -159,6 +167,91 @@ export async function fetchGlobalPageSettings(isPreview = false): Promise<Global
 export const fetchGlobalSeoSettings = fetchGlobalPageSettingsCached;
 
 /**
+ * Localization data needed to build per-page hreflang alternates.
+ * Translations are keyed by locale ID, then by translatable key.
+ */
+interface HreflangDataset {
+  locales: Locale[];
+  folders: PageFolder[];
+  translationsByLocale: Map<string, Record<string, Translation>>;
+}
+
+/**
+ * Load published locales, folders and per-locale translations needed to build
+ * hreflang alternates. Wrapped in React cache so it runs once per request even
+ * when multiple metadata helpers ask for it. Returns a single locale only when
+ * the site isn't multilingual, in which case callers skip hreflang.
+ */
+const fetchHreflangDataset = cache(async (): Promise<HreflangDataset> => {
+  const [locales, folders] = await Promise.all([
+    getAllLocales(true),
+    getAllPublishedPageFolders(),
+  ]);
+
+  const translationsByLocale = new Map<string, Record<string, Translation>>();
+
+  if (locales.length > 1) {
+    for (const locale of locales) {
+      if (locale.is_default) continue;
+      const translations = await getTranslationsByLocale(locale.id, true);
+      const map: Record<string, Translation> = {};
+      for (const t of translations) {
+        map[getTranslatableKey(t)] = t;
+      }
+      translationsByLocale.set(locale.id, map);
+    }
+  }
+
+  return { locales, folders, translationsByLocale };
+});
+
+/**
+ * Build the `metadata.alternates.languages` map for a page on a multilingual
+ * site. Returns null when hreflang shouldn't be emitted (single locale, no
+ * absolute base URL, or no resolvable alternates).
+ */
+async function buildHreflangLanguages(
+  page: Page,
+  baseUrl: string,
+  collectionItem?: CollectionItemWithValues
+): Promise<MetadataLanguages | null> {
+  const { locales, folders, translationsByLocale } = await fetchHreflangDataset();
+
+  if (locales.length <= 1) {
+    return null;
+  }
+
+  // Dynamic pages need the collection item's slug to resolve per-locale URLs.
+  const slugFieldId = page.settings?.cms?.slug_field_id;
+  const dynamicSlug = page.is_dynamic && collectionItem && slugFieldId
+    ? {
+      itemId: collectionItem.id,
+      fieldId: slugFieldId,
+      defaultValue: collectionItem.values?.[slugFieldId] || '',
+    }
+    : null;
+
+  const alternates = buildPageHreflangAlternates({
+    page,
+    folders,
+    baseUrl,
+    locales,
+    translationsByLocale,
+    dynamicSlug,
+  });
+
+  if (alternates.length === 0) {
+    return null;
+  }
+
+  const languages: MetadataLanguages = {};
+  for (const alt of alternates) {
+    languages[alt.hreflang as keyof MetadataLanguages] = alt.href;
+  }
+  return languages;
+}
+
+/**
  * Generate Next.js metadata from a page object
  * Handles SEO settings, Open Graph, Twitter Card, and noindex rules
  * Resolves field variables for dynamic pages
@@ -227,8 +320,27 @@ export async function generatePageMetadata(
         : `${canonicalBase}${pagePath.startsWith('/') ? pagePath : '/' + pagePath}`;
 
       metadata.alternates = {
+        ...metadata.alternates,
         canonical: canonicalUrl,
       };
+    }
+
+    // Add hreflang alternates for multilingual sites. Skipped for error pages
+    // and noindex pages (excluded from the language cluster, mirroring the
+    // sitemap), and requires an absolute base URL to emit valid links.
+    if (siteBaseUrl && !isErrorPage && !seo?.noindex) {
+      try {
+        const languages = await buildHreflangLanguages(page, siteBaseUrl, collectionItem);
+        if (languages) {
+          metadata.alternates = {
+            ...metadata.alternates,
+            languages,
+          };
+        }
+      } catch (error) {
+        // Non-fatal: a page should still render without hreflang links.
+        console.error('Failed to generate hreflang alternates:', error);
+      }
     }
   }
 

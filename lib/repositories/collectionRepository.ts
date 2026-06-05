@@ -1,5 +1,6 @@
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
-import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSupabaseAdmin, getTenantIdFromHeaders } from '@/lib/supabase-server';
+import { getKnexClient } from '@/lib/knex-client';
 import type { Collection, CreateCollectionData, UpdateCollectionData } from '@/types';
 import { randomUUID } from 'crypto';
 
@@ -32,7 +33,7 @@ export async function getAllCollections(filters?: QueryFilters): Promise<Collect
 
   const isPublished = filters?.is_published ?? false;
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   let query = client
     .from('collections')
@@ -44,8 +45,8 @@ export async function getAllCollections(filters?: QueryFilters): Promise<Collect
     .order('order', { ascending: true })
     .order('created_at', { ascending: false });
 
-  if (tenantId) {
-    query = query.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    query = query.eq('tenant_id', effectiveTenantId);
   }
 
   // Apply deleted filter
@@ -90,6 +91,39 @@ export async function getAllCollections(filters?: QueryFilters): Promise<Collect
 }
 
 /**
+ * Get raw collection rows for a publish flag in a single direct-DB (Knex) read.
+ * Unlike getAllCollections, this skips item-count joins and published-version
+ * lookups — intended for bulk publish flows that only need the base columns.
+ * @param tenantId - Optional explicit tenant scope (required inside unstable_cache)
+ */
+export async function getCollectionsRaw(isPublished: boolean, tenantId?: string): Promise<Collection[]> {
+  try {
+    const knex = await getKnexClient();
+    const resolvedTenantId = tenantId ?? await getTenantIdFromHeaders();
+    let query = knex('collections')
+      .select('*')
+      .where('is_published', isPublished)
+      .whereNull('deleted_at');
+    if (resolvedTenantId) {
+      query = query.where('tenant_id', resolvedTenantId);
+    }
+    return await query;
+  } catch {
+    const client = await getSupabaseAdmin(tenantId);
+    if (!client) throw new Error('Supabase client not configured');
+
+    const { data, error } = await client
+      .from('collections')
+      .select('*')
+      .eq('is_published', isPublished)
+      .is('deleted_at', null);
+
+    if (error) throw new Error(`Failed to fetch collections: ${error.message}`);
+    return data || [];
+  }
+}
+
+/**
  * Batch-check which collection IDs have a published version.
  * Returns a Set of IDs that have is_published=true rows.
  */
@@ -102,7 +136,7 @@ export async function getPublishedCollectionIds(collectionIds: string[]): Promis
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   let q = client
     .from('collections')
@@ -111,8 +145,8 @@ export async function getPublishedCollectionIds(collectionIds: string[]): Promis
     .eq('is_published', true)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    q = q.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    q = q.eq('tenant_id', effectiveTenantId);
   }
 
   const { data, error } = await q;
@@ -141,7 +175,7 @@ export async function getCollectionById(
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   let query = client
     .from('collections')
@@ -149,8 +183,8 @@ export async function getCollectionById(
     .eq('id', id)
     .eq('is_published', isPublished);
 
-  if (tenantId) {
-    query = query.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    query = query.eq('tenant_id', effectiveTenantId);
   }
 
   // Filter out deleted unless explicitly requested
@@ -179,7 +213,7 @@ export async function getCollectionByName(name: string, isPublished: boolean = f
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   let q = client
     .from('collections')
@@ -188,8 +222,8 @@ export async function getCollectionByName(name: string, isPublished: boolean = f
     .eq('is_published', isPublished)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    q = q.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    q = q.eq('tenant_id', effectiveTenantId);
   }
 
   const { data, error } = await q.single();
@@ -211,7 +245,7 @@ export async function createCollection(collectionData: CreateCollectionData): Pr
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   const id = randomUUID();
   const isPublished = collectionData.is_published ?? false;
@@ -225,8 +259,8 @@ export async function createCollection(collectionData: CreateCollectionData): Pr
     updated_at: new Date().toISOString(),
   };
 
-  if (tenantId) {
-    insertRow.tenant_id = tenantId;
+  if (effectiveTenantId) {
+    insertRow.tenant_id = effectiveTenantId;
   }
 
   const { data, error } = await client
@@ -259,7 +293,7 @@ export async function updateCollection(
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   let upd = client
     .from('collections')
@@ -271,8 +305,8 @@ export async function updateCollection(
     .eq('is_published', isPublished)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    upd = upd.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    upd = upd.eq('tenant_id', effectiveTenantId);
   }
 
   const { data, error } = await upd.select().single();
@@ -297,7 +331,7 @@ export async function deleteCollection(id: string, isPublished: boolean = false)
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   const now = new Date().toISOString();
 
@@ -312,8 +346,8 @@ export async function deleteCollection(id: string, isPublished: boolean = false)
     .eq('is_published', isPublished)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    colUpd = colUpd.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    colUpd = colUpd.eq('tenant_id', effectiveTenantId);
   }
 
   const { error: collectionError } = await colUpd;
@@ -333,8 +367,8 @@ export async function deleteCollection(id: string, isPublished: boolean = false)
     .eq('is_published', isPublished)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    fldUpd = fldUpd.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    fldUpd = fldUpd.eq('tenant_id', effectiveTenantId);
   }
 
   const { error: fieldsError } = await fldUpd;
@@ -354,8 +388,8 @@ export async function deleteCollection(id: string, isPublished: boolean = false)
     .eq('is_published', isPublished)
     .is('deleted_at', null);
 
-  if (tenantId) {
-    itmUpd = itmUpd.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    itmUpd = itmUpd.eq('tenant_id', effectiveTenantId);
   }
 
   const { error: itemsError } = await itmUpd;
@@ -372,8 +406,8 @@ export async function deleteCollection(id: string, isPublished: boolean = false)
     .eq('collection_id', id)
     .eq('is_published', isPublished);
 
-  if (tenantId) {
-    itmSel = itmSel.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    itmSel = itmSel.eq('tenant_id', effectiveTenantId);
   }
 
   const { data: items } = await itmSel;
@@ -391,8 +425,8 @@ export async function deleteCollection(id: string, isPublished: boolean = false)
       .eq('is_published', isPublished)
       .is('deleted_at', null);
 
-    if (tenantId) {
-      valUpd = valUpd.eq('tenant_id', tenantId);
+    if (effectiveTenantId) {
+      valUpd = valUpd.eq('tenant_id', effectiveTenantId);
     }
 
     const { error: valuesError } = await valUpd;
@@ -417,13 +451,13 @@ export async function hardDeleteCollection(id: string, isPublished: boolean = fa
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   // Hard delete the collection (CASCADE will delete all related data)
   let delQ = client.from('collections').delete().eq('id', id).eq('is_published', isPublished);
 
-  if (tenantId) {
-    delQ = delQ.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    delQ = delQ.eq('tenant_id', effectiveTenantId);
   }
 
   const { error } = await delQ;
@@ -452,9 +486,9 @@ export async function publishCollection(id: string): Promise<Collection> {
     throw new Error('Draft collection not found');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
   const rowTid =
-    tenantId ?? (draft as { tenant_id?: string | null }).tenant_id ?? undefined;
+    effectiveTenantId ?? (draft as { tenant_id?: string | null }).tenant_id ?? undefined;
 
   const upsertRow: Record<string, unknown> = {
     id: draft.id, // Same UUID
@@ -516,7 +550,7 @@ export async function getUnpublishedCollections(): Promise<Collection[]> {
   // Batch fetch all published collections for comparison
   const draftIds = draftCollections.map(c => c.id);
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   let pubQ = client
     .from('collections')
@@ -524,8 +558,8 @@ export async function getUnpublishedCollections(): Promise<Collection[]> {
     .in('id', draftIds)
     .eq('is_published', true);
 
-  if (tenantId) {
-    pubQ = pubQ.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    pubQ = pubQ.eq('tenant_id', effectiveTenantId);
   }
 
   const { data: publishedCollections, error: publishedError } = await pubQ;
@@ -559,7 +593,7 @@ export async function reorderCollections(isPublished: boolean, collectionIds: st
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   // Update order for each collection
   const updates = collectionIds.map((id, index) => {
@@ -573,8 +607,8 @@ export async function reorderCollections(isPublished: boolean, collectionIds: st
       .eq('is_published', isPublished)
       .is('deleted_at', null);
 
-    if (tenantId) {
-      u = u.eq('tenant_id', tenantId);
+    if (effectiveTenantId) {
+      u = u.eq('tenant_id', effectiveTenantId);
     }
 
     return u;
