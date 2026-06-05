@@ -6,6 +6,7 @@ import {
   replaceConflictHunk,
 } from '../lib/masjidweb/merge-conflict-hunks';
 import {
+  assertBalancedDelimiters,
   assertNoConflictMarkers,
   DEFAULT_AI_REPAIR_MODEL,
   requestOpenRouterRepair,
@@ -23,7 +24,19 @@ const MAX_FILE_CHARS = 120_000;
 const MAX_HUNK_CHARS = 40_000;
 const MAX_HUNKS_PER_FILE = 5;
 const MAX_BATCH_HUNK_CHARS = 80_000;
+const MIN_OUTPUT_TOKENS = 16_000;
+const MAX_OUTPUT_TOKENS = 60_000;
 const SEAMS_PATH = join(REPO_ROOT, 'docs/masjidweb-core-seams.md');
+
+/**
+ * Estimate the output token budget needed to return `chars` of resolved text.
+ * ~3.2 chars/token for code, plus 25% headroom, clamped to model limits. This
+ * prevents the truncation that silently shipped a partial file before.
+ */
+function outputTokenBudget(chars: number): number {
+  const estimated = Math.ceil((chars / 3.2) * 1.25);
+  return Math.min(MAX_OUTPUT_TOKENS, Math.max(MIN_OUTPUT_TOKENS, estimated));
+}
 
 function run(command: string): string {
   return execSync(command, { encoding: 'utf8', cwd: REPO_ROOT }).trim();
@@ -152,6 +165,10 @@ async function requestResolvedConflictText(
           'Keep surrounding logic intact; do not omit code that appears after the conflict in the file.',
         ];
 
+  // Budget output tokens from the size of what the model must return so large
+  // whole-file resolutions are not truncated at the default cap.
+  const maxTokens = outputTokenBudget(conflictText.length);
+
   const result = await requestOpenRouterRepair({
     apiKey,
     model,
@@ -162,7 +179,7 @@ async function requestResolvedConflictText(
         content: [mergeBaseContext(filePath), ...instruction, '', conflictText].join('\n'),
       },
     ],
-    maxTokens: mode === 'batch' ? 24_000 : undefined,
+    maxTokens,
   });
 
   const resolved = stripCodeFences(result.reply);
@@ -234,6 +251,7 @@ async function resolveConflictFileByHunks(
       content = replaceConflictHunk(content, hunks[index], resolvedHunks[index]);
     }
     assertNoConflictMarkers(content, filePath);
+    assertBalancedDelimiters(content, filePath);
     const absolute = join(REPO_ROOT, filePath);
     writeFileSync(absolute, content.endsWith('\n') ? content : `${content}\n`, 'utf8');
     run(`git add -- "${filePath}"`);
@@ -277,6 +295,7 @@ async function resolveConflictFileByHunks(
     assertNoConflictMarkers(content, filePath);
   }
 
+  assertBalancedDelimiters(content, filePath);
   const absolute = join(REPO_ROOT, filePath);
   writeFileSync(absolute, content.endsWith('\n') ? content : `${content}\n`, 'utf8');
   run(`git add -- "${filePath}"`);
@@ -324,6 +343,7 @@ async function resolveConflictFile(
     throw new Error(`Model returned unchanged content for ${filePath}`);
   }
 
+  assertBalancedDelimiters(resolved, filePath);
   writeFileSync(absolute, resolved.endsWith('\n') ? resolved : `${resolved}\n`, 'utf8');
   run(`git add -- "${filePath}"`);
   if (!runAllowFailure('git diff --cached --quiet')) {
