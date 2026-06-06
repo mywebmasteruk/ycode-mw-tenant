@@ -3,8 +3,9 @@ name: Create safe Ycode update PR
 on:
   workflow_dispatch:
   schedule:
-    # Weekly — Monday 06:00 UTC (MasjidWeb CTO bot operator follows in core-update-operator.yml)
-    - cron: "0 6 * * 1"
+    # Daily 06:00 UTC while validating the core-update pipeline.
+    # When confident, switch to weekly: "0 6 * * 1" (Mondays only).
+    - cron: "0 6 * * *"
 
 permissions:
   contents: write
