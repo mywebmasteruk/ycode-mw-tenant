@@ -167,6 +167,7 @@ jobs:
             let body = '### MasjidWeb AI repair\n\n';
             if (repairOutcome === 'failure') {
               body += 'AI repair **failed**. Check the workflow logs for OpenRouter or conflict resolution errors.\n';
+              body += 'If mechanical repair could not clear conflicts, the **Cursor core-update escalation** automation may run when PR CI fails (see `docs/CURSOR_CORE_UPDATE_ESCALATION.md`).\n';
             } else if (!pushChanged) {
               body += 'AI repair found **no committable changes** (no conflict markers or already clean).\n';
             } else if (safetyOutcome === 'failure') {

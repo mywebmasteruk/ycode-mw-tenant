@@ -10,6 +10,7 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  actions: write
 
 jobs:
   create-update-pr:
@@ -114,6 +115,7 @@ jobs:
 
       - name: Open or update pull request
         if: steps.changes.outputs.has_changes == 'true'
+        id: open_pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRANCH: ${{ steps.branch.outputs.branch }}
@@ -169,6 +171,24 @@ jobs:
           if [ "$MERGE_STATUS" != "0" ] || grep -q "Status: high" /tmp/update-safety-report.md; then
             gh pr edit "$pr_number" --repo "$GITHUB_REPOSITORY" --add-label "needs-developer-review,tenant-sensitive-update"
           fi
+
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch mechanical repair for conflicted PR
+        if: >-
+          steps.changes.outputs.has_changes == 'true'
+          && steps.merge.outputs.status != '0'
+          && steps.open_pr.outputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.open_pr.outputs.pr_number }}
+        run: |
+          echo "Dispatching mechanical repair for conflicted PR #${PR_NUMBER}"
+          gh workflow run ai-repair-safe-update.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            -f "pr_number=${PR_NUMBER}" \
+            -f "mechanical_only=true"
+          echo "Mechanical repair workflow started. CI will mark the PR ready when checks pass."
 
       - name: No upstream changes found
         if: steps.changes.outputs.has_changes == 'false'
