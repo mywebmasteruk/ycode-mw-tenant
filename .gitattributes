@@ -1,0 +1,11 @@
+# MasjidWeb safe-update merge hygiene — reduces conflict noise and token spend.
+# See docs/masjidweb-core-seams.md
+
+# Fork-only: keep our copy when upstream also changed the same path
+lib/masjidweb/** merge=ours
+lib/supabase-cookie-domain.ts merge=ours
+lib/auth-invite-redirect.ts merge=ours
+docs/masjidweb-core-seams.md merge=ours
+netlify.toml merge=ours
+
+# Lockfiles: resolve in CI via regenerate, not LLM (no merge driver here)
