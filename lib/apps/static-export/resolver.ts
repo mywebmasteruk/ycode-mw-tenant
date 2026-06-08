@@ -175,6 +175,7 @@ function renderResolved(
     components: data.components,
     locale: data.locale ?? ctx.locale ?? null,
     translations: data.translations ?? ctx.translations,
+    pageId: page.id,
   })
 
   // Page-level custom code lives at `page.settings.custom_code.{head,body}`.
