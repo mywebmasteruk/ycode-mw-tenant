@@ -3,9 +3,10 @@
 # are caught before the next business day.
 #
 # Alerts (v1): workflow failure + GitHub summary. Enable GitHub Actions email
-# notifications on this repo for on-failure alerts. Optional webhook notify
-# uses the same ADMIN_DASHBOARD_NOTIFY_URL / CORE_UPDATE_NOTIFY_SECRET pair
-# as core-update-operator when configured.
+# notifications on this repo for on-failure alerts. Optional webhooks use the
+# same CORE_UPDATE_NOTIFY_SECRET as core-update-operator when configured:
+#   ADMIN_DASHBOARD_ISOLATION_LOG_URL — records pass/fail history in admin Logs
+#   ADMIN_DASHBOARD_NOTIFY_URL — failure email with Vitest output (Resend via admin dashboard)
 
 name: Daily tenant isolation check
 
@@ -37,7 +38,11 @@ jobs:
 
       - name: Run tenant isolation tests
         id: isolation
-        run: bash scripts/check-tenant-isolation.sh
+        run: |
+          set -o pipefail
+          START_MS=$(($(date +%s) * 1000))
+          echo "start_ms=$START_MS" >> "$GITHUB_OUTPUT"
+          bash scripts/check-tenant-isolation.sh 2>&1 | tee isolation-output.txt
 
       - name: Write job summary
         if: always()
@@ -68,20 +73,79 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Optional admin notify on failure
-        if: failure() && vars.ADMIN_DASHBOARD_NOTIFY_URL != ''
+      - name: Report result to admin dashboard
+        if: always() && vars.ADMIN_DASHBOARD_ISOLATION_LOG_URL != ''
         env:
-          NOTIFY_URL: ${{ vars.ADMIN_DASHBOARD_NOTIFY_URL }}
+          LOG_URL: ${{ vars.ADMIN_DASHBOARD_ISOLATION_LOG_URL }}
           NOTIFY_SECRET: ${{ secrets.CORE_UPDATE_NOTIFY_SECRET }}
         run: |
           if [ -z "$NOTIFY_SECRET" ]; then
-            echo "CORE_UPDATE_NOTIFY_SECRET not set — skip webhook notify"
+            echo "CORE_UPDATE_NOTIFY_SECRET not set — skip isolation log ingest"
             exit 0
           fi
-          curl -fsS -X POST "$NOTIFY_URL" \
+          END_MS=$(($(date +%s) * 1000))
+          START_MS="${{ steps.isolation.outputs.start_ms }}"
+          if [ -n "$START_MS" ]; then
+            DURATION_MS=$((END_MS - START_MS))
+          else
+            DURATION_MS=0
+          fi
+          if [ "${{ job.status }}" = "success" ]; then
+            STATUS="pass"
+            SUMMARY="All tenant isolation Vitest files passed"
+            FAILURE_OUTPUT=""
+          else
+            STATUS="fail"
+            if [ -f isolation-output.txt ]; then
+              FAILURE_OUTPUT=$(cat isolation-output.txt)
+            else
+              FAILURE_OUTPUT="(no test output captured)"
+            fi
+            SUMMARY=$(echo "$FAILURE_OUTPUT" | grep -E 'FAIL |AssertionError|Tests +[0-9]+ failed' | head -n 3 | tr '\n' ' ' | sed 's/  */ /g')
+            if [ -z "$SUMMARY" ]; then
+              SUMMARY="Tenant isolation Vitest suite failed"
+            fi
+          fi
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          jq -n \
+            --arg status "$STATUS" \
+            --argjson durationMs "$DURATION_MS" \
+            --arg repository "${{ github.repository }}" \
+            --arg branch "${{ github.ref_name }}" \
+            --arg commitSha "${{ github.sha }}" \
+            --arg workflowRunId "${{ github.run_id }}" \
+            --arg workflowRunUrl "$RUN_URL" \
+            --arg workflowName "${{ github.workflow }}" \
+            --arg summary "$SUMMARY" \
+            --arg failureOutput "$FAILURE_OUTPUT" \
+            '{
+              status: $status,
+              durationMs: $durationMs,
+              repository: $repository,
+              branch: $branch,
+              commitSha: $commitSha,
+              workflowRunId: $workflowRunId,
+              workflowRunUrl: $workflowRunUrl,
+              workflowName: $workflowName,
+              summary: $summary,
+              failureOutput: (if $failureOutput == "" then null else $failureOutput end)
+            }' > isolation-payload.json
+          curl -fsS -X POST "$LOG_URL" \
             -H "Content-Type: application/json" \
             -H "X-Core-Update-Notify-Secret: $NOTIFY_SECRET" \
-            -d "$(jq -n \
-              --arg event "tenant_isolation_failed" \
-              --arg msg "Daily tenant isolation check failed on ${{ github.repository }}@${{ github.sha }}. See Actions run ${{ github.run_id }}." \
-              '{event: $event, message: $msg}')"
+            -d @isolation-payload.json
+
+      - name: Send failure email alert
+        if: failure()
+        env:
+          NOTIFY_URL: ${{ vars.ADMIN_DASHBOARD_NOTIFY_URL }}
+          NOTIFY_SECRET: ${{ secrets.CORE_UPDATE_NOTIFY_SECRET }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          CORE_UPDATE_ALERT_EMAIL: ${{ secrets.CORE_UPDATE_ALERT_EMAIL }}
+          TENANT_ISOLATION_ALERT_EMAIL: ${{ secrets.TENANT_ISOLATION_ALERT_EMAIL }}
+          CORE_UPDATE_EMAIL_FROM: ${{ secrets.CORE_UPDATE_EMAIL_FROM }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: bash scripts/send-tenant-isolation-failure-alert.sh isolation-output.txt
