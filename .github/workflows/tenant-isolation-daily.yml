@@ -1,0 +1,87 @@
+# Daily tenant isolation regression guard.
+# Runs one hour after the core-update cron (06:00 UTC) so upstream merges
+# are caught before the next business day.
+#
+# Alerts (v1): workflow failure + GitHub summary. Enable GitHub Actions email
+# notifications on this repo for on-failure alerts. Optional webhook notify
+# uses the same ADMIN_DASHBOARD_NOTIFY_URL / CORE_UPDATE_NOTIFY_SECRET pair
+# as core-update-operator when configured.
+
+name: Daily tenant isolation check
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tenant-isolation-daily
+  cancel-in-progress: false
+
+jobs:
+  tenant-isolation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tenant isolation tests
+        id: isolation
+        run: bash scripts/check-tenant-isolation.sh
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## Daily tenant isolation check"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Workflow | \`${{ github.workflow }}\` |"
+            echo "| Run | [\`${{ github.run_id }}\`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+            echo "| Branch | \`${{ github.ref_name }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Conclusion | \`${{ job.status }}\` |"
+            echo ""
+            if [ "${{ job.status }}" = "success" ]; then
+              echo "All tenant isolation Vitest files passed. See \`scripts/check-tenant-isolation.sh\` for the exact list."
+            else
+              echo "**Failure:** at least one tenant isolation test failed. Reproduce locally:"
+              echo ""
+              echo "\`\`\`bash"
+              echo "cd ycode-mw-tenant"
+              echo "npm ci"
+              echo "bash scripts/check-tenant-isolation.sh"
+              echo "\`\`\`"
+              echo ""
+              echo "Then follow \`masjidweb-backend/docs/TENANT_ISOLATION_DAILY_CHECK.md\` and \`docs/AGENT_INCIDENT_PLAYBOOK.md\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Optional admin notify on failure
+        if: failure() && vars.ADMIN_DASHBOARD_NOTIFY_URL != ''
+        env:
+          NOTIFY_URL: ${{ vars.ADMIN_DASHBOARD_NOTIFY_URL }}
+          NOTIFY_SECRET: ${{ secrets.CORE_UPDATE_NOTIFY_SECRET }}
+        run: |
+          if [ -z "$NOTIFY_SECRET" ]; then
+            echo "CORE_UPDATE_NOTIFY_SECRET not set — skip webhook notify"
+            exit 0
+          fi
+          curl -fsS -X POST "$NOTIFY_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-Core-Update-Notify-Secret: $NOTIFY_SECRET" \
+            -d "$(jq -n \
+              --arg event "tenant_isolation_failed" \
+              --arg msg "Daily tenant isolation check failed on ${{ github.repository }}@${{ github.sha }}. See Actions run ${{ github.run_id }}." \
+              '{event: $event, message: $msg}')"

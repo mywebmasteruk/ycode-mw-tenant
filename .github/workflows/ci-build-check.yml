@@ -40,20 +40,8 @@ jobs:
           UPDATE_BASE_REF: origin/main
         run: npm run updates:safety-check
 
-      - name: Tenant safety tests
-        run: |
-          npx vitest run \
-            lib/masjidweb/update-safety-check.test.ts \
-            lib/masjidweb/tenant-or-legacy-scope.test.ts \
-            lib/masjidweb/tenant-session-alignment.test.ts \
-            lib/masjidweb/bootstrap-tenant-owner.test.ts \
-            lib/masjidweb/provisioned-tenant-rbac.test.ts \
-            lib/repositories/apiKeyRepository.test.ts \
-            lib/repositories/formSubmissionRepository.test.ts \
-            lib/repositories/mcpTokenRepository.test.ts \
-            lib/mcp-token-route-tenant-context.test.ts \
-            lib/useAuthStore.test.ts \
-            lib/asset-proxy-response.test.ts
+      - name: Tenant isolation tests
+        run: bash scripts/check-tenant-isolation.sh
 
       - name: Build
         run: npm run build
