@@ -415,22 +415,27 @@ export async function getAllItemsRaw(
     }
     return await query;
   } catch {
-    const client = await getSupabaseAdmin(tenantId);
+    const client = await getSupabaseAdmin();
     if (!client) {
       throw new Error('Supabase client not configured');
     }
 
+    const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
     const allItems: CollectionItem[] = [];
     let offset = 0;
     let hasMore = true;
     while (hasMore) {
-      const { data, error } = await client
+      let query = client
         .from('collection_items')
         .select('*')
         .eq('is_published', is_published)
         .is('deleted_at', null)
         .order('id', { ascending: true })
         .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
+
+      query = applyTenantEq(query, effectiveTenantId);
+
+      const { data, error } = await query;
 
       if (error) {
         throw new Error(`Failed to fetch collection items: ${error.message}`);
@@ -593,7 +598,7 @@ export async function getItemsByIds(ids: string[], isPublished: boolean = false,
     return await query;
   } catch {
     // Fallback: chunked PostgREST reads
-    const client = await getSupabaseAdmin(tenantId);
+    const client = await getSupabaseAdmin();
     if (!client) {
       throw new Error('Supabase client not configured');
     }
