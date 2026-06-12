@@ -1455,6 +1455,13 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
         }
       }
 
+      // Open preview: Cmd/Ctrl + P — handled by HeaderBar via custom event
+      if ((e.metaKey || e.ctrlKey) && e.key === 'p') {
+        e.preventDefault(); // Prevent the browser print dialog
+        window.dispatchEvent(new CustomEvent('togglePreview'));
+        return;
+      }
+
       // Note: Undo/Redo shortcuts (Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z, Cmd/Ctrl+Y) are handled in CenterCanvas.tsx
       // This prevents duplication and ensures they work both in the main window and inside the iframe
 
