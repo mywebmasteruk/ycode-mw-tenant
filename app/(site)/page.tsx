@@ -13,6 +13,7 @@ import { getSettingByKey } from '@/lib/repositories/settingsRepository';
 import { matchRedirect } from '@/lib/redirect-utils';
 import { parseAuthCookie, getPasswordProtection, fetchFoldersForAuth } from '@/lib/page-auth';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { MASJIDWEB_BRAND_NAME, MASJIDWEB_BUILT_WITH } from '@/lib/masjidweb/brand';
 import {
   tenantAllPagesTag,
   tenantRouteTag,
@@ -291,8 +292,8 @@ export async function generateMetadata(): Promise<Metadata> {
 
   if (!data) {
     return {
-      title: 'Ycode',
-      description: 'Built with Ycode',
+      title: MASJIDWEB_BRAND_NAME,
+      description: MASJIDWEB_BUILT_WITH,
     };
   }
 

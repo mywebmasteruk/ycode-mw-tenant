@@ -10,6 +10,7 @@ import { cache } from 'react';
 import type { Metadata } from 'next';
 import type { Asset, Locale, Page, PageFolder, Translation } from '@/types';
 import type { CollectionItemWithValues } from '@/types';
+import { MASJIDWEB_BUILT_WITH } from '@/lib/masjidweb/brand';
 import { resolveInlineVariables, resolveImageUrl } from '@/lib/resolve-cms-variables';
 import { getSettingsByKeys } from '@/lib/repositories/settingsRepository';
 import { getAssetById } from '@/lib/repositories/assetRepository';
@@ -279,9 +280,9 @@ export async function generatePageMetadata(
   }
 
   // Build description - resolve field variables if collection item is available
-  let description = seo?.description || fallbackDescription || `${page.name} - Built with Ycode`;
+  let description = seo?.description || fallbackDescription || `${page.name} - ${MASJIDWEB_BUILT_WITH}`;
   if (collectionItem && seo?.description) {
-    description = resolveInlineVariables(seo.description, collectionItem) || fallbackDescription || `${page.name} - Built with Ycode`;
+    description = resolveInlineVariables(seo.description, collectionItem) || fallbackDescription || `${page.name} - ${MASJIDWEB_BUILT_WITH}`;
   }
 
   // Base metadata

@@ -489,11 +489,11 @@ export default function GeneralSettingsPage() {
 
                 <Field orientation="horizontal" className="flex-row-reverse col-span-2">
                   <FieldContent>
-                    <FieldLabel htmlFor="badge">Display the &ldquo;Made in Ycode&rdquo; badge</FieldLabel>
+                    <FieldLabel htmlFor="badge">Display the &ldquo;Made with MasjidWeb&rdquo; badge</FieldLabel>
                     <FieldDescription>
                       {isCloudVersion()
                         ? 'Upgrade to a project plan in order to disable the badge.'
-                        : 'Help support Ycode by displaying this badge on your website.'}
+                        : 'Help support MasjidWeb by displaying this badge on your website.'}
                     </FieldDescription>
                   </FieldContent>
                   <Switch

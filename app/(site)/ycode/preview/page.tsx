@@ -6,6 +6,7 @@ import { getSettingsByKeys } from '@/lib/repositories/settingsRepository';
 import { generateColorVariablesCss } from '@/lib/repositories/colorVariableRepository';
 import { generatePageMetadata } from '@/lib/generate-page-metadata';
 import { parseAuthCookie, getPasswordProtection, fetchFoldersForAuth } from '@/lib/page-auth';
+import { MASJIDWEB_BRAND_NAME, MASJIDWEB_BUILT_WITH } from '@/lib/masjidweb/brand';
 import type { Metadata } from 'next';
 
 async function fetchPreviewDraftCss() {
@@ -116,8 +117,9 @@ export async function generateMetadata(): Promise<Metadata> {
 
   if (!data) {
     return {
-      title: 'Preview - Ycode',
-      description: 'Preview - Built with Ycode',
+      // MASJIDWEB_SEAM: brand — upstream falls back to 'Preview - Ycode'
+      title: `Preview - ${MASJIDWEB_BRAND_NAME}`,
+      description: `Preview - ${MASJIDWEB_BUILT_WITH}`,
     };
   }
 
