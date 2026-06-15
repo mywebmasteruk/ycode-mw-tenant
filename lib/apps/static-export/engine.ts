@@ -139,7 +139,15 @@ export async function exportSite(presetJobId?: string): Promise<ExportJob> {
     }
 
     // ---- Folders + shared CSS + fonts + locales in parallel ---------------
-    const [folderResult, publishedCss, colorVariablesCss, fonts, localeResult] = await Promise.all([
+    const [
+      folderResult,
+      publishedCss,
+      colorVariablesCss,
+      fonts,
+      globalCustomCodeHead,
+      globalCustomCodeBody,
+      localeResult,
+    ] = await Promise.all([
       client
         .from('page_folders')
         .select('*')
@@ -148,6 +156,8 @@ export async function exportSite(presetJobId?: string): Promise<ExportJob> {
       getSettingByKey('published_css').catch(() => null),
       generateColorVariablesCss().catch(() => null),
       getPublishedFonts().catch(() => []),
+      getSettingByKey('custom_code_head').catch(() => null),
+      getSettingByKey('custom_code_body').catch(() => null),
       client
         .from('locales')
         .select('*')
@@ -206,6 +216,10 @@ export async function exportSite(presetJobId?: string): Promise<ExportJob> {
             fontsCss: fontsCss || null,
             includeSwiper: resolved.hasSlider,
             interactions: resolved.interactions,
+            globalCustomCodeHead: globalCustomCodeHead ?? null,
+            globalCustomCodeBody: globalCustomCodeBody ?? null,
+            pageCustomCodeHead: resolved.pageCustomCodeHead,
+            pageCustomCodeBody: resolved.pageCustomCodeBody,
           })
 
           // Collect Ycode's built-in placeholder URLs referenced from this

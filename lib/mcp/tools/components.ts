@@ -374,8 +374,8 @@ Pass variant_id to target a specific named variant; omit it to update the primar
           layer_id: z.string().describe('Layer ID or ref_id'),
           design: designSchema,
           breakpoint: z.enum(['desktop', 'tablet', 'mobile']).default('desktop').optional(),
-          ui_state: z.enum(['neutral', 'hover', 'focus', 'active', 'disabled']).default('neutral').optional()
-            .describe('UI state: "hover" for hover styles, "focus" for focus, etc.'),
+          ui_state: z.enum(['neutral', 'hover', 'focus', 'active', 'disabled', 'current']).default('neutral').optional()
+            .describe('UI state: "hover" for hover styles, "focus" for focus, "current" for the active/current navigation link, etc.'),
         }),
         z.object({
           type: z.literal('update_text'),

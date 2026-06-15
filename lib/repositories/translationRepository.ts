@@ -57,9 +57,10 @@ export async function getAllTranslationRows<T = Translation>(
  */
 export async function getTranslationsByLocale(
   localeId: string,
-  isPublished: boolean = false
+  isPublished: boolean = false,
+  tenantId?: string
 ): Promise<Translation[]> {
-  const client = await getSupabaseAdmin();
+  const client = await getSupabaseAdmin(tenantId);
 
   if (!client) {
     throw new Error('Supabase not configured');

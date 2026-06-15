@@ -2010,14 +2010,58 @@ export function evaluateCondition(
     const fieldId = condition.fieldId;
     if (!fieldId) return true;
 
-    // Use source-aware resolution (collection layer data first, then page data)
+    // Use source-aware resolution (collection layer data first, then page data).
+    // Multi-reference / multi-asset values can arrive already parsed as arrays
+    // (e.g. from the SSR collection cache). `String([...])` would comma-join them
+    // into an unparseable string, so serialize arrays back to JSON — the form
+    // every downstream parser (parseMultiReferenceValue, JSON.parse, `[`-prefix
+    // checks) expects.
     const rawValue = resolveFieldFromSources(fieldId, undefined, collectionLayerData, pageCollectionData);
-    const value = String(rawValue ?? '');
-    let compareValue = String(condition.value ?? '');
-    let compareValue2 = condition.value2;
-    let effectiveOperator = condition.operator;
+    const value = Array.isArray(rawValue) ? JSON.stringify(rawValue) : String(rawValue ?? '');
     const fieldType = condition.fieldType || 'text';
     const isDateOnly = fieldType === 'date_only';
+
+    // Resolve the compare value. In 'current_page' mode it is bound to the
+    // current dynamic page item instead of the static `condition.value`:
+    //   - reference fields inject the page item's own ID into the compared ID
+    //     set (alongside any statically picked IDs), so reference operators parse
+    //     it normally — this is the "Current Category/Tag" pattern
+    //   - scalar fields compare against the page item's `currentPageFieldId` value
+    // Reference detection also keys off the operator so it stays correct even if
+    // `fieldType` was not persisted on the condition.
+    let compareValue = String(condition.value ?? '');
+    if (condition.valueMode === 'current_page') {
+      const isReferenceField = fieldType === 'reference'
+        || fieldType === 'multi_reference'
+        || ['is_one_of', 'is_not_one_of', 'contains_all_of', 'contains_exactly'].includes(condition.operator);
+
+      // When the page item context is unavailable (e.g. the editor preview before
+      // a CMS item is selected), skip the condition instead of filtering everything
+      // out — mirrors the `self` source returning true when there is no current item.
+      if (isReferenceField && !pageCollectionItemId) return true;
+      if (!isReferenceField && !pageCollectionData) return true;
+
+      if (isReferenceField) {
+        const ids = parseItemIdList(condition.value);
+        if (pageCollectionItemId && !ids.includes(pageCollectionItemId)) {
+          ids.push(pageCollectionItemId);
+        }
+        compareValue = JSON.stringify(ids);
+      } else if (condition.currentPageFieldId) {
+        compareValue = String(pageCollectionData?.[condition.currentPageFieldId] ?? '');
+      }
+    }
+    let compareValue2 = condition.value2;
+    let effectiveOperator = condition.operator;
+
+    // In 'current_page' mode the compare set is a single injected page-item id, so
+    // 'contains exactly' (exact set equality) can essentially never match a real
+    // multi-reference field — it would only keep items whose entire reference set is
+    // just the current item. The intent of the "Current X" pattern is "contains the
+    // current item", so treat it as 'contains_all_of'.
+    if (condition.valueMode === 'current_page' && effectiveOperator === 'contains_exactly') {
+      effectiveOperator = 'contains_all_of';
+    }
 
     if (isDateFieldType(fieldType) && isDatePreset(compareValue)) {
       const resolved = resolveDateFilterValue(effectiveOperator, compareValue, compareValue2, timezone);
@@ -4269,17 +4313,22 @@ export function updateLayerProps(
 
 /**
  * Find all layers with a custom anchor ID (settings.id takes priority over attributes.id).
+ * Deduplicates by anchor ID since an `#id` link resolves to the first match, so a
+ * repeated ID (e.g. duplicated component instances) would otherwise produce duplicate
+ * dropdown options and React key collisions.
  * Used by link settings to populate anchor selection dropdowns.
  */
 export function findLayersWithAnchorId(layers: Layer[]): Array<{ layer: Layer; id: string }> {
   const result: Array<{ layer: Layer; id: string }> = [];
+  const seen = new Set<string>();
   const stack: Layer[] = [...layers];
 
   while (stack.length > 0) {
     const layer = stack.pop()!;
 
     const layerId = layer.settings?.id || layer.attributes?.id;
-    if (layerId) {
+    if (layerId && !seen.has(layerId)) {
+      seen.add(layerId);
       result.push({ layer, id: layerId });
     }
 

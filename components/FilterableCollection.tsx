@@ -3,6 +3,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
 import { useFilterStore } from '@/stores/useFilterStore';
 import { LOAD_MORE_APPENDED_ATTR } from '@/components/LoadMoreCollection';
+import { hasDynamicDateRule } from '@/lib/collection-field-utils';
 import type { ConditionalVisibility, Layer } from '@/types';
 
 interface FilterableCollectionProps {
@@ -81,6 +82,17 @@ export default function FilterableCollection({
   const hasInputLinkedFilters = filters.groups.some(g =>
     g.conditions.some(c => c.inputLayerId || c.inputLayerId2)
   );
+  // Relative date presets (e.g. `$today`) are resolved at render time and baked
+  // into the indefinitely-cached SSR HTML, so they go stale as the calendar
+  // advances. Treat their presence like a runtime control: reconcile against the
+  // live server on mount so the list always reflects the real "today" (and stays
+  // consistent with the server-side search/filter, which re-resolves it fresh).
+  const hasDynamicDateFilter = hasDynamicDateRule(filters);
+  // Input-linked filters (e.g. a URL-driven search) hide the SSR list up front so
+  // we don't flash the full list before narrowing it. A date-only reconcile keeps
+  // the SSR list visible and relies on the loading dim (`isFiltering` opacity)
+  // instead — showing the current list while it updates avoids a blank flash
+  // before the reconciled list arrives.
   const pendingFirstEvalRef = useRef(hasInputLinkedFilters);
 
   const [filteredPage, setFilteredPage] = useState(1);
@@ -199,6 +211,8 @@ export default function FilterableCollection({
       fieldType?: string;
       source?: 'collection_field' | 'self';
       includesCurrentPageItem?: boolean;
+      valueMode?: 'static' | 'current_page';
+      currentPageFieldId?: string;
     };
     const operatorsWithoutValue = new Set([
       'is_present',
@@ -232,6 +246,21 @@ export default function FilterableCollection({
         }
 
         if (!condition.fieldId) continue;
+
+        // Current-page conditions are forwarded verbatim; the server resolves the
+        // compare value from the current dynamic page item (its own ID for
+        // reference fields, or `currentPageFieldId`'s value for scalar fields).
+        if (condition.valueMode === 'current_page') {
+          activeInGroup.push({
+            fieldId: condition.fieldId,
+            operator: condition.operator,
+            value: condition.value || '',
+            fieldType: condition.fieldType,
+            valueMode: 'current_page',
+            currentPageFieldId: condition.currentPageFieldId,
+          });
+          continue;
+        }
 
         let value = condition.inputLayerId ? '' : (condition.value || '');
         let value2 = condition.inputLayerId2 ? '' : condition.value2;
@@ -581,6 +610,8 @@ export default function FilterableCollection({
       fieldType?: string;
       source?: 'collection_field' | 'self';
       includesCurrentPageItem?: boolean;
+      valueMode?: 'static' | 'current_page';
+      currentPageFieldId?: string;
     }>>,
     offset: number,
     append: boolean,
@@ -689,7 +720,7 @@ export default function FilterableCollection({
         return false;
       })
     );
-    const hasRuntimeControls = hasActiveInputValues || hasRuntimeSortOverride;
+    const hasRuntimeControls = hasActiveInputValues || hasRuntimeSortOverride || hasDynamicDateFilter;
     const filterKey = JSON.stringify({
       filterGroups,
       sortBy: effectiveSortBy,
@@ -778,7 +809,7 @@ export default function FilterableCollection({
 
     const startOffset = (startPage - 1) * (limit || 10);
     fetchFiltered(filterGroups, startOffset, false);
-  }, [filterValues, buildApiFilters, fetchFiltered, paginationMode, attachPaginationIntercept, detachPaginationIntercept, restoreSsrPagination, getSsrPaginationWrapper, updateEmptyStateElements, fpKey, pKey, limit, hasRuntimeSortOverride, effectiveSortBy, effectiveSortOrder, showSSR, clearFilteredDOM]);
+  }, [filterValues, buildApiFilters, fetchFiltered, paginationMode, attachPaginationIntercept, detachPaginationIntercept, restoreSsrPagination, getSsrPaginationWrapper, updateEmptyStateElements, fpKey, pKey, limit, hasRuntimeSortOverride, hasDynamicDateFilter, effectiveSortBy, effectiveSortOrder, showSSR, clearFilteredDOM]);
 
   useEffect(() => {
     if (!hasActiveFilters || paginationMode !== 'pages') return;
