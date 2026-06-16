@@ -59,10 +59,12 @@ jobs:
           git fetch origin main
           git checkout origin/main -- \
             scripts/ai-repair-safe-update.ts \
+            scripts/core-update/run-autopilot-repair.ts \
             scripts/reapply-tier2-seams.ts \
             scripts/check-autopilot-guard.ts \
             scripts/check-update-safety.ts \
             scripts/git-merge-hygiene.sh \
+            lib/masjidweb/autopilot-repair.ts \
             lib/masjidweb/reapply-tier2-seams.ts \
             lib/masjidweb/openrouter-repair.ts \
             lib/masjidweb/merge-conflict-hunks.ts \
@@ -92,8 +94,17 @@ jobs:
           restore-keys: |
             rerere-${{ runner.os }}-v1
 
+      - name: Run deterministic Autopilot repair
+        id: deterministic_repair
+        continue-on-error: true
+        env:
+          AUTOPILOT_REPAIR_REPORT_PATH: /tmp/autopilot-repair-report.md
+          AUTOPILOT_REPAIR_REPORT_JSON_PATH: /tmp/autopilot-repair-report.json
+        run: npx --yes tsx scripts/core-update/run-autopilot-repair.ts
+
       - name: Run AI conflict repair
         id: repair
+        if: steps.deterministic_repair.outputs.status == 'failed' && inputs.mechanical_only == false
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -103,6 +114,27 @@ jobs:
           AI_REPAIR_SKIP_TIER2_LLM: "true"
           AI_REPAIR_MAX_LLM_FILES: ${{ inputs.max_llm_files }}
         run: npx --yes tsx scripts/ai-repair-safe-update.ts
+
+      - name: Upload deterministic Autopilot repair report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-update-autopilot-repair
+          path: |
+            /tmp/autopilot-repair-report.md
+            /tmp/autopilot-repair-report.json
+          if-no-files-found: ignore
+
+      - name: Stop when deterministic repair is blocked
+        if: >-
+          steps.deterministic_repair.outputs.status == 'blocked'
+          || (
+            steps.deterministic_repair.outputs.status == 'failed'
+            && (inputs.mechanical_only == true || steps.repair.outcome != 'success')
+          )
+        run: |
+          echo "Deterministic Autopilot repair could not safely resolve all conflicts. See core-update-autopilot-repair artifact."
+          exit 2
 
       - name: Critical-exports completeness check
         run: |
@@ -185,8 +217,15 @@ jobs:
             const pushChanged = '${{ steps.push.outputs.changed }}' === 'true';
             const safetyOutcome = '${{ steps.safety_tests.outcome }}' || 'skipped';
             const buildOutcome = '${{ steps.build.outcome }}' || 'skipped';
-            let body = '### MasjidWeb AI repair\n\n';
-            if (repairOutcome === 'failure') {
+            const deterministicStatus = '${{ steps.deterministic_repair.outputs.status }}' || 'unknown';
+            const deterministicRepaired = Number.parseInt('${{ steps.deterministic_repair.outputs.repaired_count }}' || '0', 10);
+            const deterministicBlocked = Number.parseInt('${{ steps.deterministic_repair.outputs.blocked_count }}' || '0', 10);
+            let body = '### MasjidWeb Autopilot repair\n\n';
+            body += `Deterministic repair status: **${deterministicStatus}**. Repaired: **${Number.isFinite(deterministicRepaired) ? deterministicRepaired : 0}**. Blocked: **${Number.isFinite(deterministicBlocked) ? deterministicBlocked : 0}**.\n\n`;
+            if (deterministicStatus === 'blocked') {
+              body += 'Autopilot v2.1 blocked this update to protect tenant data. Review the `core-update-autopilot-repair` artifact for exact missing invariants.\n';
+              body += 'Do **not** merge until a developer resolves the blocked files and the normal PR checks finish green.\n';
+            } else if (repairOutcome === 'failure') {
               body += 'AI repair **failed**. Check the workflow logs for OpenRouter or conflict resolution errors.\n';
               body += 'If mechanical repair could not clear conflicts, the **Cursor core-update escalation** automation may run when PR CI fails (see `docs/CURSOR_CORE_UPDATE_ESCALATION.md`).\n';
             } else if (!pushChanged) {

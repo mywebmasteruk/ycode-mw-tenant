@@ -39,6 +39,7 @@
     "migrate:credentials": "npx ts-node scripts/migrate-credentials.ts",
     "updates:safety-check": "npx ts-node scripts/check-update-safety.ts",
     "updates:autopilot-guard": "npx ts-node scripts/check-autopilot-guard.ts",
+    "updates:autopilot-repair": "npx ts-node scripts/core-update/run-autopilot-repair.ts",
     "updates:ai-repair": "npx ts-node scripts/ai-repair-safe-update.ts",
     "fonts:update": "npx ts-node scripts/fetch-google-fonts.ts",
     "prepare": "husky"
