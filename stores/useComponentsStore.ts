@@ -706,12 +706,19 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
         scheduleIdle(async () => {
           try {
             const { usePagesStore } = await import('./usePagesStore');
-            const { containsComponent } = await import('@/lib/component-utils');
+            const { collectComponentIds } = await import('@/lib/component-utils');
+
+            // `collectComponentIds` (unlike `containsComponent`) also finds
+            // components embedded inside rich-text content and override text
+            // values, so a page that uses this component only inside a Rich
+            // Text block is still flagged for per-page CSS regeneration.
+            const referencesComponent = (layers: Layer[]) =>
+              collectComponentIds(layers).has(componentId);
 
             const allDrafts = usePagesStore.getState().draftsByPageId;
             const affectedPageIds: string[] = [];
             Object.entries(allDrafts).forEach(([pid, pageDraft]) => {
-              if (pageDraft.layers && containsComponent(pageDraft.layers, componentId)) {
+              if (pageDraft.layers && referencesComponent(pageDraft.layers)) {
                 affectedPageIds.push(pid);
               }
             });
@@ -730,7 +737,7 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
             const { generateAndSaveCSS } = await import('@/lib/client/cssGenerator');
             const allLayers: Layer[] = variantsBeingSaved.flatMap(v => v.layers);
             Object.values(allDrafts).forEach((pageDraft) => {
-              if (pageDraft.layers && containsComponent(pageDraft.layers, componentId)) {
+              if (pageDraft.layers && referencesComponent(pageDraft.layers)) {
                 allLayers.push(...pageDraft.layers);
               }
             });

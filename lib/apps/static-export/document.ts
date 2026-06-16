@@ -37,6 +37,8 @@ export interface PageRenderContext {
   components: PageData['components']
   locale: PageData['locale'] | null
   translations: PageData['translations'] | undefined
+  /** ID of the page being rendered — drives `aria-current` on active-page links. */
+  pageId?: string
 }
 
 /**
@@ -77,7 +79,7 @@ export function renderPageBody(
         ctx.components,
         undefined, // ancestorComponentIds
         false, // isSlideChild
-        { isStaticExport: true }, // pageLinkContext — opt out of iframe htmlEmbed wrapping
+        { isStaticExport: true, currentPageId: ctx.pageId }, // pageLinkContext — opt out of iframe htmlEmbed wrapping
       ),
     )
     .filter(Boolean)
@@ -621,6 +623,15 @@ export interface BuildHtmlInput {
   fontsCss?: string | null
   includeSwiper: boolean
   interactions: ExportedInteraction[]
+  /** Site-wide custom code from Settings → General (head + body slots). */
+  globalCustomCodeHead?: string | null
+  globalCustomCodeBody?: string | null
+  /**
+   * Page-level custom code from `page.settings.custom_code.{head,body}`,
+   * already placeholder-resolved by the resolver for dynamic pages.
+   */
+  pageCustomCodeHead?: string | null
+  pageCustomCodeBody?: string | null
 }
 
 export function buildDocument({
@@ -634,6 +645,10 @@ export function buildDocument({
   fontsCss,
   includeSwiper,
   interactions,
+  globalCustomCodeHead,
+  globalCustomCodeBody,
+  pageCustomCodeHead,
+  pageCustomCodeBody,
 }: BuildHtmlInput): string {
   const seo = extractSeo(page)
   const title = seo.title || page.name
@@ -665,6 +680,16 @@ export function buildDocument({
     head.push(`<link rel="stylesheet" href="${SWIPER_CSS_PATH}" />`)
   }
 
+  // Custom head code: global first (site-wide), then page-specific. Emitted
+  // verbatim — the same trust model the live site uses (operator-authored
+  // HTML/JS dropped straight into <head>).
+  if (globalCustomCodeHead && globalCustomCodeHead.trim()) {
+    head.push(globalCustomCodeHead)
+  }
+  if (pageCustomCodeHead && pageCustomCodeHead.trim()) {
+    head.push(pageCustomCodeHead)
+  }
+
   const indent = '  '
   const trailingScripts: string[] = []
   if (includeSwiper) {
@@ -683,6 +708,16 @@ export function buildDocument({
     trailingScripts.push(`<script>${VISIBILITY_BOOT_SCRIPT}</script>`)
   }
 
+  // Custom body code goes after the page body / scripts but before </body>,
+  // matching the live site's ordering (global first, then page-specific).
+  const customBodyChunks: string[] = []
+  if (globalCustomCodeBody && globalCustomCodeBody.trim()) {
+    customBodyChunks.push(globalCustomCodeBody)
+  }
+  if (pageCustomCodeBody && pageCustomCodeBody.trim()) {
+    customBodyChunks.push(pageCustomCodeBody)
+  }
+
   return [
     '<!DOCTYPE html>',
     `<html lang="${escapeHtml(lang)}">`,
@@ -692,6 +727,7 @@ export function buildDocument({
     bodyClasses ? `<body class="${escapeHtml(bodyClasses)}">` : '<body>',
     bodyHtml,
     ...trailingScripts,
+    ...customBodyChunks,
     '</body>',
     '</html>',
     '',

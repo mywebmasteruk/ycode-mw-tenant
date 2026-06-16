@@ -7,10 +7,12 @@ import { getItemWithValues, getItemsWithValues, getItemsWithValuesByIds, getItem
 import { getValuesByItemIds } from '@/lib/repositories/collectionItemValueRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
 import { enrichItemsWithCountValues } from '@/lib/repositories/collectionCountRepository';
+import { getLocaleScaffoldTranslations, getCmsTranslationsForItems } from '@/lib/repositories/translationRepository';
+import { getTranslatableKey } from '@/lib/locale-runtime';
 import type { Page, PageFolder, PageLayers, Component, ComponentVariable, CollectionItemWithValues, CollectionField, Layer, CollectionPaginationMeta, Translation, Locale } from '@/types';
 import { getCollectionVariable, resolveFieldValue, evaluateVisibility, evaluateCondition, getLayerHtmlTag, filterDisabledSliderLayers } from '@/lib/layer-utils';
 import { isFieldVariable, isAssetVariable, createDynamicTextVariable, createDynamicRichTextVariable, createAssetVariable, getDynamicTextContent, getVariableStringValue, getAssetId, resolveDesignStyles } from '@/lib/variable-utils';
-import { buildImageSizes, generateImageSrcset, getOptimizedImageUrl, getAssetProxyUrl, DEFAULT_ASSETS, collectLayerAssetIds, buildSvgDataUrl, parseImageDimension } from '@/lib/asset-utils';
+import { buildImageSizes, generateImageSrcset, getOptimizedImageUrl, getAssetProxyUrl, DEFAULT_ASSETS, collectLayerAssetIds, buildSvgDataUrl, parseImageDimension, getSvgAspectRatioStyle } from '@/lib/asset-utils';
 import { resolveComponents, applyComponentOverrides } from '@/lib/resolve-components';
 import { getComponentVariantLayers } from '@/lib/component-variant-utils';
 import { isTiptapDoc, hasBlockElementsWithResolver } from '@/lib/tiptap-utils';
@@ -27,7 +29,7 @@ export interface PaginationContext {
   defaultPage?: number;
 }
 
-import { resolveFieldLinkValue, resolveRefCollectionItemId, generateLinkHref, isLinkAtCollectionBoundary, parseCollectionLinkValue, extractCrossCollectionItemIds } from '@/lib/link-utils';
+import { resolveFieldLinkValue, resolveRefCollectionItemId, generateLinkHref, isLinkAtCollectionBoundary, isLinkToCurrentPage, parseCollectionLinkValue, extractCrossCollectionItemIds } from '@/lib/link-utils';
 import type { LinkResolutionContext } from '@/lib/link-utils';
 import { getLinkSettingsFromMark } from '@/lib/tiptap-extensions/rich-text-link';
 import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
@@ -218,6 +220,7 @@ export async function loadTranslationsForLocale(
       return { locale: null, translations: {} };
     }
 
+<<<<<<< HEAD
 // Fetch all translations for this locale. Supabase caps PostgREST
     // responses at 1000 rows by default — projects with more translations
     // were silently truncated, causing entire layers to render in the
@@ -234,28 +237,114 @@ export async function loadTranslationsForLocale(
         .eq('is_published', isPublished)
         .is('deleted_at', null)
         .range(from, from + PAGE_SIZE - 1);
+||||||| 1e44661
+    // Fetch all translations for this locale. Supabase caps PostgREST
+    // responses at 1000 rows by default — projects with more translations
+    // were silently truncated, causing entire layers to render in the
+    // source language on SSR while the editor (which fetches via its own
+    // paginated API) showed them correctly. Page through explicit ranges.
+    const PAGE_SIZE = 1000;
+    const translations: Translation[] = [];
+    for (let from = 0; ; from += PAGE_SIZE) {
+      const { data: page, error } = await supabase
+        .from('translations')
+        .select('*')
+        .eq('locale_id', locale.id)
+        .eq('is_published', isPublished)
+        .is('deleted_at', null)
+        .range(from, from + PAGE_SIZE - 1);
+=======
+    // Load the per-locale "scaffold" only: page/folder/component translations
+    // plus CMS *slug* rows. This covers routing, SEO, page/component rendering
+    // and URL generation. The bulk CMS *content* translations (text/rich text)
+    // — which dominate large catalogues and previously made every render fetch
+    // the entire locale catalogue — are loaded on demand per rendered item via
+    // `ensureCmsTranslations`.
+    const scaffold = await getLocaleScaffoldTranslations(locale.id, isPublished, tenantId);
+>>>>>>> upstream/main
 
-      if (error) {
-        console.error('Failed to fetch translations page:', error);
-        break;
-      }
-
-      if (!page || page.length === 0) break;
-      translations.push(...(page as Translation[]));
-      if (page.length < PAGE_SIZE) break;
-    }
-
-    // Build translations map keyed by translatable key
     const translationsMap: Record<string, Translation> = {};
-    for (const translation of translations) {
-      const key = `${translation.source_type}:${translation.source_id}:${translation.content_key}`;
-      translationsMap[key] = translation;
+    for (const translation of scaffold) {
+      translationsMap[getTranslatableKey(translation)] = translation;
     }
+
+    registerTranslationContext(translationsMap, locale.id, isPublished, tenantId);
 
     return { locale, translations: translationsMap };
   } catch (error) {
     console.error('Failed to load translations for locale:', localeCode, error);
     return { locale: null, translations: {} };
+  }
+}
+
+// ── Scoped CMS translation augmentation ───────────────────────────────────
+//
+// `loadTranslationsForLocale` returns a scaffold map (no CMS *content*). Each
+// server render path then augments that same map object in place with the CMS
+// translations for exactly the collection items it materialises, so
+// `applyCmsTranslations` finds them. The map identity is preserved as it is
+// threaded through the render pipeline, so all holders observe the additions.
+//
+// Tracking the locale/publish/tenant + already-loaded item ids on a WeakMap
+// keyed by the map object keeps render call sites free of extra plumbing.
+
+interface TranslationLoadContext {
+  localeId: string;
+  isPublished: boolean;
+  tenantId?: string;
+  loadedItemIds: Set<string>;
+}
+
+const translationLoadContexts = new WeakMap<object, TranslationLoadContext>();
+
+/** Associate a freshly-built scaffold map with its locale loading context. */
+function registerTranslationContext(
+  translations: Record<string, Translation>,
+  localeId: string,
+  isPublished: boolean,
+  tenantId?: string,
+): void {
+  translationLoadContexts.set(translations, {
+    localeId,
+    isPublished,
+    tenantId,
+    loadedItemIds: new Set(),
+  });
+}
+
+/**
+ * Ensure CMS *content* translations for the given collection item IDs are
+ * present in `translations`, fetching any that haven't been loaded yet and
+ * merging them into the same map object.
+ *
+ * No-ops when the map has no registered context (e.g. default locale, or maps
+ * built outside `loadTranslationsForLocale`) — in those cases the caller
+ * either needs no translations or already holds the full set.
+ */
+export async function ensureCmsTranslations(
+  translations: Record<string, Translation> | null | undefined,
+  itemIds: Array<string | null | undefined>,
+): Promise<void> {
+  if (!translations) return;
+  const ctx = translationLoadContexts.get(translations);
+  if (!ctx) return;
+
+  const missing: string[] = [];
+  for (const id of itemIds) {
+    if (id && !ctx.loadedItemIds.has(id)) {
+      ctx.loadedItemIds.add(id);
+      missing.push(id);
+    }
+  }
+  if (missing.length === 0) return;
+
+  try {
+    const rows = await getCmsTranslationsForItems(ctx.localeId, ctx.isPublished, missing, ctx.tenantId);
+    for (const row of rows) {
+      translations[getTranslatableKey(row)] = row;
+    }
+  } catch (error) {
+    console.error('Failed to load scoped CMS translations:', error);
   }
 }
 
@@ -304,7 +393,15 @@ async function getCollectionItemBySlug(
             // Extract item ID from translation key
             const itemId = translation.source_id;
 
+<<<<<<< HEAD
             // Verify this item belongs to the correct collection
+||||||| 1e44661
+            // Verify this item belongs to the correct collection
+            const { data: item, error: itemError } = await supabase
+=======
+            // Verify this item belongs to the correct collection. On the public
+            // path also require is_publishable so unpublished items can't resolve.
+>>>>>>> upstream/main
             let itemQuery = supabase
               .from('collection_items')
               .select('*')
@@ -312,7 +409,14 @@ async function getCollectionItemBySlug(
               .eq('collection_id', collectionId)
               .eq('is_published', isPublished)
               .is('deleted_at', null);
+<<<<<<< HEAD
             itemQuery = applyTenantEq(itemQuery, tenantId);
+||||||| 1e44661
+              .is('deleted_at', null)
+              .single();
+=======
+            if (isPublished) itemQuery = itemQuery.eq('is_publishable', true);
+>>>>>>> upstream/main
             const { data: item, error: itemError } = await itemQuery.single();
 
             if (!itemError && item) {
@@ -340,16 +444,33 @@ async function getCollectionItemBySlug(
       return null;
     }
 
+<<<<<<< HEAD
     // Verify the item belongs to the correct collection
     let verifyQuery = supabase
+||||||| 1e44661
+    // Verify the item belongs to the correct collection
+    const { data: item, error: itemError } = await supabase
+=======
+    // Verify the item belongs to the correct collection. On the public path
+    // also require is_publishable so unpublished items can't resolve.
+    let itemQuery = supabase
+>>>>>>> upstream/main
       .from('collection_items')
       .select('*')
       .eq('id', valueData.item_id)
       .eq('collection_id', collectionId)
       .eq('is_published', isPublished)
       .is('deleted_at', null);
+<<<<<<< HEAD
     verifyQuery = applyTenantEq(verifyQuery, tenantId);
     const { data: item, error: itemError } = await verifyQuery.single();
+||||||| 1e44661
+      .is('deleted_at', null)
+      .single();
+=======
+    if (isPublished) itemQuery = itemQuery.eq('is_publishable', true);
+    const { data: item, error: itemError } = await itemQuery.single();
+>>>>>>> upstream/main
 
     if (itemError || !item) {
       return null;
@@ -545,8 +666,12 @@ async function fetchPageByPathInternal(
               let enhancedItemValues = await resolveReferenceFields(
                 collectionItem.values,
                 collectionFields,
-                isPublished
+                isPublished,
+                '',
+                new Set(),
+                translations
               );
+              await ensureCmsTranslations(translations, [collectionItem.id]);
               enhancedItemValues = applyCmsTranslations(collectionItem.id, enhancedItemValues, collectionFields, translations, { includeIncomplete: !isPublished });
               enhancedItemValues = formatDateFieldsInItemValues(enhancedItemValues, collectionFields, timezone);
 
@@ -589,10 +714,14 @@ async function fetchPageByPathInternal(
             let enhancedItemValues = await resolveReferenceFields(
               collectionItem.values,
               collectionFields,
-              isPublished
+              isPublished,
+              '',
+              new Set(),
+              translations
             );
 
             // Apply CMS translations to the item values
+            await ensureCmsTranslations(translations, [collectionItem.id]);
             enhancedItemValues = applyCmsTranslations(collectionItem.id, enhancedItemValues, collectionFields, translations, { includeIncomplete: !isPublished });
 
             const rawItemValues = { ...enhancedItemValues };
@@ -999,6 +1128,7 @@ async function fetchComponents(supabase: any, isPublished: boolean = false): Pro
  * @param itemValues - Current item values (field_id -> value)
  * @param fields - Collection fields to check for references
  * @param isPublished - Whether to fetch published data
+ * @param translations - CMS translations applied to resolved referenced values
  * @returns Enhanced item values with resolved reference data
  */
 async function resolveReferenceFields(
@@ -1006,7 +1136,8 @@ async function resolveReferenceFields(
   fields: CollectionField[],
   isPublished: boolean,
   pathPrefix: string = '',
-  visited: Set<string> = new Set()
+  visited: Set<string> = new Set(),
+  translations?: Record<string, Translation> | null
 ): Promise<Record<string, string>> {
   const enhancedValues = { ...itemValues };
 
@@ -1030,6 +1161,11 @@ async function resolveReferenceFields(
 
       const refFields = await getFieldsByCollectionId(field.reference_collection_id, isPublished, { excludeComputed: true });
 
+      // Translate the referenced item's values so localized pages render
+      // referenced CMS content in the active locale (not the source language)
+      await ensureCmsTranslations(translations, [refItem.id]);
+      const refValues = applyCmsTranslations(refItem.id, refItem.values, refFields, translations, { includeIncomplete: !isPublished });
+
       // Build the path prefix for this level
       const currentPath = pathPrefix ? `${pathPrefix}.${field.id}` : field.id;
 
@@ -1037,7 +1173,7 @@ async function resolveReferenceFields(
       // e.g., if field is "Author" with id "abc123", and referenced item has "name" field with id "xyz789"
       // the value becomes accessible as "abc123.xyz789" in the values map
       for (const refField of refFields) {
-        const refValue = refItem.values[refField.id];
+        const refValue = refValues[refField.id];
         if (refValue !== undefined) {
           // Store as: parentFieldId.refFieldId for relationship path resolution
           enhancedValues[`${currentPath}.${refField.id}`] = refValue;
@@ -1046,11 +1182,12 @@ async function resolveReferenceFields(
 
       // Recursively resolve nested reference fields
       const nestedValues = await resolveReferenceFields(
-        refItem.values,
+        refValues,
         refFields,
         isPublished,
         currentPath,
-        visited
+        visited,
+        translations
       );
 
       // Merge nested values (they'll have the full path)
@@ -1079,6 +1216,7 @@ async function batchResolveReferenceFields(
   isPublished: boolean,
   dataCache?: CollectionDataCache,
   boundFieldPaths?: Set<string>,
+  translations?: Record<string, Translation> | null,
 ): Promise<Record<string, string>[]> {
   let referenceFields = fields.filter(
     f => f.type === 'reference' && f.reference_collection_id
@@ -1134,6 +1272,20 @@ async function batchResolveReferenceFields(
     refFieldsMap = new Map<string, CollectionField[]>(fieldEntries);
   }
 
+  // Translate each referenced item's values once (reused across all rows that
+  // reference it) so localized pages render referenced CMS content in the
+  // active locale instead of the source language.
+  await ensureCmsTranslations(translations, Array.from(allRefItemIds));
+  const translatedRefValuesById = new Map<string, Record<string, string>>();
+  const getTranslatedRefValues = (refItem: CollectionItemWithValues, refFields: CollectionField[]): Record<string, string> => {
+    let cached = translatedRefValuesById.get(refItem.id);
+    if (!cached) {
+      cached = applyCmsTranslations(refItem.id, refItem.values, refFields, translations, { includeIncomplete: !isPublished });
+      translatedRefValuesById.set(refItem.id, cached);
+    }
+    return cached;
+  };
+
   return itemsValues.map(values => {
     const enhanced = { ...values };
 
@@ -1147,11 +1299,13 @@ async function batchResolveReferenceFields(
       const refFields = refFieldsMap.get(field.reference_collection_id);
       if (!refFields) continue;
 
+      const refValues = getTranslatedRefValues(refItem, refFields);
+
       for (const rf of refFields) {
         const dotKey = `${field.id}.${rf.id}`;
         if (boundFieldPaths && !boundFieldPaths.has(dotKey)) continue;
-        if (refItem.values[rf.id] !== undefined) {
-          enhanced[dotKey] = refItem.values[rf.id];
+        if (refValues[rf.id] !== undefined) {
+          enhanced[dotKey] = refValues[rf.id];
         }
       }
     }
@@ -1641,9 +1795,20 @@ async function resolveTiptapComponentCollections(
 
         // Recursively resolve rich text components inside the resolved layers
         // (handles Component A → rich text → Component B → collection)
-        const fullyResolved = await resolveRichTextCollections(
+        let fullyResolved = await resolveRichTextCollections(
           withCollections, components, isPublished, translations, childAncestors,
         );
+
+        // Translate the embedded component's layers. Component-scope
+        // translations are keyed `component:<comp.id>:layer:...`, so the
+        // resolved component id must be passed as the master component id —
+        // otherwise the lookup falls back to page scope and never matches.
+        if (translations) {
+          fullyResolved = injectTranslatedText(fullyResolved, '', translations, {
+            includeIncomplete: !isPublished,
+            defaultMasterComponentId: comp.id,
+          });
+        }
 
         node = {
           ...node,
@@ -2281,17 +2446,34 @@ export async function resolveCollectionLayers(
                   )
                 );
 
+                // Inject the cloned layer's OWN field variables (e.g. a slide's
+                // backgroundImage bound to the virtual __asset_url field). The
+                // React renderer resolves these at render time from
+                // _collectionItemValues, but static HTML export expects them
+                // pre-resolved — so resolve them here against this asset's values.
+                // Strip children first to avoid re-injecting the already-resolved
+                // per-asset children, then reattach them.
+                const layerWithOwnData = await injectCollectionData(
+                  {
+                    ...layer,
+                    variables: { ...layer.variables, collection: undefined },
+                    children: [],
+                  },
+                  virtualValues,
+                  undefined,
+                  isPublished,
+                  updatedLayerDataMap,
+                  undefined,
+                  timezone
+                );
+
                 // Build the cloned layer with original IDs first
                 const clonedLayer: Layer = {
-                  ...layer,
+                  ...layerWithOwnData,
                   attributes: {
                     ...layer.attributes,
                     'data-collection-item-id': assetId,
                   } as Record<string, any>,
-                  variables: {
-                    ...layer.variables,
-                    collection: undefined,
-                  },
                   children: injectedChildren,
                   _collectionItemValues: virtualValues,
                   _collectionItemId: assetId,
@@ -2472,6 +2654,7 @@ export async function resolveCollectionLayers(
           const slugField = collectionFields.find(f => f.key === 'slug');
 
           // Pre-process all items: translations + date formatting (pure computation)
+          await ensureCmsTranslations(translations, sortedItems.map(item => item.id));
           const preprocessed = sortedItems.map(item => {
             let translatedValues = applyCmsTranslations(item.id, item.values, collectionFields, translations, { includeIncomplete: !isPublished });
             const rawTranslatedValues = { ...translatedValues };
@@ -2486,6 +2669,7 @@ export async function resolveCollectionLayers(
             isPublished,
             cache,
             layerBoundPaths,
+            translations,
           );
           const clonedLayers: Layer[] = await Promise.all(
             preprocessed.map(async ({ item, rawTranslatedValues }, index) => {
@@ -2678,8 +2862,10 @@ export async function resolveCollectionLayers(
           },
         };
 
+        await ensureCmsTranslations(translations, sourceItems.map(item => item.id));
         const generatedOptions: Layer[] = sourceItems.map(item => {
-          const label = displayField ? (item.values[displayField.id] || 'Untitled') : 'Untitled';
+          const translatedValues = applyCmsTranslations(item.id, item.values, sourceFields, translations, { includeIncomplete: !isPublished });
+          const label = displayField ? (translatedValues[displayField.id] || 'Untitled') : 'Untitled';
           return {
             id: `${layer.id}-opt-${item.id}`,
             name: 'option',
@@ -2749,7 +2935,8 @@ export async function resolveCollectionLayers(
       const { type: _t, name: _n, value: _v, checked: _c, ...inheritedInputAttrs } = templateInput?.attributes || {};
 
       const generatedChildren: Layer[] = items.map(item => {
-        const label = displayField ? (item.values[displayField.id] || 'Untitled') : 'Untitled';
+        const translatedValues = applyCmsTranslations(item.id, item.values, fields as CollectionField[], translations, { includeIncomplete: !isPublished });
+        const label = displayField ? (translatedValues[displayField.id] || 'Untitled') : 'Untitled';
         const isDefault = inputType === 'checkbox'
           ? (opts.defaultItemIds || []).includes(item.id)
           : opts.defaultItemId === item.id;
@@ -2810,6 +2997,7 @@ export async function resolveCollectionLayers(
           const sourceCollectionId = layer.settings.optionsSource.collectionId;
           const items = cache.itemsByCollection.get(sourceCollectionId) || [];
           const fields = cache.fieldsByCollection.get(sourceCollectionId) || [];
+          await ensureCmsTranslations(translations, items.map(item => item.id));
           return buildInputGroupFragment(inputType, items, fields);
         } catch (error) {
           console.error(`Failed to resolve collection-sourced ${inputType} options for layer ${layer.id}:`, error);
@@ -3345,6 +3533,11 @@ export async function renderCollectionItemsToHtml(
   ]);
   const htmlTimezone = (timezoneRaw as string | null) || 'UTC';
 
+  // Augment the scoped translation map with CMS content for the items being
+  // rendered so `applyCmsTranslations` (here and in nested resolution) finds
+  // them — the map arrives as a per-locale scaffold without bulk CMS content.
+  await ensureCmsTranslations(translations, items.map(item => item.id));
+
   // Enrich slugs with cross-collection link field references
   const enrichedSlugs = { ...collectionItemSlugs };
   await enrichSlugsFromLinkFields(items, collectionFields, enrichedSlugs, isPublished);
@@ -3361,6 +3554,9 @@ export async function renderCollectionItemsToHtml(
     preprocessed.map(p => p.formattedValues),
     collectionFields,
     isPublished,
+    undefined,
+    undefined,
+    translations,
   );
 
   // Render each item using the template
@@ -4147,6 +4343,12 @@ export interface PageLinkContext {
   pageCollectionSortedItemIds?: string[];
   isPreview?: boolean;
   /**
+   * ID of the page being rendered. Links that target this page receive
+   * `aria-current="page"`, which activates their `current:` styles — the
+   * "active page" indicator used in navigation menus.
+   */
+  currentPageId?: string;
+  /**
    * Set by the static export to opt out of the iframe-wrapped htmlEmbed
    * SSR fallback. The live site relies on React hydration to replace the
    * SSR iframe with an inline `HtmlEmbedRenderer`; the static export has
@@ -4202,6 +4404,29 @@ export function layerToHtml(
 
   // Build layer data map with stored collection layer data
   const effectiveLayerDataMap = layer._layerDataMap || layerDataMap;
+
+  // A link targeting the page currently being rendered is marked with
+  // `aria-current="page"` so its `current:` styles apply (active-page state).
+  // Uses the same resolution context as `generateLinkHref` so page, url and CMS
+  // (field) links are all matched correctly.
+  const isCurrentPageLink = !!pageLinkContext?.currentPageId
+    && isLinkToCurrentPage(layer.variables?.link, {
+      pages,
+      folders,
+      collectionItemSlugs,
+      collectionItemId: effectiveCollectionItemId,
+      pageCollectionItemId: pageLinkContext.pageCollectionItemId,
+      collectionItemData: effectiveCollectionItemData,
+      pageCollectionItemData,
+      isPreview: pageLinkContext.isPreview,
+      locale,
+      translations,
+      getAsset: makeAssetMapResolver(assetMap),
+      anchorMap,
+      layerDataMap: effectiveLayerDataMap,
+      pageCollectionSortedItemIds: pageLinkContext.pageCollectionSortedItemIds,
+      pageId: pageLinkContext.currentPageId,
+    });
 
   // Get the HTML tag
   let tag = getLayerHtmlTag(layer);
@@ -4363,6 +4588,19 @@ export function layerToHtml(
   if (cmsGradient) {
     const existingImg = inlineStyles['--bg-img']?.split(', ').find(v => v.startsWith('url(')) || bgImageVars?.['--bg-img'];
     inlineStyles['--bg-img'] = combineBgValues(existingImg, cmsGradient);
+  }
+
+  // Icons render their SVG at 100% of the container, so an icon with only one
+  // of width/height set collapses on the other (auto) axis. Derive an
+  // aspect-ratio from the icon's viewBox so the missing axis resolves to the
+  // icon's true proportions. It stays inert when both dimensions are set.
+  if (layer.name === 'icon' && !inlineStyles['aspect-ratio'] && !inlineStyles['aspectRatio']) {
+    const iconSrcForAspect = layer.variables?.icon?.src;
+    const iconContentForAspect = iconSrcForAspect ? (getVariableStringValue(iconSrcForAspect) || '') : '';
+    const iconAspectRatio = getSvgAspectRatioStyle(iconContentForAspect || DEFAULT_ASSETS.ICON);
+    if (iconAspectRatio) {
+      inlineStyles['aspect-ratio'] = iconAspectRatio;
+    }
   }
 
   if (Object.keys(inlineStyles).length > 0) {
@@ -4628,6 +4866,9 @@ export function layerToHtml(
 
       if (hrefValue) {
         attrs.push(`href="${escapeHtml(hrefValue)}"`);
+        if (isCurrentPageLink) {
+          attrs.push('aria-current="page"');
+        }
       } else if (isLinkAtCollectionBoundary(linkSettings, {
         pageCollectionItemId: pageLinkContext?.pageCollectionItemId,
         pageCollectionSortedItemIds: pageLinkContext?.pageCollectionSortedItemIds,
@@ -4868,6 +5109,9 @@ export function layerToHtml(
         const linkAttrs: string[] = [];
         if (linkHref) {
           linkAttrs.push(`href="${escapeHtml(linkHref)}"`);
+          if (isCurrentPageLink) {
+            linkAttrs.push('aria-current="page"');
+          }
         } else {
           linkAttrs.push('aria-disabled="true"', 'data-link-disabled="true"');
         }
@@ -4973,6 +5217,10 @@ export function layerToHtml(
     // Wrap content in <a> tag if we have a valid href
     if (linkHref) {
       const linkAttrs: string[] = [`href="${escapeHtml(linkHref)}"`];
+
+      if (isCurrentPageLink) {
+        linkAttrs.push('aria-current="page"');
+      }
 
       if (linkSettings.target) {
         linkAttrs.push(`target="${escapeHtml(linkSettings.target)}"`);

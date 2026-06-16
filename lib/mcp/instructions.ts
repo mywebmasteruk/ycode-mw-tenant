@@ -187,8 +187,19 @@ update_layer_design({
 })
 \`\`\`
 
-Available states: \`neutral\` (default), \`hover\`, \`focus\`, \`active\`, \`disabled\`
+Available states: \`neutral\` (default), \`hover\`, \`focus\`, \`active\`, \`disabled\`, \`current\`
 Combine with breakpoints: \`desktop\`, \`tablet\`, \`mobile\`
+
+The \`current\` state styles a navigation link when it points to the page currently
+being viewed (rendered via \`aria-current\`). Use it to highlight the active nav link,
+the current pagination item, or the active slider bullet:
+\`\`\`
+update_layer_design({
+  layer_id: "<nav link>",
+  ui_state: "current",
+  design: { typography: { isActive: true, color: "#171717", fontWeight: "600" } }
+})
+\`\`\`
 
 Works in \`batch_operations\` too — add \`ui_state\` to any \`update_design\` operation.
 
@@ -497,6 +508,151 @@ reorder_collection_fields({ collection_id: "...", field_ids: ["...", "...", "...
 set_collection_item_order({ collection_id: "...", item_id: "...", manual_order: 0 })
 \`\`\`
 
+### Collection Lists on a Page (binding + filtering)
+
+A \`collection\` element (add_layer template "collection") is a Collection List: it repeats its
+children once per item in a bound collection. Build the row UI once inside it, then bind and filter:
+
+**1. Bind the list to a collection** (also sets sorting, limit, pagination):
+\`\`\`
+bind_collection_layer({
+  page_id, layer_id: "<collection layer>",
+  collection_id: "<posts collection>",
+  sort_by: "<date field id>", sort_order: "desc",   // or "manual" / "random" / "none"
+  limit: 6,
+  pagination: { enabled: true, mode: "load_more", items_per_page: 9 }
+})
+\`\`\`
+
+**2. Filter which items render** with \`set_collection_filters\`. Groups are joined by AND;
+conditions within a group are joined by OR. This replaces all filters (empty groups clears them):
+\`\`\`
+// Only published posts in a chosen category
+set_collection_filters({ page_id, layer_id, groups: [
+  { conditions: [{ source: "field", field_id: "<published bool>", operator: "is", value: "true" }] },
+  { conditions: [{ source: "field", field_id: "<category ref>", operator: "is_one_of", item_ids: ["<cat id>"] }] }
+]})
+\`\`\`
+
+Condition sources:
+- \`field\` — filter by a collection field. operator depends on field type (text: is/contains; number: is/lt/gt;
+  boolean: is + value "true"/"false"; date: is/is_before/is_after/is_between with value/value2; reference: is_one_of
+  with item_ids; multi_reference: contains_all_of/has_items).
+- \`item_id\` — filter by the item's own identity (is_one_of / is_not_one_of with item_ids and/or includes_current_page_item).
+
+**Current page (dynamic pages) — the "Current Category/Tag" pattern.** On a dynamic page, bind a filter
+to the current page's item:
+\`\`\`
+// Related posts: same category as the post being viewed (category is a reference field)
+set_collection_filters({ page_id, layer_id, groups: [
+  { conditions: [{ source: "field", field_id: "<category ref>", operator: "is_one_of", value_mode: "current_page" }] }
+]})
+
+// Show only the current page's own item
+set_collection_filters({ page_id, layer_id, groups: [
+  { conditions: [{ source: "item_id", operator: "is_one_of", includes_current_page_item: true }] }
+]})
+\`\`\`
+For a scalar field bound to the current page, also pass \`current_page_field_id\` (a field on the page's
+collection whose value is compared).
+
+**3. Bind child elements to fields** with \`bind_layer_field\` so each item shows live data. Build the row
+markup once inside the Collection List, then wire each element to a field:
+\`\`\`
+// Inside a Collection List bound to "Posts":
+bind_layer_field({ page_id, layer_id: "<title text>",  field_id: "<title field>" })   // text → Title
+bind_layer_field({ page_id, layer_id: "<cover image>", field_id: "<image field>" })   // image src → Cover
+bind_layer_field({ page_id, layer_id: "<cover image>", field_id: "<title field>", target: "alt" })
+bind_layer_field({ page_id, layer_id: "<byline>", field_id: "<author field>", prefix: "By " }) // "By {author}"
+\`\`\`
+- Binds by layer type: text/heading/richText → text; image → src (or target "alt"); video/audio → src
+  (video also "poster"); any layer with target "background" → background image.
+- \`source: "collection"\` (default) resolves the field from the nearest ancestor Collection List.
+  \`source: "page"\` resolves from the dynamic page's own collection item (use on dynamic CMS pages).
+- **Link a card to the item's page:** use \`update_layer_link\` with link_type "page", page_id_target = the
+  dynamic page, and NO collection_item_id — it resolves to the current item at runtime.
+
+**Multi-field text in one node** — when a single field isn't enough (e.g. a full name or a price string),
+use \`set_dynamic_text\` with ordered segments of literal text and field references:
+\`\`\`
+set_dynamic_text({ page_id, layer_id: "<name text>", segments: [
+  { type: "field", field_id: "<first name>" },
+  { type: "text", text: " " },
+  { type: "field", field_id: "<last name>" }
+]})
+// "$" + price + " / mo"
+set_dynamic_text({ page_id, layer_id: "<price text>", segments: [
+  { type: "text", text: "$" },
+  { type: "field", field_id: "<price>" },
+  { type: "text", text: " / mo" }
+]})
+\`\`\`
+
+### Nested Collection Lists
+
+A Collection List can be sourced from a reference field of a parent item instead of a whole collection —
+e.g. a post's related "Tags", or the products in the current page's "Category". Pass \`source_field_id\`
++ \`source_field_type\` to \`bind_collection_layer\`:
+\`\`\`
+// Inner list rendering the Tags (multi_reference) of each post in an outer Posts list:
+bind_collection_layer({
+  page_id, layer_id: "<inner collection layer>",
+  collection_id: "<tags collection>",            // the reference field's target collection
+  source_field_id: "<post.tags field id>",
+  source_field_type: "multi_reference",
+  source_field_source: "collection"              // field lives on the ancestor list's item
+})
+
+// On a dynamic Category page, list that category's products via a reference field on the page item:
+bind_collection_layer({
+  page_id, layer_id: "<products layer>",
+  collection_id: "<products collection>",
+  source_field_id: "<category.products field id>",
+  source_field_type: "multi_reference",
+  source_field_source: "page"
+})
+\`\`\`
+Pass \`source_field_id: null\` to clear nesting and revert to a direct collection.
+
+### Visitor-facing Filtering & Sorting (filter inputs)
+
+Build a \`filter\` element with inputs (text/select/checkbox) inside it, then link those inputs so visitors
+drive the list at runtime:
+- **Filter by an input:** add \`input_layer_id\` to a \`field\` condition in \`set_collection_filters\`
+  (and \`input_layer_id2\` for the second bound of \`is_between\`). The input's value replaces the static value.
+- **Sort by inputs:** pass \`sort_by_input_layer_id\` / \`sort_order_input_layer_id\` to \`bind_collection_layer\`.
+\`\`\`
+set_collection_filters({ page_id, layer_id, groups: [
+  { conditions: [{ source: "field", field_id: "<title>", operator: "contains", input_layer_id: "<search input>" }] }
+]})
+bind_collection_layer({ page_id, layer_id, collection_id, sort_by_input_layer_id: "<sort select>" })
+\`\`\`
+
+### Conditional Visibility (show/hide any layer)
+
+Any layer can be shown/hidden based on conditions via \`set_layer_visibility\`. It uses the SAME condition
+model as \`set_collection_filters\` (groups joined by AND, conditions by OR), plus a \`page_collection\` source.
+This REPLACES all conditions; an empty groups array clears them (always visible).
+\`\`\`
+// Hide a "Sale" badge unless the item's on_sale boolean is true (inside a Collection List or dynamic page)
+set_layer_visibility({ page_id, layer_id: "<sale badge>", groups: [
+  { conditions: [{ source: "field", field_id: "<on_sale bool>", operator: "is", value: "true" }] }
+]})
+
+// Show an "empty state" only when a Collection List on the page has no items
+set_layer_visibility({ page_id, layer_id: "<empty state>", groups: [
+  { conditions: [{ source: "page_collection", collection_layer_id: "<results list>", operator: "has_no_items" }] }
+]})
+
+// Show a "Featured" ribbon only on the current dynamic page's own item
+set_layer_visibility({ page_id, layer_id: "<ribbon>", groups: [
+  { conditions: [{ source: "item_id", operator: "is_one_of", includes_current_page_item: true }] }
+]})
+\`\`\`
+- \`field\` conditions resolve fields from the nearest ancestor Collection List and/or the dynamic page's collection.
+- \`page_collection\` tests another list's item count: \`has_items\` / \`has_no_items\`, or \`item_count\` with
+  \`compare_operator\` ("eq"/"lt"/"lte"/"gt"/"gte") + \`compare_value\`.
+
 ### Color Variables (Design Tokens)
 
 Color variables are site-wide CSS custom properties for consistent theming:
@@ -786,6 +942,20 @@ When building multiple similar elements (cards, buttons), create styles first:
 1. \`create_style\` to define the design once
 2. \`apply_style\` to apply it to each element
 3. Updating the style later updates all elements using it
+
+**Combo classes (stacking multiple styles):** A layer can reference an ordered stack
+of styles, not just one — like Webflow combo classes. Styles are listed low -> high
+priority and later styles win on conflicting properties. Use \`set_layer_styles\` to set
+the whole stack at once:
+\`\`\`
+// Base "Button" style + "Primary" modifier on top (Primary wins on conflicts)
+set_layer_styles({ page_id, layer_id, style_ids: ["<button>", "<button-primary>"] })
+
+// Detach all styles but keep the current look as local classes
+set_layer_styles({ page_id, layer_id, style_ids: [] })
+\`\`\`
+Use \`apply_style\` for the simple single-style case; use \`set_layer_styles\` whenever a
+layer needs more than one style or you need to control their order.
 
 ### Asset Management
 

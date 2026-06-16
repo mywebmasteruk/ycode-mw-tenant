@@ -78,6 +78,7 @@ export interface PublishCollectionResult {
     deletedItemsCount: number;
     deletedItemSlugs: string[];
     renamedItemOldSlugs: string[];
+    unpublishedItemSlugs: string[];
   };
   timing?: {
     collections: OperationTiming;
@@ -139,6 +140,7 @@ export async function publishCollectionWithItems(
       deletedItemsCount: 0,
       deletedItemSlugs: [],
       renamedItemOldSlugs: [],
+      unpublishedItemSlugs: [],
     },
     timing: {
       collections: { durationMs: 0, count: 0 },
@@ -196,7 +198,7 @@ export async function publishCollectionWithItems(
 
       // Step 3: Publish selected items
       const itemsStart = performance.now();
-      const { itemsCount, valuesCount, itemsDurationMs, valuesDurationMs, renamedItemOldSlugs } = await publishSelectedItems(
+      const { itemsCount, valuesCount, itemsDurationMs, valuesDurationMs, renamedItemOldSlugs, unpublishedItemSlugs } = await publishSelectedItems(
         collectionId,
         itemIds,
         prefetched,
@@ -204,6 +206,7 @@ export async function publishCollectionWithItems(
       result.published.itemsCount = itemsCount;
       result.published.valuesCount = valuesCount;
       result.published.renamedItemOldSlugs = renamedItemOldSlugs;
+      result.published.unpublishedItemSlugs = unpublishedItemSlugs;
       result.timing!.items = {
         durationMs: itemsDurationMs,
         count: itemsCount,
@@ -472,7 +475,7 @@ async function publishSelectedItems(
   collectionId: string,
   itemIds?: string[],
   prefetched?: CollectionPrefetch,
-): Promise<{ itemsCount: number; valuesCount: number; itemsDurationMs: number; valuesDurationMs: number; renamedItemOldSlugs: string[] }> {
+): Promise<{ itemsCount: number; valuesCount: number; itemsDurationMs: number; valuesDurationMs: number; renamedItemOldSlugs: string[]; unpublishedItemSlugs: string[] }> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -490,7 +493,7 @@ async function publishSelectedItems(
   }
 
   if (itemsToPublish.length === 0) {
-    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0, renamedItemOldSlugs: [] };
+    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0, renamedItemOldSlugs: [], unpublishedItemSlugs: [] };
   }
 
   // Batch fetch all draft items to publish. When the caller bulk-prefetched the
@@ -503,19 +506,65 @@ async function publishSelectedItems(
     : await getItemsByIds(itemsToPublish, false);
 
   if (draftItems.length === 0) {
-    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0, renamedItemOldSlugs: [] };
+    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0, renamedItemOldSlugs: [], unpublishedItemSlugs: [] };
   }
 
   // Separate publishable from non-publishable items
   const publishableItems = draftItems.filter(item => item.is_publishable);
   const nonPublishableItems = draftItems.filter(item => !item.is_publishable);
 
+<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
 
   // Remove published versions of non-publishable items
+||||||| 1e44661
+  // Remove published versions of non-publishable items
+=======
+  // Remove published versions of non-publishable items. Snapshot their published
+  // slugs first so the publish route can invalidate the now-dead URLs — without
+  // this the CDN keeps serving the unpublished page as a 200 (cache never
+  // expires under revalidate: false).
+  const unpublishedItemSlugs: string[] = [];
+>>>>>>> upstream/main
   if (nonPublishableItems.length > 0) {
     const nonPublishableIds = nonPublishableItems.map(item => item.id);
+<<<<<<< HEAD
     let delQuery = client
+||||||| 1e44661
+    await client
+=======
+
+    try {
+      const slugField = prefetched
+        ? prefetched.draftFields.find(f => f.key === 'slug') ?? null
+        : (await client
+          .from('collection_fields')
+          .select('id')
+          .eq('collection_id', collectionId)
+          .eq('key', 'slug')
+          .is('deleted_at', null)
+          .limit(1)
+          .single()).data;
+
+      if (slugField) {
+        for (let i = 0; i < nonPublishableIds.length; i += 500) {
+          const batch = nonPublishableIds.slice(i, i + 500);
+          const { data } = await client
+            .from('collection_item_values')
+            .select('value')
+            .eq('field_id', slugField.id)
+            .eq('is_published', true)
+            .is('deleted_at', null)
+            .in('item_id', batch);
+          if (data) unpublishedItemSlugs.push(...data.map(v => v.value as string).filter(Boolean));
+        }
+      }
+    } catch {
+      // Non-fatal: proceed with unpublish even if the slug snapshot fails
+    }
+
+    await client
+>>>>>>> upstream/main
       .from('collection_items')
       .delete()
       .in('id', nonPublishableIds)
@@ -525,7 +574,7 @@ async function publishSelectedItems(
   }
 
   if (publishableItems.length === 0) {
-    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0, renamedItemOldSlugs: [] };
+    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0, renamedItemOldSlugs: [], unpublishedItemSlugs };
   }
 
   // Fetch existing published items for comparison (use bulk-prefetched set when available)
@@ -641,7 +690,7 @@ async function publishSelectedItems(
   const valuesCount = await publishItemValuesBatch(itemIdsToPublishValues, draftValues, publishedValues);
   const valuesDurationMs = Math.round(performance.now() - valuesStart);
 
-  return { itemsCount: itemsToUpsert.length, valuesCount, itemsDurationMs, valuesDurationMs, renamedItemOldSlugs };
+  return { itemsCount: itemsToUpsert.length, valuesCount, itemsDurationMs, valuesDurationMs, renamedItemOldSlugs, unpublishedItemSlugs };
 }
 
 /**
