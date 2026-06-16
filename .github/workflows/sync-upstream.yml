@@ -70,17 +70,16 @@ jobs:
           git diff --name-only --diff-filter=U > /tmp/update-conflicts.txt
           exit 0
 
-      - name: Write conflict safety report
+      - name: Generate conflict safety report
         if: steps.merge.outputs.status != '0'
+        continue-on-error: true
+        env:
+          UPDATE_BASE_REF: origin/main
+          UPDATE_SAFETY_REPORT_PATH: /tmp/update-safety-report.md
+          UPDATE_SAFETY_REPORT_JSON_PATH: /tmp/update-safety-report.json
         run: |
-          {
-            echo "Status: blocked"
-            echo ""
-            echo "This update has merge conflicts and must be reviewed before it can be merged."
-            echo ""
-            echo "Conflict files:"
-            sed 's/^/- /' /tmp/update-conflicts.txt
-          } > /tmp/update-safety-report.md
+          npx --yes tsx scripts/check-update-safety.ts || true
+          cat /tmp/update-safety-report.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install dependencies for safety report
         if: steps.merge.outputs.status == '0'
@@ -92,7 +91,20 @@ jobs:
         env:
           UPDATE_BASE_REF: origin/main
           UPDATE_SAFETY_REPORT_PATH: /tmp/update-safety-report.md
-        run: npm run updates:safety-check
+          UPDATE_SAFETY_REPORT_JSON_PATH: /tmp/update-safety-report.json
+        run: |
+          npm run updates:safety-check
+          cat /tmp/update-safety-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Autopilot report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-update-autopilot-report
+          path: |
+            /tmp/update-safety-report.md
+            /tmp/update-safety-report.json
+          if-no-files-found: ignore
 
       - name: Check whether update branch has changes
         id: changes

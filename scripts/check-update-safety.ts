@@ -1,6 +1,10 @@
 import { execSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { classifyUpdateRisk, formatUpdateSafetyReport } from '../lib/masjidweb/update-safety-check';
+import {
+  classifyUpdateRisk,
+  formatUpdateSafetyReport,
+  type UpdateSafetyResult,
+} from '../lib/masjidweb/update-safety-check';
 
 function list(command: string): string[] {
   return execSync(command, { encoding: 'utf8' })
@@ -9,10 +13,40 @@ function list(command: string): string[] {
     .filter(Boolean);
 }
 
+function listAllowFailure(command: string): string[] {
+  try {
+    return list(command);
+  } catch {
+    return [];
+  }
+}
+
+function writeJsonReport(outputPath: string, result: UpdateSafetyResult): void {
+  writeFileSync(outputPath, `${JSON.stringify(result, null, 2)}\n`);
+}
+
+function appendGithubOutput(result: UpdateSafetyResult): void {
+  if (!process.env.GITHUB_OUTPUT) return;
+  writeFileSync(
+    process.env.GITHUB_OUTPUT,
+    [
+      `risk_level=${result.level}`,
+      `autopilot_risk=${result.riskLevel}`,
+      `autopilot_status=${result.status}`,
+      `needs_developer_review=${result.needsDeveloperReview ? 'true' : 'false'}`,
+      `high_risk_count=${result.highRiskFiles.length}`,
+      `medium_risk_count=${result.mediumRiskFiles.length}`,
+      `conflict_count=${result.conflictFiles.length}`,
+    ].join('\n') + '\n',
+    { flag: 'a' },
+  );
+}
+
 const baseRef = process.env.UPDATE_BASE_REF || 'origin/main';
 const outputPath = process.env.UPDATE_SAFETY_REPORT_PATH;
-const changedFiles = list(`git diff --name-only ${baseRef}...HEAD`);
-const conflictFiles = list('git diff --name-only --diff-filter=U');
+const jsonOutputPath = process.env.UPDATE_SAFETY_REPORT_JSON_PATH;
+const changedFiles = listAllowFailure(`git diff --name-only ${baseRef}...HEAD`);
+const conflictFiles = listAllowFailure('git diff --name-only --diff-filter=U');
 const result = classifyUpdateRisk(changedFiles, conflictFiles);
 const report = formatUpdateSafetyReport(result);
 
@@ -22,19 +56,12 @@ if (outputPath) {
   writeFileSync(outputPath, `${report}\n`);
 }
 
-if (process.env.GITHUB_OUTPUT) {
-  writeFileSync(
-    process.env.GITHUB_OUTPUT,
-    [
-      `risk_level=${result.level}`,
-      `needs_developer_review=${result.needsDeveloperReview ? 'true' : 'false'}`,
-      `high_risk_count=${result.highRiskFiles.length}`,
-      `conflict_count=${result.conflictFiles.length}`,
-    ].join('\n') + '\n',
-    { flag: 'a' }
-  );
+if (jsonOutputPath) {
+  writeJsonReport(jsonOutputPath, result);
 }
 
-if (result.conflictFiles.length > 0) {
+appendGithubOutput(result);
+
+if (result.status === 'blocked') {
   process.exit(2);
 }

@@ -38,7 +38,31 @@ jobs:
       - name: Update safety check
         env:
           UPDATE_BASE_REF: origin/main
-        run: npm run updates:safety-check
+          UPDATE_SAFETY_REPORT_PATH: /tmp/update-safety-report.md
+          UPDATE_SAFETY_REPORT_JSON_PATH: /tmp/update-safety-report.json
+        run: |
+          npm run updates:safety-check
+          cat /tmp/update-safety-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Autopilot tenant guard
+        env:
+          AUTOPILOT_GUARD_REPORT_PATH: /tmp/autopilot-guard-report.md
+          AUTOPILOT_GUARD_REPORT_JSON_PATH: /tmp/autopilot-guard-report.json
+        run: |
+          npm run updates:autopilot-guard
+          cat /tmp/autopilot-guard-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Autopilot reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-update-autopilot-reports
+          path: |
+            /tmp/update-safety-report.md
+            /tmp/update-safety-report.json
+            /tmp/autopilot-guard-report.md
+            /tmp/autopilot-guard-report.json
+          if-no-files-found: ignore
 
       - name: Tenant isolation tests
         run: bash scripts/check-tenant-isolation.sh
