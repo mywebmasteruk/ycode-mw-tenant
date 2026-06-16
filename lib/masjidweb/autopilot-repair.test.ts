@@ -259,6 +259,23 @@ describe('autopilot-repair', () => {
     expect(markdown).toContain('Dashboard next action');
   });
 
+  it('does not group repaired files as blocked unknowns', () => {
+    const repoRoot = makeRepo();
+    writeFileSync(join(repoRoot, 'package.json'), '{"scripts":{}}');
+    writeFileSync(join(repoRoot, 'package-lock.json'), conflict('{"lockfileVersion":3}'));
+
+    const report = runAutopilotRepair({
+      repoRoot,
+      runCommand: makeRunner(['package-lock.json']),
+      runGuard: false,
+    });
+    const markdown = formatAutopilotRepairMarkdown(report);
+
+    expect(report.repairedFiles).toEqual(['package-lock.json']);
+    expect(report.blockedByReason.unknown).toEqual([]);
+    expect(markdown).not.toContain('### Unknown');
+  });
+
   it('formats a human-readable report with actionable blocked details', () => {
     const repoRoot = makeRepo();
     const filePath = 'app/(builder)/ycode/api/publish/route.ts';

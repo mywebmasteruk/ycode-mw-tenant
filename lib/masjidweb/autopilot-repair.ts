@@ -320,12 +320,13 @@ function nextActionForCategory(category: AutopilotBlockReasonCategory, filePath:
 }
 
 function blockedByReason(actions: AutopilotRepairAction[]): Record<AutopilotBlockReasonCategory, string[]> {
+  const blockingActions = actions.filter((action) => action.outcome === 'blocked' || action.outcome === 'failed');
   return {
-    'known-resolver-unavailable': actions.filter((action) => action.reasonCategory === 'known-resolver-unavailable').map((action) => action.filePath),
-    'tenant-invariant-failed': actions.filter((action) => action.reasonCategory === 'tenant-invariant-failed').map((action) => action.filePath),
-    'conflict-markers-remain': actions.filter((action) => action.reasonCategory === 'conflict-markers-remain').map((action) => action.filePath),
-    'mechanical-repair-failed': actions.filter((action) => action.reasonCategory === 'mechanical-repair-failed').map((action) => action.filePath),
-    unknown: actions.filter((action) => action.reasonCategory === 'unknown').map((action) => action.filePath),
+    'known-resolver-unavailable': blockingActions.filter((action) => action.reasonCategory === 'known-resolver-unavailable').map((action) => action.filePath),
+    'tenant-invariant-failed': blockingActions.filter((action) => action.reasonCategory === 'tenant-invariant-failed').map((action) => action.filePath),
+    'conflict-markers-remain': blockingActions.filter((action) => action.reasonCategory === 'conflict-markers-remain').map((action) => action.filePath),
+    'mechanical-repair-failed': blockingActions.filter((action) => action.reasonCategory === 'mechanical-repair-failed').map((action) => action.filePath),
+    unknown: blockingActions.filter((action) => action.reasonCategory === 'unknown').map((action) => action.filePath),
   };
 }
 

@@ -223,7 +223,7 @@ jobs:
             let body = '### MasjidWeb Autopilot repair\n\n';
             body += `Deterministic repair status: **${deterministicStatus}**. Repaired: **${Number.isFinite(deterministicRepaired) ? deterministicRepaired : 0}**. Blocked: **${Number.isFinite(deterministicBlocked) ? deterministicBlocked : 0}**.\n\n`;
             if (deterministicStatus === 'blocked') {
-              body += 'Autopilot v2.1 blocked this update to protect tenant data. Review the `core-update-autopilot-repair` artifact for exact missing invariants.\n';
+              body += 'Autopilot v2.2 blocked this update to protect tenant data. Review the `core-update-autopilot-repair` artifact for exact missing invariants.\n';
               body += 'Do **not** merge until a developer resolves the blocked files and the normal PR checks finish green.\n';
             } else if (repairOutcome === 'failure') {
               body += 'AI repair **failed**. Check the workflow logs for OpenRouter or conflict resolution errors.\n';
