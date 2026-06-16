@@ -218,7 +218,7 @@ export async function loadTranslationsForLocale(
       return { locale: null, translations: {} };
     }
 
-// Fetch all translations for this locale. Supabase caps PostgREST
+    // Fetch all translations for this locale. Supabase caps PostgREST
     // responses at 1000 rows by default — projects with more translations
     // were silently truncated, causing entire layers to render in the
     // source language on SSR while the editor (which fetches via its own
@@ -1945,8 +1945,10 @@ async function buildCollectionCache(
 
   const ids = Array.from(collectionIds);
 
+  const tenantId = await resolveEffectiveTenantId();
+
   // Phase 1: Fetch fields for all collections (needed to discover reference collections)
-  const { data: nonComputedFieldsData } = await client
+  let nonComputedFieldsQuery = client
     .from('collection_fields')
     .select('*')
     .in('collection_id', ids)
@@ -1955,11 +1957,13 @@ async function buildCollectionCache(
     .eq('is_computed', false)
     .order('order', { ascending: true })
     .limit(5000);
+  nonComputedFieldsQuery = applyTenantEq(nonComputedFieldsQuery, tenantId);
+  const { data: nonComputedFieldsData } = await nonComputedFieldsQuery;
 
   // Count fields are computed but their config is needed during render so layers
   // bound to a count value can resolve correctly. Pull them in alongside the
   // regular fields. Other computed types (e.g. status) are still excluded.
-  const { data: countFieldsData } = await client
+  let countFieldsQuery = client
     .from('collection_fields')
     .select('*')
     .in('collection_id', ids)
@@ -1967,6 +1971,8 @@ async function buildCollectionCache(
     .is('deleted_at', null)
     .eq('type', 'count')
     .limit(5000);
+  countFieldsQuery = applyTenantEq(countFieldsQuery, tenantId);
+  const { data: countFieldsData } = await countFieldsQuery;
 
   const fieldsData = [...(nonComputedFieldsData || []), ...(countFieldsData || [])];
 
@@ -2024,6 +2030,7 @@ async function buildCollectionCache(
         .order('manual_order', { ascending: true })
         .order('created_at', { ascending: false })
         .range(from, to);
+      q = applyTenantEq(q, tenantId);
       if (isPublished) q = q.eq('is_publishable', true);
       const { data, error } = await q;
       if (error) throw new Error(`Failed to fetch items: ${error.message}`);
@@ -2039,13 +2046,17 @@ async function buildCollectionCache(
     .catch(error => ({ data: [] as any[], error }));
 
   const refFieldsPromise = refCollectionIds.length > 0
-    ? client.from('collection_fields').select('*')
-      .in('collection_id', refCollectionIds)
-      .eq('is_published', isPublished)
-      .is('deleted_at', null)
-      .eq('is_computed', false)
-      .order('order', { ascending: true })
-      .limit(5000)
+    ? (() => {
+      let refFieldsQuery = client.from('collection_fields').select('*')
+        .in('collection_id', refCollectionIds)
+        .eq('is_published', isPublished)
+        .is('deleted_at', null)
+        .eq('is_computed', false)
+        .order('order', { ascending: true })
+        .limit(5000);
+      refFieldsQuery = applyTenantEq(refFieldsQuery, tenantId);
+      return refFieldsQuery;
+    })()
     : Promise.resolve({ data: [] as any[] });
 
   const [{ data: itemsData }, { data: refFieldsRaw }] = await Promise.all([itemsPromise, refFieldsPromise]);

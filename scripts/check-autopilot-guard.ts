@@ -19,6 +19,8 @@ const TENANT_GUARD_FILES = [
   'lib/repositories/collectionItemValueRepository.ts',
   'lib/repositories/pageRepository.ts',
   'lib/repositories/collectionFieldRepository.ts',
+  'lib/page-fetcher.ts',
+  'lib/services/collectionService.ts',
   'proxy.ts',
   'lib/supabase-cookie-domain.ts',
   'lib/supabase-browser.ts',
@@ -94,6 +96,58 @@ function invariantChecksForFile(filePath: string, content: string, strictChanged
         ),
       );
     }
+  }
+
+  if (filePath === 'lib/page-fetcher.ts') {
+    checks.push(
+      checkContains(
+        filePath,
+        content,
+        'page fetcher tenant resolver present',
+        ['resolveEffectiveTenantId'],
+        'Page fetcher must preserve host/subdomain tenant resolution before service-role reads.',
+      ),
+      checkContains(
+        filePath,
+        content,
+        'page fetcher tenant filter present',
+        ['applyTenantEq'],
+        'Page fetcher must apply tenant filters to pages, folders, layers, locales, components, and CMS reads.',
+      ),
+      checkNoPattern(
+        filePath,
+        content,
+        'no invalid admin client arguments',
+        /getSupabaseAdmin\([^)]+\)/,
+        'Page fetcher must not pass tenant IDs to getSupabaseAdmin(); resolve and filter tenant scope separately.',
+      ),
+    );
+  }
+
+  if (filePath === 'lib/services/collectionService.ts') {
+    checks.push(
+      checkContains(
+        filePath,
+        content,
+        'collection service tenant resolver present',
+        ['resolveEffectiveTenantId', 'getTenantIdFromHeaders'],
+        'Collection service must resolve tenant context before service-role Supabase or Knex reads/writes.',
+      ),
+      checkContains(
+        filePath,
+        content,
+        'collection service tenant filter present',
+        ['applyTenantEq', ".where('tenant_id'", '.where("tenant_id"', 'tenant_id: tenantId', 'tenant_id: effectiveTenantId'],
+        'Collection service must keep tenant filters on service-role Supabase and Knex paths.',
+      ),
+      checkNoPattern(
+        filePath,
+        content,
+        'no invalid admin client arguments',
+        /getSupabaseAdmin\([^)]+\)/,
+        'Collection service must not pass tenant IDs to getSupabaseAdmin(); resolve and filter tenant scope separately.',
+      ),
+    );
   }
 
   if (filePath === 'app/(builder)/ycode/api/publish/route.ts') {

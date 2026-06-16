@@ -1013,11 +1013,14 @@ async function getCollectionIdsWithDeletedDrafts(
   } catch {
     const client = await getSupabaseAdmin();
     if (!client) throw new Error('Supabase client not configured');
-    const { data, error } = await client
+    const tenantId = await resolveEffectiveTenantId();
+    let query = client
       .from(table)
       .select('collection_id')
       .eq('is_published', false)
       .not('deleted_at', 'is', null);
+    query = applyTenantEq(query, tenantId);
+    const { data, error } = await query;
     if (error) throw new Error(`Failed to detect deleted drafts: ${error.message}`);
     return new Set((data || []).map(r => r.collection_id));
   }

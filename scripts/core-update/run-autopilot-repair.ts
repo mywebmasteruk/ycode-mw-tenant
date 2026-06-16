@@ -27,6 +27,10 @@ if (process.env.GITHUB_OUTPUT) {
       `repaired_count=${report.repairedFiles.length}`,
       `blocked_count=${report.blockedFiles.length}`,
       `failed_count=${report.failedFiles.length}`,
+      `known_resolver_unavailable_count=${report.blockedByReason['known-resolver-unavailable'].length}`,
+      `tenant_invariant_failed_count=${report.blockedByReason['tenant-invariant-failed'].length}`,
+      `conflict_markers_remain_count=${report.blockedByReason['conflict-markers-remain'].length}`,
+      `dashboard_next_action=${report.dashboardNextAction}`,
     ].join('\n') + '\n',
   );
 }
