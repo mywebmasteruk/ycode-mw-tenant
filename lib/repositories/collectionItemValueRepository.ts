@@ -270,8 +270,9 @@ export async function getValueRowsForItems(
     return await query;
   } catch {
     // Fallback: paginated PostgREST reads (chunk item IDs to stay within URL limits)
-    const client = await getSupabaseAdmin(tenantId);
+    const client = await getSupabaseAdmin();
     if (!client) throw new Error('Supabase client not configured');
+    const resolvedTenantId = tenantId ?? await resolveEffectiveTenantId();
 
     const ITEM_CHUNK = 50;
     const PAGE_SIZE = 1000;
@@ -281,7 +282,7 @@ export async function getValueRowsForItems(
       const chunkIds = itemIds.slice(i, i + ITEM_CHUNK);
       let offset = 0;
       while (true) {
-        const { data, error } = await client
+        let query = client
           .from('collection_item_values')
           .select('id, item_id, field_id, value, created_at')
           .in('item_id', chunkIds)
@@ -289,6 +290,10 @@ export async function getValueRowsForItems(
           .is('deleted_at', null)
           .order('id', { ascending: true })
           .range(offset, offset + PAGE_SIZE - 1);
+        if (resolvedTenantId) {
+          query = query.eq('tenant_id', resolvedTenantId);
+        }
+        const { data, error } = await query;
 
         if (error) throw new Error(`Failed to fetch item values: ${error.message}`);
 

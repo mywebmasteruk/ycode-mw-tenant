@@ -1,4 +1,5 @@
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 import { getSupabaseAdmin, getTenantIdFromHeaders } from '@/lib/supabase-server';
 import { getKnexClient } from '@/lib/knex-client';
 import type { Collection, CreateCollectionData, UpdateCollectionData } from '@/types';
@@ -109,14 +110,17 @@ export async function getCollectionsRaw(isPublished: boolean, tenantId?: string)
     }
     return await query;
   } catch {
-    const client = await getSupabaseAdmin(tenantId);
+    const client = await getSupabaseAdmin();
     if (!client) throw new Error('Supabase client not configured');
+    const resolvedTenantId = tenantId ?? await resolveEffectiveTenantId();
 
-    const { data, error } = await client
+    let query = client
       .from('collections')
       .select('*')
       .eq('is_published', isPublished)
       .is('deleted_at', null);
+    query = applyTenantEq(query, resolvedTenantId);
+    const { data, error } = await query;
 
     if (error) throw new Error(`Failed to fetch collections: ${error.message}`);
     return data || [];

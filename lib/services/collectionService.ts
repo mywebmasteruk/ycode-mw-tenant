@@ -608,14 +608,18 @@ async function publishSelectedItems(
     // Resolve the slug field from prefetched draft fields when available to skip a round-trip.
     const slugField = prefetched
       ? prefetched.draftFields.find(f => f.key === 'slug') ?? null
-      : (await client
-        .from('collection_fields')
-        .select('id')
-        .eq('collection_id', collectionId)
-        .eq('key', 'slug')
-        .is('deleted_at', null)
-        .limit(1)
-        .single()).data;
+      : await (async () => {
+        let slugFieldQuery = client
+          .from('collection_fields')
+          .select('id')
+          .eq('collection_id', collectionId)
+          .eq('key', 'slug')
+          .is('deleted_at', null)
+          .limit(1);
+        slugFieldQuery = applyTenantEq(slugFieldQuery, tenantId);
+        const { data } = await slugFieldQuery.single();
+        return data;
+      })();
 
     if (slugField) {
       const slugId = slugField.id;
@@ -862,26 +866,29 @@ async function cleanupDeletedPublishedItems(
   // Snapshot published slug values before deletion (for cache invalidation)
   let deletedSlugs: string[] = [];
   try {
-    const { data: slugField } = await client
+    let slugFieldQuery = client
       .from('collection_fields')
       .select('id')
       .eq('collection_id', collectionId)
       .eq('key', 'slug')
       .is('deleted_at', null)
-      .limit(1)
-      .single();
+      .limit(1);
+    slugFieldQuery = applyTenantEq(slugFieldQuery, tenantId);
+    const { data: slugField } = await slugFieldQuery.single();
 
     if (slugField) {
       const allSlugValues: Array<{ value: unknown }> = [];
       for (let i = 0; i < deletedItemIds.length; i += 500) {
         const batch = deletedItemIds.slice(i, i + 500);
-        const { data } = await client
+        let slugValuesQuery = client
           .from('collection_item_values')
           .select('value')
           .eq('field_id', slugField.id)
           .eq('is_published', true)
           .is('deleted_at', null)
           .in('item_id', batch);
+        slugValuesQuery = applyTenantEq(slugValuesQuery, tenantId);
+        const { data } = await slugValuesQuery;
         if (data) allSlugValues.push(...data);
       }
 

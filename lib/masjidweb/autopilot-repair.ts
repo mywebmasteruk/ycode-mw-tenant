@@ -1,6 +1,7 @@
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { inspectTenantSensitiveContent } from './autopilot-tenant-invariants';
 
 export type AutopilotRepairStatus = 'success' | 'blocked' | 'failed';
 export type AutopilotRepairOutcome = 'repaired' | 'blocked' | 'skipped' | 'failed';
@@ -38,7 +39,7 @@ export interface AutopilotGuardRun {
 }
 
 export interface AutopilotRepairReport {
-  version: '2.2';
+  version: '2.3';
   status: AutopilotRepairStatus;
   startedAt: string;
   completedAt: string;
@@ -61,13 +62,7 @@ export interface RunAutopilotRepairOptions {
   jsonReportPath?: string;
 }
 
-interface RequiredInvariant {
-  name: string;
-  isPresent: (content: string) => boolean;
-  message: string;
-}
-
-const CONFLICT_MARKER_PATTERN = /^<<<<<<<|^=======|^>>>>>>>|^\|\|\|\|\|\|\|/m;
+export { hasConflictMarkers } from './autopilot-tenant-invariants';
 
 const HIGH_RISK_EXACT_FILES = new Set([
   'app/(builder)/ycode/api/publish/route.ts',
@@ -78,24 +73,8 @@ const HIGH_RISK_EXACT_FILES = new Set([
   'lib/services/collectionService.ts',
 ]);
 
-const SUPABASE_TENANT_TABLES = [
-  'collections',
-  'collection_fields',
-  'collection_items',
-  'collection_item_values',
-  'components',
-  'locales',
-  'page_folders',
-  'page_layers',
-  'pages',
-];
-
 function uniqueSorted(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))].sort();
-}
-
-export function hasConflictMarkers(content: string): boolean {
-  return CONFLICT_MARKER_PATTERN.test(content);
 }
 
 function defaultRunCommand(repoRoot: string): RepairCommandRunner {
@@ -137,158 +116,13 @@ export function isHighRiskAutopilotRepairFile(filePath: string): boolean {
   return HIGH_RISK_EXACT_FILES.has(filePath);
 }
 
-function repositoryInvariants(filePath: string): RequiredInvariant[] {
-  return [
-    {
-      name: 'tenant resolver present',
-      isPresent: (content) => content.includes('resolveEffectiveTenantId') || content.includes('getTenantIdFromHeaders'),
-      message: `${filePath} must resolve the effective tenant before service-role or Knex data access.`,
-    },
-    {
-      name: 'tenant filter present',
-      isPresent: (content) =>
-        content.includes('applyTenantEq') ||
-        content.includes(".eq('tenant_id'") ||
-        content.includes('.eq("tenant_id"') ||
-        content.includes("where('tenant_id'") ||
-        content.includes('tenant_id: tenantId') ||
-        content.includes('tenant_id: effectiveTenantId') ||
-        content.includes('set_tenant_context'),
-      message: `${filePath} must keep tenant_id filters, inserts, or explicit tenant context.`,
-    },
-    {
-      name: 'no invalid admin client arguments',
-      isPresent: (content) => !/getSupabaseAdmin\([^)]+\)/.test(content),
-      message: `${filePath} must not call getSupabaseAdmin() with tenant arguments; tenant scope must be resolved and filtered separately.`,
-    },
-  ];
-}
-
-function publishInvariants(filePath: string): RequiredInvariant[] {
-  return [
-    {
-      name: 'publish tenant resolver present',
-      isPresent: (content) => content.includes('resolveEffectiveTenantId') || content.includes('runWithEffectiveTenantId'),
-      message: `${filePath} must keep explicit tenant resolution so one tenant cannot publish another tenant.`,
-    },
-    {
-      name: 'publish tenant context wrapper present',
-      isPresent: (content) => content.includes('runWithEffectiveTenantId'),
-      message: `${filePath} must execute publish work inside the effective tenant context.`,
-    },
-  ];
-}
-
-function tableQueryPattern(table: string): RegExp {
-  return new RegExp(`\\.from\\(\\s*['"]${table}['"]\\s*\\)`, 'g');
-}
-
-function hasUnscopedTableQuery(content: string, table: string): boolean {
-  const pattern = tableQueryPattern(table);
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(content)) !== null) {
-    const start = Math.max(0, match.index - 500);
-    const end = Math.min(content.length, match.index + 900);
-    const window = content.slice(start, end);
-    if (!window.includes('applyTenantEq') && !window.includes(".eq('tenant_id'") && !window.includes('.eq("tenant_id"')) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function pageFetcherInvariants(filePath: string): RequiredInvariant[] {
-  return [
-    {
-      name: 'tenant resolver present',
-      isPresent: (content) => content.includes('resolveEffectiveTenantId'),
-      message: `${filePath} must preserve host/subdomain tenant resolution via resolveEffectiveTenantId().`,
-    },
-    {
-      name: 'tenant filter helper present',
-      isPresent: (content) => content.includes('applyTenantEq'),
-      message: `${filePath} must apply tenant filters to Supabase reads that load pages, folders, layers, locales, components, and CMS data.`,
-    },
-    {
-      name: 'page reads tenant scoped',
-      isPresent: (content) => !hasUnscopedTableQuery(content, 'pages'),
-      message: `${filePath} must not read pages through the service-role client without applyTenantEq or an explicit tenant_id filter.`,
-    },
-    {
-      name: 'page layer reads tenant scoped',
-      isPresent: (content) => !hasUnscopedTableQuery(content, 'page_layers'),
-      message: `${filePath} must not read page_layers through the service-role client without applyTenantEq or an explicit tenant_id filter.`,
-    },
-    {
-      name: 'collection item reads tenant scoped',
-      isPresent: (content) => !hasUnscopedTableQuery(content, 'collection_items'),
-      message: `${filePath} must not read collection_items through the service-role client without applyTenantEq or an explicit tenant_id filter.`,
-    },
-    {
-      name: 'no invalid admin client arguments',
-      isPresent: (content) => !/getSupabaseAdmin\([^)]+\)/.test(content),
-      message: `${filePath} must not call getSupabaseAdmin() with tenant arguments; tenant scope must be resolved and filtered separately.`,
-    },
-  ];
-}
-
-function collectionServiceInvariants(filePath: string): RequiredInvariant[] {
-  return [
-    {
-      name: 'tenant resolver present',
-      isPresent: (content) => content.includes('resolveEffectiveTenantId') || content.includes('getTenantIdFromHeaders'),
-      message: `${filePath} must resolve tenant context before service-role Supabase or Knex reads/writes.`,
-    },
-    {
-      name: 'tenant filter helper present',
-      isPresent: (content) => content.includes('applyTenantEq'),
-      message: `${filePath} must retain applyTenantEq for service-role Supabase reads/deletes and tenant_id on writes.`,
-    },
-    {
-      name: 'service-role table reads tenant scoped',
-      isPresent: (content) => !SUPABASE_TENANT_TABLES.some((table) => hasUnscopedTableQuery(content, table)),
-      message: `${filePath} must not use service-role table reads without applyTenantEq, tenant_id inserts, or tenant-scoped repository helpers.`,
-    },
-    {
-      name: 'knex tenant filter present',
-      isPresent: (content) => !content.includes('getKnexClient') || content.includes('getTenantIdFromHeaders') || content.includes("where('tenant_id'") || content.includes('.where("tenant_id"'),
-      message: `${filePath} Knex paths must resolve tenant context and filter by tenant_id when reading tenant tables.`,
-    },
-    {
-      name: 'no invalid admin client arguments',
-      isPresent: (content) => !/getSupabaseAdmin\([^)]+\)/.test(content),
-      message: `${filePath} must not call getSupabaseAdmin() with tenant arguments; tenant scope must be resolved and filtered separately.`,
-    },
-  ];
-}
-
-function requiredInvariantsForFile(filePath: string): RequiredInvariant[] {
-  if (filePath.startsWith('lib/repositories/')) return repositoryInvariants(filePath);
-  if (filePath === 'app/(builder)/ycode/api/publish/route.ts') return publishInvariants(filePath);
-  if (filePath === 'lib/page-fetcher.ts') return pageFetcherInvariants(filePath);
-  if (filePath === 'lib/services/collectionService.ts') return collectionServiceInvariants(filePath);
-  return [];
-}
-
 export function inspectHighRiskFile(repoRoot: string, filePath: string): string[] {
   const absolutePath = join(repoRoot, filePath);
   if (!existsSync(absolutePath)) {
     return [`${filePath} is missing, so tenant-scope invariants cannot be proven.`];
   }
 
-  const content = readFileSync(absolutePath, 'utf8');
-  const failures: string[] = [];
-  if (hasConflictMarkers(content)) {
-    failures.push(`${filePath} still contains conflict markers, so Autopilot cannot prove tenant-scope invariants safely.`);
-  }
-
-  for (const invariant of requiredInvariantsForFile(filePath)) {
-    if (!invariant.isPresent(content)) {
-      failures.push(`${invariant.name}: ${invariant.message}`);
-    }
-  }
-
-  return failures;
+  return inspectTenantSensitiveContent(filePath, readFileSync(absolutePath, 'utf8'));
 }
 
 function categorizeBlockedAction(details: string[]): AutopilotBlockReasonCategory {
@@ -388,7 +222,7 @@ function repairPackageLock(repoRoot: string, runCommand: RepairCommandRunner): A
       strategy: 'npm-lockfile-only',
       outcome: 'blocked',
       summary: 'npm attempted to change package.json while regenerating package-lock.json.',
-      details: ['Autopilot v2.2 refuses to silently modify package.json; a developer must review this dependency conflict.'],
+      details: ['Autopilot v2.3 refuses to silently modify package.json; a developer must review this dependency conflict.'],
     });
   }
 
@@ -412,6 +246,108 @@ function repairPackageLock(repoRoot: string, runCommand: RepairCommandRunner): A
   });
 }
 
+interface ConflictBlock {
+  before: string;
+  ours: string;
+  theirs: string;
+  after: string;
+}
+
+interface DeterministicSeamRepair {
+  content: string;
+  details: string[];
+}
+
+const DETERMINISTIC_SEAM_RESOLVERS = new Set([
+  'lib/page-fetcher.ts',
+  'lib/services/collectionService.ts',
+]);
+
+function parseFirstConflictBlock(content: string): ConflictBlock | null {
+  const start = content.indexOf('<<<<<<<');
+  if (start === -1) return null;
+
+  const oursStart = content.indexOf('\n', start);
+  const separator = content.indexOf('\n=======', oursStart);
+  const endMarker = content.indexOf('\n>>>>>>>', separator);
+  if (oursStart === -1 || separator === -1 || endMarker === -1) return null;
+
+  const afterMarker = content.indexOf('\n', endMarker + 1);
+  const afterStart = afterMarker === -1 ? content.length : afterMarker + 1;
+
+  return {
+    before: content.slice(0, start),
+    ours: content.slice(oursStart + 1, separator),
+    theirs: content.slice(separator + '\n=======\n'.length, endMarker),
+    after: content.slice(afterStart),
+  };
+}
+
+function expandConflictCandidates(content: string, maxCandidates: number = 64): string[] {
+  const block = parseFirstConflictBlock(content);
+  if (!block) return [content];
+
+  const candidates: string[] = [];
+  for (const side of [block.ours, block.theirs]) {
+    for (const expanded of expandConflictCandidates(`${block.before}${side}${block.after}`, maxCandidates)) {
+      candidates.push(expanded);
+      if (candidates.length > maxCandidates) return candidates;
+    }
+  }
+  return candidates;
+}
+
+function resolveDeterministicSeam(content: string, filePath: string): DeterministicSeamRepair | null {
+  if (!DETERMINISTIC_SEAM_RESOLVERS.has(filePath)) return null;
+
+  const candidates = expandConflictCandidates(content)
+    .filter((candidate) => inspectTenantSensitiveContent(filePath, candidate).length === 0);
+  const uniqueCandidates = [...new Set(candidates)];
+
+  if (uniqueCandidates.length !== 1) return null;
+
+  return {
+    content: uniqueCandidates[0],
+    details: [
+      `Selected the only conflict-side combination that satisfies ${filePath} tenant invariants.`,
+      'No tenant logic was synthesized; candidates were generated only from existing conflict sides.',
+    ],
+  };
+}
+
+function repairDeterministicSeamFile(repoRoot: string, filePath: string, runCommand: RepairCommandRunner): AutopilotRepairAction {
+  const absolutePath = join(repoRoot, filePath);
+  if (!existsSync(absolutePath)) {
+    return blockHighRiskFile(repoRoot, filePath);
+  }
+
+  const content = readFileSync(absolutePath, 'utf8');
+  const repair = resolveDeterministicSeam(content, filePath);
+  if (!repair) {
+    return blockHighRiskFile(repoRoot, filePath);
+  }
+
+  writeFileSync(absolutePath, repair.content);
+  const add = runCommand(`git add -- ${JSON.stringify(filePath)}`);
+  if (add.exitCode !== 0) {
+    return withActionMetadata({
+      filePath,
+      strategy: 'deterministic-tenant-seam',
+      outcome: 'failed',
+      summary: 'Resolved tenant seam deterministically but could not stage the file.',
+      details: [add.stdout || `git add ${filePath} failed`],
+    });
+  }
+
+  return withActionMetadata({
+    filePath,
+    strategy: 'deterministic-tenant-seam',
+    outcome: 'repaired',
+    summary: 'Resolved a known tenant-sensitive seam by selecting the only invariant-safe conflict side.',
+    details: repair.details,
+  });
+}
+
 function blockHighRiskFile(repoRoot: string, filePath: string): AutopilotRepairAction {
   const failures = inspectHighRiskFile(repoRoot, filePath);
   return withActionMetadata({
@@ -419,7 +355,7 @@ function blockHighRiskFile(repoRoot: string, filePath: string): AutopilotRepairA
     strategy: 'fail-closed-tenant-seam',
     outcome: 'blocked',
     summary: 'Tenant-sensitive conflict requires developer resolution before approval.',
-    details: failures.length > 0 ? failures : [`${filePath} is tenant-sensitive and has no registered deterministic v2.2 resolver.`],
+    details: failures.length > 0 ? failures : [`${filePath} is tenant-sensitive and has no registered deterministic v2.3 resolver.`],
   });
 }
 
@@ -429,7 +365,7 @@ function blockUnknownFile(filePath: string): AutopilotRepairAction {
     strategy: 'no-known-deterministic-repair',
     outcome: 'blocked',
     summary: 'No deterministic repair strategy is registered for this conflicted file.',
-    details: ['Autopilot v2.2 only repairs registered deterministic conflict classes and fails closed for tenant-sensitive seams.'],
+    details: ['Autopilot v2.3 only repairs registered deterministic conflict classes and fails closed for tenant-sensitive seams.'],
   });
 }
 
@@ -451,16 +387,16 @@ function summarizeReport(status: AutopilotRepairStatus, actions: AutopilotRepair
 
   if (status === 'success') {
     return repaired > 0
-      ? `Autopilot v2.2 repaired ${repaired} known mechanical conflict(s) and the tenant guard passed.`
-      : 'Autopilot v2.2 found no conflicts needing deterministic repair and the tenant guard passed.';
+      ? `Autopilot v2.3 repaired ${repaired} known mechanical conflict(s) and the tenant guard passed.`
+      : 'Autopilot v2.3 found no conflicts needing deterministic repair and the tenant guard passed.';
   }
   if (failed > 0) {
-    return `Autopilot v2.2 failed while repairing ${failed} file(s). Production remains unchanged; inspect the repair report.`;
+    return `Autopilot v2.3 failed while repairing ${failed} file(s). Production remains unchanged; inspect the repair report.`;
   }
   if (guard && !guard.passed) {
-    return 'Autopilot v2.2 completed known repair attempts, but the tenant guard failed. Do not approve this update.';
+    return 'Autopilot v2.3 completed known repair attempts, but the tenant guard failed. Do not approve this update.';
   }
-  return `Autopilot v2.2 blocked ${blocked} file(s) to protect tenant data. Review the blocked reason groups and next actions.`;
+  return `Autopilot v2.3 blocked ${blocked} file(s) to protect tenant data. Review the blocked reason groups and next actions.`;
 }
 
 function dashboardNextActionFor(status: AutopilotRepairStatus, actions: AutopilotRepairAction[], guard: AutopilotGuardRun | null): string {
@@ -472,7 +408,7 @@ function dashboardNextActionFor(status: AutopilotRepairStatus, actions: Autopilo
 
 export function formatAutopilotRepairMarkdown(report: AutopilotRepairReport): string {
   const lines = [
-    '# Core Update Autopilot v2.2 repair report',
+    '# Core Update Autopilot v2.3 repair report',
     '',
     `Status: ${report.status}`,
     `Started: ${report.startedAt}`,
@@ -554,7 +490,7 @@ export function runAutopilotRepair(options: RunAutopilotRepairOptions): Autopilo
     if (filePath === 'package-lock.json') {
       actions.push(repairPackageLock(options.repoRoot, runCommand));
     } else if (isHighRiskAutopilotRepairFile(filePath)) {
-      actions.push(blockHighRiskFile(options.repoRoot, filePath));
+      actions.push(repairDeterministicSeamFile(options.repoRoot, filePath, runCommand));
     } else {
       actions.push(blockUnknownFile(filePath));
     }
@@ -574,7 +510,7 @@ export function runAutopilotRepair(options: RunAutopilotRepairOptions): Autopilo
     failedFiles.length > 0 ? 'failed' : blockedFiles.length > 0 || (guard && !guard.passed) ? 'blocked' : 'success';
 
   const report: AutopilotRepairReport = {
-    version: '2.2',
+    version: '2.3',
     status,
     startedAt,
     completedAt: new Date().toISOString(),

@@ -5,13 +5,11 @@ import {
   formatUpdateSafetyReport,
   type UpdateSafetyResult,
 } from '../lib/masjidweb/update-safety-check';
-
-interface InvariantCheck {
-  filePath: string;
-  name: string;
-  ok: boolean;
-  message: string;
-}
+import {
+  hasConflictMarkers,
+  invariantChecksForFile,
+  type AutopilotInvariantCheck,
+} from '../lib/masjidweb/autopilot-tenant-invariants';
 
 const TENANT_GUARD_FILES = [
   'app/(builder)/ycode/api/publish/route.ts',
@@ -38,164 +36,6 @@ function listAllowFailure(command: string): string[] {
   }
 }
 
-function hasConflictMarkers(content: string): boolean {
-  return /^<<<<<<<|^=======|^>>>>>>>|^\|\|\|\|\|\|\|/m.test(content);
-}
-
-function includesAny(content: string, patterns: string[]): boolean {
-  return patterns.some((pattern) => content.includes(pattern));
-}
-
-function checkContains(filePath: string, content: string, name: string, patterns: string[], message: string): InvariantCheck {
-  return {
-    filePath,
-    name,
-    ok: includesAny(content, patterns),
-    message,
-  };
-}
-
-function checkNoPattern(filePath: string, content: string, name: string, pattern: RegExp, message: string): InvariantCheck {
-  return {
-    filePath,
-    name,
-    ok: !pattern.test(content),
-    message,
-  };
-}
-
-function invariantChecksForFile(filePath: string, content: string, strictChangedFile: boolean): InvariantCheck[] {
-  const checks: InvariantCheck[] = [];
-
-  if (filePath.startsWith('lib/repositories/')) {
-    checks.push(
-      checkContains(
-        filePath,
-        content,
-        'tenant resolver present',
-        ['resolveEffectiveTenantId', 'getTenantIdFromHeaders'],
-        'Repository files must resolve the effective tenant before service-role or Knex data access.',
-      ),
-      checkContains(
-        filePath,
-        content,
-        'tenant filter present',
-        ['applyTenantEq', ".eq('tenant_id'", '.eq("tenant_id"', 'tenant_id: tenantId', 'tenant_id: effectiveTenantId', 'set_tenant_context'],
-        'Repository files must keep tenant_id filtering/inserts or explicit tenant context.',
-      ),
-    );
-
-    if (strictChangedFile) {
-      checks.push(
-        checkNoPattern(
-          filePath,
-          content,
-          'no invalid admin client arguments',
-          /getSupabaseAdmin\([^)]+\)/,
-          'Changed repository files must not add getSupabaseAdmin() tenant arguments; resolve and filter tenant scope separately.',
-        ),
-      );
-    }
-  }
-
-  if (filePath === 'lib/page-fetcher.ts') {
-    checks.push(
-      checkContains(
-        filePath,
-        content,
-        'page fetcher tenant resolver present',
-        ['resolveEffectiveTenantId'],
-        'Page fetcher must preserve host/subdomain tenant resolution before service-role reads.',
-      ),
-      checkContains(
-        filePath,
-        content,
-        'page fetcher tenant filter present',
-        ['applyTenantEq'],
-        'Page fetcher must apply tenant filters to pages, folders, layers, locales, components, and CMS reads.',
-      ),
-      checkNoPattern(
-        filePath,
-        content,
-        'no invalid admin client arguments',
-        /getSupabaseAdmin\([^)]+\)/,
-        'Page fetcher must not pass tenant IDs to getSupabaseAdmin(); resolve and filter tenant scope separately.',
-      ),
-    );
-  }
-
-  if (filePath === 'lib/services/collectionService.ts') {
-    checks.push(
-      checkContains(
-        filePath,
-        content,
-        'collection service tenant resolver present',
-        ['resolveEffectiveTenantId', 'getTenantIdFromHeaders'],
-        'Collection service must resolve tenant context before service-role Supabase or Knex reads/writes.',
-      ),
-      checkContains(
-        filePath,
-        content,
-        'collection service tenant filter present',
-        ['applyTenantEq', ".where('tenant_id'", '.where("tenant_id"', 'tenant_id: tenantId', 'tenant_id: effectiveTenantId'],
-        'Collection service must keep tenant filters on service-role Supabase and Knex paths.',
-      ),
-      checkNoPattern(
-        filePath,
-        content,
-        'no invalid admin client arguments',
-        /getSupabaseAdmin\([^)]+\)/,
-        'Collection service must not pass tenant IDs to getSupabaseAdmin(); resolve and filter tenant scope separately.',
-      ),
-    );
-  }
-
-  if (filePath === 'app/(builder)/ycode/api/publish/route.ts') {
-    checks.push(
-      checkContains(
-        filePath,
-        content,
-        'publish tenant resolver present',
-        ['resolveEffectiveTenantId', 'runWithEffectiveTenantId'],
-        'Publish route must keep explicit tenant resolution so one tenant cannot publish another tenant.',
-      ),
-      checkContains(
-        filePath,
-        content,
-        'publish tenant context wrapper present',
-        ['runWithEffectiveTenantId'],
-        'Publish route must execute publish work inside the effective tenant context.',
-      ),
-    );
-  }
-
-  if (filePath === 'proxy.ts') {
-    checks.push(
-      checkContains(
-        filePath,
-        content,
-        'proxy tenant headers present',
-        ['x-tenant-id', 'x-tenant-slug', 'resolveTenant'],
-        'Proxy must continue resolving tenant subdomains and forwarding tenant headers.',
-      ),
-    );
-  }
-
-  if (filePath.includes('supabase-cookie') || filePath.includes('supabase-browser') || filePath.includes('supabase-route-client')) {
-    checks.push(
-      checkContains(
-        filePath,
-        content,
-        'cookie domain handling present',
-        ['TENANT_DOMAIN_SUFFIX', 'supabaseCookieOptionsFor', 'cookieOptions'],
-        'Supabase client files must preserve shared tenant subdomain cookie handling.',
-      ),
-    );
-  }
-
-  return checks;
-}
-
 function readChangedOrGuardedFiles(): string[] {
   const changed = listAllowFailure('git diff --name-only origin/main...HEAD');
   const conflicted = listAllowFailure('git diff --name-only --diff-filter=U');
@@ -208,9 +48,8 @@ function main(): void {
   const files = readChangedOrGuardedFiles();
   const conflictFiles = listAllowFailure('git diff --name-only --diff-filter=U');
   const changedFiles = listAllowFailure('git diff --name-only origin/main...HEAD');
-  const strictFiles = new Set([...changedFiles, ...conflictFiles]);
   const safety: UpdateSafetyResult = classifyUpdateRisk(changedFiles, conflictFiles);
-  const checks: InvariantCheck[] = [];
+  const checks: AutopilotInvariantCheck[] = [];
   const conflictMarkerFiles: string[] = [];
 
   for (const filePath of files) {
@@ -219,7 +58,7 @@ function main(): void {
     if (hasConflictMarkers(content)) {
       conflictMarkerFiles.push(filePath);
     }
-    checks.push(...invariantChecksForFile(filePath, content, strictFiles.has(filePath)));
+    checks.push(...invariantChecksForFile(filePath, content));
   }
 
   const failedChecks = checks.filter((check) => !check.ok);

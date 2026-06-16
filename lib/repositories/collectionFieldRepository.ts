@@ -48,13 +48,13 @@ export async function getAllFields(
     // Fallback to paginated PostgREST reads below.
   }
 
-  const client = await getSupabaseAdmin(tenantId);
+  const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const effectiveTenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
 
   // Use pagination to handle >1000 fields (Supabase default limit)
   const allFields: CollectionField[] = [];

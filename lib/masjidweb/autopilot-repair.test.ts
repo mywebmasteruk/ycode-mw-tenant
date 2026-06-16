@@ -181,11 +181,11 @@ describe('autopilot-repair', () => {
     expect(report.actions[0]?.details.join('\n')).toContain('page reads tenant scoped');
   });
 
-  it('accepts page-fetcher only when conflict markers are gone and tenant scope is provable', () => {
+  it('repairs page-fetcher when exactly one conflict side preserves tenant scope', () => {
     const repoRoot = makeRepo();
     const filePath = 'lib/page-fetcher.ts';
     mkdirSync(join(repoRoot, 'lib'), { recursive: true });
-    writeFileSync(join(repoRoot, filePath), safePageFetcherContent());
+    writeFileSync(join(repoRoot, filePath), conflict(safePageFetcherContent()));
 
     const report = runAutopilotRepair({
       repoRoot,
@@ -193,9 +193,10 @@ describe('autopilot-repair', () => {
       runGuard: false,
     });
 
-    expect(report.status).toBe('blocked');
-    expect(report.actions[0]?.reasonCategory).toBe('known-resolver-unavailable');
-    expect(report.actions[0]?.details.join('\n')).toContain('no registered deterministic v2.2 resolver');
+    expect(report.status).toBe('success');
+    expect(report.repairedFiles).toEqual([filePath]);
+    expect(report.actions[0]?.strategy).toBe('deterministic-tenant-seam');
+    expect(report.actions[0]?.details.join('\n')).toContain('only conflict-side combination');
   });
 
   it('blocks collectionService conflicts with exact tenant invariant reasons', () => {
@@ -216,14 +217,14 @@ describe('autopilot-repair', () => {
     expect(report.actions[0]?.reasonCategory).toBe('conflict-markers-remain');
     expect(report.actions[0]?.details.join('\n')).toContain('conflict markers');
     expect(report.actions[0]?.details.join('\n')).toContain('tenant resolver present');
-    expect(report.actions[0]?.details.join('\n')).toContain('service-role table reads tenant scoped');
+    expect(report.actions[0]?.details.join('\n')).toContain('service-role table access tenant scoped');
   });
 
-  it('accepts collectionService only when conflict markers are gone and tenant scope is provable', () => {
+  it('repairs collectionService when exactly one conflict side preserves tenant scope', () => {
     const repoRoot = makeRepo();
     const filePath = 'lib/services/collectionService.ts';
     mkdirSync(join(repoRoot, 'lib/services'), { recursive: true });
-    writeFileSync(join(repoRoot, filePath), safeCollectionServiceContent());
+    writeFileSync(join(repoRoot, filePath), conflict(safeCollectionServiceContent()));
 
     const report = runAutopilotRepair({
       repoRoot,
@@ -231,28 +232,29 @@ describe('autopilot-repair', () => {
       runGuard: false,
     });
 
-    expect(report.status).toBe('blocked');
-    expect(report.actions[0]?.reasonCategory).toBe('known-resolver-unavailable');
-    expect(report.actions[0]?.details.join('\n')).toContain('no registered deterministic v2.2 resolver');
+    expect(report.status).toBe('success');
+    expect(report.repairedFiles).toEqual([filePath]);
+    expect(report.actions[0]?.strategy).toBe('deterministic-tenant-seam');
+    expect(report.actions[0]?.details.join('\n')).toContain('only conflict-side combination');
   });
 
   it('groups blocked files by reason with dashboard next actions', () => {
     const repoRoot = makeRepo();
     const pageFetcherPath = 'lib/page-fetcher.ts';
-    const collectionServicePath = 'lib/services/collectionService.ts';
-    mkdirSync(join(repoRoot, 'lib/services'), { recursive: true });
+    const repositoryPath = 'lib/repositories/pageRepository.ts';
+    mkdirSync(join(repoRoot, 'lib/repositories'), { recursive: true });
     writeFileSync(join(repoRoot, pageFetcherPath), conflict(unsafePageFetcherContent()));
-    writeFileSync(join(repoRoot, collectionServicePath), safeCollectionServiceContent());
+    writeFileSync(join(repoRoot, repositoryPath), safePageFetcherContent());
 
     const report = runAutopilotRepair({
       repoRoot,
-      runCommand: makeRunner([pageFetcherPath, collectionServicePath]),
+      runCommand: makeRunner([pageFetcherPath, repositoryPath]),
       runGuard: false,
     });
     const markdown = formatAutopilotRepairMarkdown(report);
 
     expect(report.blockedByReason['conflict-markers-remain']).toEqual([pageFetcherPath]);
-    expect(report.blockedByReason['known-resolver-unavailable']).toEqual([collectionServicePath]);
+    expect(report.blockedByReason['known-resolver-unavailable']).toEqual([repositoryPath]);
     expect(report.dashboardNextAction).toContain(pageFetcherPath);
     expect(markdown).toContain('Known resolver unavailable');
     expect(markdown).toContain('Conflict markers remain');
@@ -289,7 +291,7 @@ describe('autopilot-repair', () => {
     });
     const markdown = formatAutopilotRepairMarkdown(report);
 
-    expect(markdown).toContain('# Core Update Autopilot v2.2 repair report');
+    expect(markdown).toContain('# Core Update Autopilot v2.3 repair report');
     expect(markdown).toContain('Status: blocked');
     expect(markdown).toContain(filePath);
     expect(markdown).toContain('publish tenant resolver present');
