@@ -16,7 +16,7 @@
 import React, { useEffect, useCallback, useMemo, useRef, Suspense } from 'react';
 import dynamic from 'next/dynamic';
 import type { Layer, Locale, FormSettings, Component, DesignColorVariable, PasswordProtectionContext } from '@/types';
-import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextContentLayer, getCollectionVariable, filterDisabledSliderLayers } from '@/lib/layer-utils';
+import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextContentLayer, getCollectionVariable, filterDisabledSliderLayers, applyCustomAttributes } from '@/lib/layer-utils';
 import { getMapIframeProps, DEFAULT_MAP_SETTINGS, resolveMarkerColor } from '@/lib/map-utils';
 import { HTML_TO_REACT_ATTRS } from '@/lib/parse-head-html';
 import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
@@ -969,9 +969,7 @@ const LayerItem: React.FC<{
 
     // Apply custom attributes from settings (map HTML attr names to JSX equivalents)
     if (layer.settings?.customAttributes) {
-      Object.entries(layer.settings.customAttributes).forEach(([name, value]) => {
-        elementProps[HTML_TO_REACT_ATTRS[name.toLowerCase()] || name] = value;
-      });
+      applyCustomAttributes(elementProps, layer.settings.customAttributes);
     }
 
     // Select with placeholder: set defaultValue so React shows the placeholder option
@@ -1488,9 +1486,7 @@ const LayerItem: React.FC<{
 
           // Apply custom attributes from settings (map HTML attr names to JSX equivalents)
           if (layer.settings?.customAttributes) {
-            Object.entries(layer.settings.customAttributes).forEach(([name, value]) => {
-              iframeProps[HTML_TO_REACT_ATTRS[name.toLowerCase()] || name] = value;
-            });
+            applyCustomAttributes(iframeProps, layer.settings.customAttributes);
           }
 
           return (

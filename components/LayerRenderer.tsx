@@ -10,7 +10,7 @@ import { useAuthStore } from '@/stores/useAuthStore';
 import type { Layer, Locale, ComponentVariable, FormSettings, LinkSettings, Breakpoint, CollectionItemWithValues, CollectionField, Component } from '@/types';
 import type { UseLiveLayerUpdatesReturn } from '@/hooks/use-live-layer-updates';
 import type { UseLiveComponentUpdatesReturn } from '@/hooks/use-live-component-updates';
-import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextEditable, isTextContentLayer, isRichTextLayer, getCollectionVariable, evaluateVisibility, findAncestorByName, filterDisabledSliderLayers, getLayerCmsFieldBinding, findLayerById } from '@/lib/layer-utils';
+import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextEditable, isTextContentLayer, isRichTextLayer, getCollectionVariable, evaluateVisibility, findAncestorByName, filterDisabledSliderLayers, getLayerCmsFieldBinding, findLayerById, applyCustomAttributes } from '@/lib/layer-utils';
 import { getMapIframeProps, DEFAULT_MAP_SETTINGS, resolveMarkerColor } from '@/lib/map-utils';
 import { HTML_TO_REACT_ATTRS } from '@/lib/parse-head-html';
 import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
@@ -2223,9 +2223,7 @@ const LayerItemImpl: React.FC<{
 
     // Apply custom attributes from settings (map HTML attr names to JSX equivalents)
     if (layer.settings?.customAttributes) {
-      Object.entries(layer.settings.customAttributes).forEach(([name, value]) => {
-        elementProps[HTML_TO_REACT_ATTRS[name.toLowerCase()] || name] = value;
-      });
+      applyCustomAttributes(elementProps, layer.settings.customAttributes);
     }
 
     // Select with placeholder: set defaultValue so React shows the placeholder option
@@ -2896,9 +2894,7 @@ const LayerItemImpl: React.FC<{
 
           // Apply custom attributes from settings (map HTML attr names to JSX equivalents)
           if (layer.settings?.customAttributes) {
-            Object.entries(layer.settings.customAttributes).forEach(([name, value]) => {
-              iframeProps[HTML_TO_REACT_ATTRS[name.toLowerCase()] || name] = value;
-            });
+            applyCustomAttributes(iframeProps, layer.settings.customAttributes);
           }
 
           // Only add editor event handlers in edit mode (client-side only)

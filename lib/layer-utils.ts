@@ -15,9 +15,51 @@ import { parseMultiReferenceValue, normalizeBooleanValue } from '@/lib/collectio
 import { getInheritedValue } from '@/lib/tailwind-class-mapper';
 import cloneDeep from 'lodash/cloneDeep';
 import { layerHasLink, hasLinkInTree, hasRichTextLinks } from '@/lib/link-utils';
+import { HTML_TO_REACT_ATTRS } from '@/lib/parse-head-html';
 
 // Alias for backwards compatibility within this file
 const hasLinkSettings = layerHasLink;
+
+/**
+ * Parse an inline CSS style string into a React style object.
+ * Splits on the first colon per rule so values containing colons (e.g. urls) survive.
+ * CSS custom properties (--var) are preserved verbatim; other props are camelCased.
+ */
+export function parseStyleStringToObject(style: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const rule of style.split(';')) {
+    const trimmed = rule.trim();
+    if (!trimmed) continue;
+    const colonIndex = trimmed.indexOf(':');
+    if (colonIndex === -1) continue;
+    const prop = trimmed.slice(0, colonIndex).trim();
+    const value = trimmed.slice(colonIndex + 1).trim();
+    if (!prop || !value) continue;
+    const key = prop.startsWith('--') ? prop : prop.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    result[key] = value;
+  }
+  return result;
+}
+
+/**
+ * Apply user-defined custom attributes onto a React props object, mapping HTML
+ * attribute names to their JSX equivalents. A string `style` attribute is parsed
+ * into an object and merged with any existing style (React rejects style strings).
+ */
+export function applyCustomAttributes(
+  target: Record<string, unknown>,
+  customAttributes: Record<string, string>,
+): void {
+  for (const [name, value] of Object.entries(customAttributes)) {
+    const jsxName = HTML_TO_REACT_ATTRS[name.toLowerCase()] || name;
+    if (jsxName === 'style' && typeof value === 'string') {
+      const existing = (typeof target.style === 'object' && target.style ? target.style : {}) as Record<string, string>;
+      target.style = { ...existing, ...parseStyleStringToObject(value) };
+      continue;
+    }
+    target[jsxName] = value;
+  }
+}
 
 // ─── Cached Layer Index ───
 
