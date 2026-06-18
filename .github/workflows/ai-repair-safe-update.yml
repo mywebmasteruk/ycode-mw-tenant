@@ -17,10 +17,21 @@ on:
         required: false
         type: string
         default: "8"
+      copilot_escalation_mode:
+        description: Optional Copilot escalation when deterministic repair blocks
+        required: false
+        type: choice
+        default: none
+        options:
+          - none
+          - comment
+          - issue
+          - assign
 
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 
 jobs:
   ai-repair:
@@ -60,11 +71,13 @@ jobs:
           git checkout origin/main -- \
             scripts/ai-repair-safe-update.ts \
             scripts/core-update/run-autopilot-repair.ts \
+            scripts/core-update/create-copilot-escalation.ts \
             scripts/reapply-tier2-seams.ts \
             scripts/check-autopilot-guard.ts \
             scripts/check-update-safety.ts \
             scripts/git-merge-hygiene.sh \
             lib/masjidweb/autopilot-repair.ts \
+            lib/masjidweb/copilot-escalation.ts \
             lib/masjidweb/reapply-tier2-seams.ts \
             lib/masjidweb/openrouter-repair.ts \
             lib/masjidweb/merge-conflict-hunks.ts \
@@ -125,6 +138,29 @@ jobs:
             /tmp/autopilot-repair-report.json
           if-no-files-found: ignore
 
+      - name: Create Copilot escalation request
+        if: >-
+          (
+            steps.deterministic_repair.outputs.status == 'blocked'
+            || (
+              steps.deterministic_repair.outputs.status == 'failed'
+              && (inputs.mechanical_only == true || steps.repair.outcome != 'success')
+            )
+          )
+          && (
+            inputs.copilot_escalation_mode != 'none'
+            || vars.ENABLE_COPILOT_ESCALATION == 'true'
+          )
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          AUTOPILOT_REPAIR_REPORT_PATH: /tmp/autopilot-repair-report.md
+          AUTOPILOT_REPAIR_REPORT_JSON_PATH: /tmp/autopilot-repair-report.json
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COPILOT_ESCALATION_CREATE_ISSUE: ${{ inputs.copilot_escalation_mode == 'issue' || inputs.copilot_escalation_mode == 'assign' }}
+          COPILOT_ESCALATION_ASSIGN_COPILOT: ${{ inputs.copilot_escalation_mode == 'assign' }}
+        run: npx --yes tsx scripts/core-update/create-copilot-escalation.ts
+
       - name: Stop when deterministic repair is blocked
         if: >-
           steps.deterministic_repair.outputs.status == 'blocked'
@@ -134,6 +170,9 @@ jobs:
           )
         run: |
           echo "Deterministic Autopilot repair could not safely resolve all conflicts. See core-update-autopilot-repair artifact."
+          if [ "${{ inputs.copilot_escalation_mode }}" != "none" ] || [ "${{ vars.ENABLE_COPILOT_ESCALATION }}" = "true" ]; then
+            echo "A constrained Copilot escalation request was created or updated. This is not merge approval."
+          fi
           exit 2
 
       - name: Critical-exports completeness check
