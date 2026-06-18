@@ -18,7 +18,7 @@ export default function BuilderLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <RootLayoutShell bodyClassName={`${inter.variable} font-sans antialiased text-xs`}>
+    <RootLayoutShell lang="en" bodyClassName={`${inter.variable} font-sans antialiased text-xs`}>
       {children}
     </RootLayoutShell>
   );

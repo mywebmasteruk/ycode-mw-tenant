@@ -14,9 +14,15 @@
 import { withTransaction } from '../database/transaction';
 import { getSupabaseAdmin, getTenantIdFromHeaders } from '@/lib/supabase-server';
 import { getKnexClient } from '@/lib/knex-client';
+<<<<<<< HEAD
 import { SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
+||||||| 1e44661
+import { SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
+=======
+import { SUPABASE_IN_FILTER_CHUNK_SIZE, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
+>>>>>>> upstream/main
 import { getCollectionById, hardDeleteCollection } from '@/lib/repositories/collectionRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
 import { getItemsByCollectionId, getAllItemsByCollectionId, getItemsByIds } from '@/lib/repositories/collectionItemRepository';
@@ -78,6 +84,7 @@ export interface PublishCollectionResult {
     deletedItemsCount: number;
     deletedItemSlugs: string[];
     renamedItemOldSlugs: string[];
+    unpublishedItemSlugs: string[];
   };
   timing?: {
     collections: OperationTiming;
@@ -139,6 +146,7 @@ export async function publishCollectionWithItems(
       deletedItemsCount: 0,
       deletedItemSlugs: [],
       renamedItemOldSlugs: [],
+      unpublishedItemSlugs: [],
     },
     timing: {
       collections: { durationMs: 0, count: 0 },
@@ -196,7 +204,7 @@ export async function publishCollectionWithItems(
 
       // Step 3: Publish selected items
       const itemsStart = performance.now();
-      const { itemsCount, valuesCount, itemsDurationMs, valuesDurationMs, renamedItemOldSlugs } = await publishSelectedItems(
+      const { itemsCount, valuesCount, itemsDurationMs, valuesDurationMs, renamedItemOldSlugs, unpublishedItemSlugs } = await publishSelectedItems(
         collectionId,
         itemIds,
         prefetched,
@@ -204,6 +212,7 @@ export async function publishCollectionWithItems(
       result.published.itemsCount = itemsCount;
       result.published.valuesCount = valuesCount;
       result.published.renamedItemOldSlugs = renamedItemOldSlugs;
+      result.published.unpublishedItemSlugs = unpublishedItemSlugs;
       result.timing!.items = {
         durationMs: itemsDurationMs,
         count: itemsCount,
@@ -472,7 +481,7 @@ async function publishSelectedItems(
   collectionId: string,
   itemIds?: string[],
   prefetched?: CollectionPrefetch,
-): Promise<{ itemsCount: number; valuesCount: number; itemsDurationMs: number; valuesDurationMs: number; renamedItemOldSlugs: string[] }> {
+): Promise<{ itemsCount: number; valuesCount: number; itemsDurationMs: number; valuesDurationMs: number; renamedItemOldSlugs: string[]; unpublishedItemSlugs: string[] }> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -490,7 +499,7 @@ async function publishSelectedItems(
   }
 
   if (itemsToPublish.length === 0) {
-    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0, renamedItemOldSlugs: [] };
+    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0, renamedItemOldSlugs: [], unpublishedItemSlugs: [] };
   }
 
   // Batch fetch all draft items to publish. When the caller bulk-prefetched the
@@ -503,18 +512,29 @@ async function publishSelectedItems(
     : await getItemsByIds(itemsToPublish, false);
 
   if (draftItems.length === 0) {
-    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0, renamedItemOldSlugs: [] };
+    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0, renamedItemOldSlugs: [], unpublishedItemSlugs: [] };
   }
 
   // Separate publishable from non-publishable items
   const publishableItems = draftItems.filter(item => item.is_publishable);
   const nonPublishableItems = draftItems.filter(item => !item.is_publishable);
 
+<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
 
   // Remove published versions of non-publishable items
+||||||| 1e44661
+  // Remove published versions of non-publishable items
+=======
+  // Remove published versions of non-publishable items. Snapshot their published
+  // slugs first so the publish route can invalidate the now-dead URLs — without
+  // this the CDN keeps serving the unpublished page as a 200 (cache never
+  // expires under revalidate: false).
+  const unpublishedItemSlugs: string[] = [];
+>>>>>>> upstream/main
   if (nonPublishableItems.length > 0) {
     const nonPublishableIds = nonPublishableItems.map(item => item.id);
+<<<<<<< HEAD
     let delQuery = client
       .from('collection_items')
       .delete()
@@ -522,10 +542,56 @@ async function publishSelectedItems(
       .eq('is_published', true);
     delQuery = applyTenantEq(delQuery, tenantId);
     await delQuery;
+||||||| 1e44661
+    await client
+      .from('collection_items')
+      .delete()
+      .in('id', nonPublishableIds)
+      .eq('is_published', true);
+=======
+
+    try {
+      const slugField = prefetched
+        ? prefetched.draftFields.find(f => f.key === 'slug') ?? null
+        : (await client
+          .from('collection_fields')
+          .select('id')
+          .eq('collection_id', collectionId)
+          .eq('key', 'slug')
+          .is('deleted_at', null)
+          .limit(1)
+          .single()).data;
+
+      if (slugField) {
+        for (let i = 0; i < nonPublishableIds.length; i += 500) {
+          const batch = nonPublishableIds.slice(i, i + 500);
+          const { data } = await client
+            .from('collection_item_values')
+            .select('value')
+            .eq('field_id', slugField.id)
+            .eq('is_published', true)
+            .is('deleted_at', null)
+            .in('item_id', batch);
+          if (data) unpublishedItemSlugs.push(...data.map(v => v.value as string).filter(Boolean));
+        }
+      }
+    } catch {
+      // Non-fatal: proceed with unpublish even if the slug snapshot fails
+    }
+
+    for (let i = 0; i < nonPublishableIds.length; i += SUPABASE_IN_FILTER_CHUNK_SIZE) {
+      const idsChunk = nonPublishableIds.slice(i, i + SUPABASE_IN_FILTER_CHUNK_SIZE);
+      await client
+        .from('collection_items')
+        .delete()
+        .in('id', idsChunk)
+        .eq('is_published', true);
+    }
+>>>>>>> upstream/main
   }
 
   if (publishableItems.length === 0) {
-    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0, renamedItemOldSlugs: [] };
+    return { itemsCount: 0, valuesCount: 0, itemsDurationMs: 0, valuesDurationMs: 0, renamedItemOldSlugs: [], unpublishedItemSlugs };
   }
 
   // Fetch existing published items for comparison (use bulk-prefetched set when available)
@@ -645,7 +711,7 @@ async function publishSelectedItems(
   const valuesCount = await publishItemValuesBatch(itemIdsToPublishValues, draftValues, publishedValues);
   const valuesDurationMs = Math.round(performance.now() - valuesStart);
 
-  return { itemsCount: itemsToUpsert.length, valuesCount, itemsDurationMs, valuesDurationMs, renamedItemOldSlugs };
+  return { itemsCount: itemsToUpsert.length, valuesCount, itemsDurationMs, valuesDurationMs, renamedItemOldSlugs, unpublishedItemSlugs };
 }
 
 /**
@@ -1201,6 +1267,7 @@ export async function groupItemsByCollection(
     return new Map();
   }
 
+<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
   let groupQuery = client
     .from('collection_items')
@@ -1209,19 +1276,38 @@ export async function groupItemsByCollection(
     .in('id', itemIds);
   groupQuery = applyTenantEq(groupQuery, tenantId);
   const { data: items, error } = await groupQuery;
+||||||| 1e44661
+  const { data: items, error } = await client
+    .from('collection_items')
+    .select('id, collection_id')
+    .eq('is_published', false)
+    .in('id', itemIds);
+=======
+  // Chunk the id list so large `.in()` filters don't overflow the request URL
+  // length limit (which returns 400 Bad Request).
+  const items: Array<{ id: string; collection_id: string }> = [];
+  for (let i = 0; i < itemIds.length; i += SUPABASE_IN_FILTER_CHUNK_SIZE) {
+    const idsChunk = itemIds.slice(i, i + SUPABASE_IN_FILTER_CHUNK_SIZE);
+    const { data, error } = await client
+      .from('collection_items')
+      .select('id, collection_id')
+      .eq('is_published', false)
+      .in('id', idsChunk);
+>>>>>>> upstream/main
 
-  if (error) {
-    throw new Error(`Failed to fetch collection items: ${error.message}`);
-  }
+    if (error) {
+      throw new Error(`Failed to fetch collection items: ${error.message}`);
+    }
 
-  if (!items) {
-    return new Map();
+    if (data) {
+      items.push(...data);
+    }
   }
 
   // Group items by collection
   const itemsByCollection = new Map<string, string[]>();
 
-  items.forEach((item: any) => {
+  items.forEach((item) => {
     const existing = itemsByCollection.get(item.collection_id) || [];
     existing.push(item.id);
     itemsByCollection.set(item.collection_id, existing);

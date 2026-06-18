@@ -57,6 +57,7 @@ export async function getTopItemsPerCollection(
 
   const tenantId = await resolveEffectiveTenantId();
 
+<<<<<<< HEAD
   // RPC does not filter by tenant — use manual path when tenant is resolved.
   if (!tenantId) {
     const { data, error } = await client.rpc('get_top_items_per_collection', {
@@ -82,32 +83,67 @@ export async function getTopItemsPerCollection(
       .order('manual_order', { ascending: true })
       .order('created_at', { ascending: false })
       .limit(collectionIds.length * limit);
+||||||| 1e44661
+  if (error) {
+    // Fallback to manual approach if RPC doesn't exist yet
+    let manualQuery = client
+      .from('collection_items')
+      .select('*')
+      .in('collection_id', collectionIds)
+      .eq('is_published', is_published)
+      .is('deleted_at', null)
+      .order('collection_id', { ascending: true })
+      .order('manual_order', { ascending: true })
+      .order('created_at', { ascending: false })
+      .limit(collectionIds.length * limit);
+=======
+  if (error) {
+    // RPC missing — fetch each collection's top N independently. A single
+    // shared query with `.limit(collectionIds.length * limit)` ordered by
+    // collection_id lets a large early-sorting collection consume the whole
+    // row budget and starve later collections to zero rows (breaking, e.g.,
+    // reference-field lookups). Per-collection limits guarantee fair coverage.
+    const perCollection = await Promise.all(
+      collectionIds.map(async (collectionId) => {
+        let query = client
+          .from('collection_items')
+          .select('*')
+          .eq('collection_id', collectionId)
+          .eq('is_published', is_published)
+          .is('deleted_at', null)
+          .order('manual_order', { ascending: true })
+          .order('created_at', { ascending: false })
+          .limit(limit);
+>>>>>>> upstream/main
 
+<<<<<<< HEAD
     manualQuery = applyTenantEq(manualQuery, tenantId);
 
     // For published queries, only include publishable items
     if (is_published) {
       manualQuery = manualQuery.eq('is_publishable', true);
     }
-
-    const { data: manualData, error: manualError } = await manualQuery;
-
-    if (manualError) {
-      throw new Error(`Failed to fetch items: ${manualError.message}`);
+||||||| 1e44661
+    // For published queries, only include publishable items
+    if (is_published) {
+      manualQuery = manualQuery.eq('is_publishable', true);
     }
+=======
+        // For published queries, only include publishable items
+        if (is_published) {
+          query = query.eq('is_publishable', true);
+        }
+>>>>>>> upstream/main
 
-    // Group by collection and take first N per collection
-    const itemsByCollection: Record<string, CollectionItem[]> = {};
-    manualData?.forEach(item => {
-      if (!itemsByCollection[item.collection_id]) {
-        itemsByCollection[item.collection_id] = [];
-      }
-      if (itemsByCollection[item.collection_id].length < limit) {
-        itemsByCollection[item.collection_id].push(item);
-      }
-    });
+        const { data: rows, error: rowsError } = await query;
+        if (rowsError) {
+          throw new Error(`Failed to fetch items: ${rowsError.message}`);
+        }
+        return rows || [];
+      })
+    );
 
-    return Object.values(itemsByCollection).flat();
+    return perCollection.flat();
   }
 }
 
@@ -153,11 +189,12 @@ export async function getItemsByCollectionId(
     return { items: [], total: 0 };
   }
 
-  // If search is provided, find matching item IDs from values table
-  let matchingItemIds: string[] | null = null;
-  if (filters?.search && filters.search.trim()) {
-    const searchTerm = `%${filters.search.trim()}%`;
+  // Search term (matched against the item's values via an embedded inner join).
+  const searchTerm = filters?.search && filters.search.trim()
+    ? `%${filters.search.trim()}%`
+    : null;
 
+<<<<<<< HEAD
     // Query collection_item_values for matching values (same published state)
     let searchValQ = client
       .from('collection_item_values')
@@ -165,7 +202,20 @@ export async function getItemsByCollectionId(
       .ilike('value', searchTerm)
       .eq('is_published', is_published)
       .is('deleted_at', null);
+||||||| 1e44661
+    // Query collection_item_values for matching values (same published state)
+    const { data: matchingValues, error: searchError } = await client
+      .from('collection_item_values')
+      .select('item_id')
+      .ilike('value', searchTerm)
+      .eq('is_published', is_published)
+      .is('deleted_at', null);
+=======
+  // itemIds filter (bounded list, e.g. multi-reference fields).
+  const filterIds = filters?.itemIds ?? null;
+>>>>>>> upstream/main
 
+<<<<<<< HEAD
     searchValQ = applyTenantEq(searchValQ, tenantId);
 
     const { data: matchingValues, error: searchError } = await searchValQ;
@@ -200,14 +250,56 @@ export async function getItemsByCollectionId(
   } else if (matchingItemIds !== null) {
     filterIds = matchingItemIds;
   }
+||||||| 1e44661
+    if (searchError) {
+      throw new Error(`Failed to search items: ${searchError.message}`);
+    }
+
+    if (matchingValues) {
+      // Get unique item IDs
+      matchingItemIds = [...new Set(matchingValues.map(v => v.item_id))];
+
+      // If no matches found, return early
+      if (matchingItemIds.length === 0) {
+        return { items: [], total: 0 };
+      }
+    }
+  }
+
+  // Combine itemIds filter with search results (intersection if both present)
+  let filterIds: string[] | null = null;
+  if (filters?.itemIds) {
+    if (matchingItemIds !== null) {
+      // Intersection: only IDs that are in both lists
+      filterIds = filters.itemIds.filter(id => matchingItemIds!.includes(id));
+      if (filterIds.length === 0) {
+        return { items: [], total: 0 };
+      }
+    } else {
+      filterIds = filters.itemIds;
+    }
+  } else if (matchingItemIds !== null) {
+    filterIds = matchingItemIds;
+  }
+=======
+  // When searching, filter through an embedded inner join on
+  // collection_item_values rather than collecting matching item ids and using
+  // `.in('id', ...)`. The values table has no collection_id, but the embed is
+  // naturally scoped to this collection via the parent FK, and there is no id
+  // list to overflow the request URL for broad terms on large collections.
+  const selectColumns = searchTerm
+    ? '*, collection_item_values!inner(item_id)'
+    : '*';
+>>>>>>> upstream/main
 
   // Build count query
   let countQuery = client
     .from('collection_items')
-    .select('*', { count: 'exact', head: true })
+    .select(selectColumns, { count: 'exact', head: true })
     .eq('collection_id', collection_id)
     .eq('is_published', is_published);
 
+<<<<<<< HEAD
   countQuery = applyTenantEq(countQuery, tenantId);
 
   if (is_published) {
@@ -226,31 +318,70 @@ export async function getItemsByCollectionId(
     countQuery = countQuery.is('deleted_at', null);
   }
 
+||||||| 1e44661
+  if (is_published) {
+    countQuery = countQuery.eq('is_publishable', true);
+  }
+  if (filterIds !== null) {
+    countQuery = countQuery.in('id', filterIds);
+  }
+  if (filters && 'deleted' in filters) {
+    if (filters.deleted === false) {
+      countQuery = countQuery.is('deleted_at', null);
+    } else if (filters.deleted === true) {
+      countQuery = countQuery.not('deleted_at', 'is', null);
+    }
+  } else {
+    countQuery = countQuery.is('deleted_at', null);
+  }
+
+=======
+>>>>>>> upstream/main
   // Build data query
   let query = client
     .from('collection_items')
-    .select('*')
+    .select(selectColumns)
     .eq('collection_id', collection_id)
     .eq('is_published', is_published)
     .order('manual_order', { ascending: true })
     .order('created_at', { ascending: false });
 
+<<<<<<< HEAD
   query = applyTenantEq(query, tenantId);
 
+||||||| 1e44661
+=======
+  // For published queries, only include publishable items
+>>>>>>> upstream/main
   if (is_published) {
+    countQuery = countQuery.eq('is_publishable', true);
     query = query.eq('is_publishable', true);
   }
   if (filterIds !== null) {
+    countQuery = countQuery.in('id', filterIds);
     query = query.in('id', filterIds);
   }
   if (filters && 'deleted' in filters) {
     if (filters.deleted === false) {
+      countQuery = countQuery.is('deleted_at', null);
       query = query.is('deleted_at', null);
     } else if (filters.deleted === true) {
+      countQuery = countQuery.not('deleted_at', 'is', null);
       query = query.not('deleted_at', 'is', null);
     }
   } else {
+    countQuery = countQuery.is('deleted_at', null);
     query = query.is('deleted_at', null);
+  }
+  if (searchTerm) {
+    countQuery = countQuery
+      .eq('collection_item_values.is_published', is_published)
+      .is('collection_item_values.deleted_at', null)
+      .ilike('collection_item_values.value', searchTerm);
+    query = query
+      .eq('collection_item_values.is_published', is_published)
+      .is('collection_item_values.deleted_at', null)
+      .ilike('collection_item_values.value', searchTerm);
   }
   if (filters?.limit !== undefined) {
     query = query.limit(filters.limit);
@@ -269,7 +400,14 @@ export async function getItemsByCollectionId(
     throw new Error(`Failed to fetch collection items: ${dataResult.error.message}`);
   }
 
-  return { items: dataResult.data || [], total: countResult.count || 0 };
+  // Strip the embedded join helper column added for search filtering so the
+  // returned rows keep the plain CollectionItem shape.
+  const items = ((dataResult.data || []) as unknown as Record<string, unknown>[]).map((row) => {
+    const { collection_item_values: _ignored, ...item } = row;
+    return item as unknown as CollectionItem;
+  });
+
+  return { items, total: countResult.count || 0 };
 }
 
 /**

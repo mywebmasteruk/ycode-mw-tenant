@@ -34,6 +34,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 // 4. Internal components
 import AddAttributeModal from './AddAttributeModal';
 import BackgroundsControls from './BackgroundsControls';
+import CustomAttributeRow from './CustomAttributeRow';
 import BorderControls from './BorderControls';
 import ComponentVariablesDialog from './ComponentVariablesDialog';
 import EffectControls from './EffectControls';
@@ -1838,6 +1839,23 @@ const RightSidebar = React.memo(function RightSidebar({
     }
   };
 
+  // Handle editing custom attribute (supports renaming the attribute key)
+  const handleEditAttribute = (oldName: string, newName: string, newValue: string) => {
+    if (!selectedLayerId || !newName.trim()) return;
+    const currentSettings = selectedLayer?.settings || {};
+    const currentAttributes = { ...currentSettings.customAttributes };
+    if (oldName !== newName) {
+      delete currentAttributes[oldName];
+    }
+    currentAttributes[newName] = newValue;
+    handleLayerUpdate(selectedLayerId, {
+      settings: {
+        ...currentSettings,
+        customAttributes: currentAttributes
+      }
+    });
+  };
+
   if (!selectedLayerId || !selectedLayer) {
     return (
       <div className="w-64 shrink-0 bg-background border-l flex items-center justify-center h-screen">
@@ -2997,20 +3015,13 @@ const RightSidebar = React.memo(function RightSidebar({
               {selectedLayer?.settings?.customAttributes && (
                 <div className="flex flex-col gap-1">
                   {Object.entries(selectedLayer.settings.customAttributes).map(([name, value]) => (
-                    <div
+                    <CustomAttributeRow
                       key={name}
-                      className="flex items-center justify-between pl-3 pr-1 h-8 bg-muted text-muted-foreground rounded-lg"
-                    >
-                      <span>{name}=&quot;{value as string}&quot;</span>
-                      <span
-                        role="button"
-                        tabIndex={0}
-                        className="p-0.5 rounded-sm opacity-70 hover:opacity-100 transition-opacity cursor-pointer"
-                        onClick={() => handleRemoveAttribute(name)}
-                      >
-                        <Icon name="x" className="size-2.5" />
-                      </span>
-                    </div>
+                      name={name}
+                      value={value as string}
+                      onEdit={handleEditAttribute}
+                      onRemove={handleRemoveAttribute}
+                    />
                   ))}
                 </div>
               )}

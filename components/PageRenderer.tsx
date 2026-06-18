@@ -19,10 +19,14 @@ import { getMapboxAccessToken, getGoogleMapsEmbedApiKey } from '@/lib/map-server
 import { getAllColorVariables } from '@/lib/repositories/colorVariableRepository';
 import { getSettingByKey } from '@/lib/repositories/settingsRepository';
 import { getItemsWithValues, getItemsWithValuesByIds } from '@/lib/repositories/collectionItemRepository';
+import { getValuesByItemIds } from '@/lib/repositories/collectionItemValueRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
 import { REF_PAGE_PREFIX, REF_COLLECTION_PREFIX, isCollectionItemKeyword, parseCollectionLinkValue } from '@/lib/link-utils';
 import { getClassesString, hasPasswordFormLayer } from '@/lib/layer-utils';
-import type { Layer, Component, Page, CollectionItemWithValues, CollectionField, Locale, PageFolder, PasswordProtectionContext } from '@/types';
+import { buildLocalizedPageUrls, type LocalizedDynamicSlug } from '@/lib/page-utils';
+import { getTranslatableKey } from '@/lib/locale-runtime';
+import { getSlugTranslationsByLocale } from '@/lib/repositories/translationRepository';
+import type { Layer, Component, Page, CollectionItemWithValues, CollectionField, Locale, PageFolder, PasswordProtectionContext, Translation } from '@/types';
 
 interface PageLinkRef { collection_item_id: string; page_id: string }
 
@@ -81,6 +85,12 @@ function collectLayerPageLinks(layers: Layer[]): PageLinkRef[] {
           results.push({ collection_item_id: linkValue.page.collection_item_id, page_id: linkValue.page.id });
         }
       }
+    }
+    // Form redirect_url: extract page refs so the target item slug is pre-fetched
+    const redirectUrl = layer.settings?.form?.redirect_url;
+    if (redirectUrl?.type === 'page') {
+      const { collection_item_id, id: page_id } = redirectUrl.page ?? {};
+      if (collection_item_id && page_id) results.push({ collection_item_id, page_id });
     }
     const textVar = layer.variables?.text as any;
     if (textVar?.type === 'dynamic_rich_text' && textVar.data?.content) {
@@ -408,6 +418,73 @@ export default async function PageRenderer({
     console.error('[PageRenderer] Error fetching link resolution data:', error);
   }
 
+  // Referenced/ref item slugs above are stored in the source language. On a
+  // non-default locale, swap each to its translated slug so dynamic-page links
+  // resolve to the localized URL (e.g. /fr/.../a-fr instead of /fr/.../a-en).
+  if (translations && locale && !locale.is_default) {
+    for (const itemId of Object.keys(collectionItemSlugs)) {
+      const translatedSlug = translations[`cms:${itemId}:field:key:slug`]?.content_value;
+      if (translatedSlug) {
+        collectionItemSlugs[itemId] = translatedSlug;
+      }
+    }
+  }
+
+  // Pre-compute localized URLs for the locale selector so switching language
+  // preserves translated folder/page/CMS slugs instead of reusing the source slug.
+  // Only runs on multi-locale pages that actually render a locale selector.
+  let localizedPageUrls: Record<string, string> | undefined;
+  if (
+    availableLocales.length > 1 &&
+    layerTreeHasLayer(resolvedLayers, l => l.name === 'localeSelector')
+  ) {
+    try {
+      const translationsByLocale: Record<string, Record<string, Translation>> = {};
+      await Promise.all(
+        availableLocales
+          .filter(l => !l.is_default)
+          .map(async (l) => {
+            // Reuse already-loaded translations for the current locale
+            if (locale && l.id === locale.id && translations) {
+              translationsByLocale[l.id] = translations as Record<string, Translation>;
+              return;
+            }
+            // Only slug rows are needed to build localized URLs for the locale
+            // switcher — avoid loading the full CMS-content catalogue per locale.
+            const rows = await getSlugTranslationsByLocale(l.id, usePublishedData);
+            const map: Record<string, Translation> = {};
+            for (const t of rows) {
+              map[getTranslatableKey(t)] = t;
+            }
+            translationsByLocale[l.id] = map;
+          })
+      );
+
+      // Dynamic pages need the translated CMS item slug per locale
+      let dynamicSlug: LocalizedDynamicSlug | null = null;
+      if (page.is_dynamic && collectionItem) {
+        const slugField = collectionFields.find(f => f.key === 'slug');
+        if (slugField) {
+          // collectionItem.values are already translated for the current locale,
+          // so fetch the raw (default-locale) slug to use as the default + fallback.
+          const rawValues = await getValuesByItemIds([collectionItem.id], usePublishedData, undefined, [slugField.id]);
+          const sourceSlug = rawValues[collectionItem.id]?.[slugField.id];
+          if (sourceSlug) {
+            dynamicSlug = {
+              itemId: collectionItem.id,
+              contentKey: slugField.key ? `field:key:${slugField.key}` : `field:id:${slugField.id}`,
+              defaultValue: String(sourceSlug),
+            };
+          }
+        }
+      }
+
+      localizedPageUrls = buildLocalizedPageUrls(page, folders, availableLocales, translationsByLocale, dynamicSlug);
+    } catch (error) {
+      console.error('[PageRenderer] Error building localized page URLs:', error);
+    }
+  }
+
   // Extract custom code from page settings and resolve placeholders for dynamic pages
   const rawPageCustomCodeHead = page.settings?.custom_code?.head || '';
   const rawPageCustomCodeBody = page.settings?.custom_code?.body || '';
@@ -700,16 +777,19 @@ export default async function PageRenderer({
         data-layer-id="body"
         data-layer-type="div"
         data-is-empty={hasLayers ? 'false' : 'true'}
+        lang={(locale?.code || availableLocales.find((l) => l.is_default)?.code) || undefined}
       >
         <LayerRendererPublic
           layers={childLayers}
           isPublished={page.is_published}
+          pageId={page.id}
           pageCollectionItemId={collectionItem?.id}
           pageCollectionItemData={collectionItem?.values || undefined}
           pageCollectionSortedItemIds={pageCollectionSortedItemIds}
           hiddenLayerInfo={hiddenLayerInfo}
           currentLocale={locale}
           availableLocales={availableLocales}
+          localizedPageUrls={localizedPageUrls}
           pages={pages as any}
           folders={folders as any}
           collectionItemSlugs={collectionItemSlugs}
