@@ -41,6 +41,7 @@
     "updates:autopilot-guard": "npx ts-node scripts/check-autopilot-guard.ts",
     "updates:autopilot-repair": "npx ts-node scripts/core-update/run-autopilot-repair.ts",
     "updates:ai-repair": "npx ts-node scripts/ai-repair-safe-update.ts",
+    "updates:premium-ai-repair": "npx ts-node scripts/core-update/run-premium-ai-repair.ts",
     "fonts:update": "npx ts-node scripts/fetch-google-fonts.ts",
     "prepare": "husky"
   },

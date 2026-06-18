@@ -1,5 +1,6 @@
 /** Default repair model (override with OPENROUTER_MODEL). Use vars for Opus on high-risk only. */
 export const DEFAULT_AI_REPAIR_MODEL = 'anthropic/claude-sonnet-4';
+export const DEFAULT_PREMIUM_AI_REPAIR_MODEL = 'anthropic/claude-opus-4.1';
 
 export type OpenRouterRepairMessage = {
   role: 'system' | 'user' | 'assistant';
@@ -129,8 +130,8 @@ export async function requestOpenRouterRepair(
         headers: {
           Authorization: `Bearer ${options.apiKey}`,
           'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://github.com/mywebmasteruk/ycode-masjidweb',
-          'X-Title': 'MasjidWeb AI Safe Update Repair',
+          'HTTP-Referer': process.env.OPENROUTER_SITE_URL?.trim() || 'https://github.com/mywebmasteruk/ycode-mw-tenant',
+          'X-Title': process.env.OPENROUTER_APP_NAME?.trim() || 'MasjidWeb AI Safe Update Repair',
         },
         body: JSON.stringify({
           model: options.model,

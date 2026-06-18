@@ -17,6 +17,19 @@ on:
         required: false
         type: string
         default: "8"
+      repair_mode:
+        description: Repair mode for blocked safe-update PRs
+        required: false
+        type: choice
+        default: autopilot
+        options:
+          - autopilot
+          - premium_ai
+      openrouter_model:
+        description: Optional OpenRouter model override for this run
+        required: false
+        type: string
+        default: ""
       copilot_escalation_mode:
         description: Optional Copilot escalation when deterministic repair blocks
         required: false
@@ -71,6 +84,7 @@ jobs:
           git checkout origin/main -- \
             scripts/ai-repair-safe-update.ts \
             scripts/core-update/run-autopilot-repair.ts \
+            scripts/core-update/run-premium-ai-repair.ts \
             scripts/core-update/create-copilot-escalation.ts \
             scripts/reapply-tier2-seams.ts \
             scripts/check-autopilot-guard.ts \
@@ -117,16 +131,35 @@ jobs:
 
       - name: Run AI conflict repair
         id: repair
-        if: steps.deterministic_repair.outputs.status == 'failed' && inputs.mechanical_only == false
+        if: steps.deterministic_repair.outputs.status == 'failed' && inputs.mechanical_only == false && inputs.repair_mode == 'autopilot'
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENROUTER_MODEL: ${{ vars.OPENROUTER_REPAIR_MODEL }}
+          OPENROUTER_MODEL: ${{ inputs.openrouter_model || vars.OPENROUTER_REPAIR_MODEL }}
           OPENROUTER_REPAIR_MODEL_HIGH_RISK: ${{ vars.OPENROUTER_REPAIR_MODEL_HIGH_RISK }}
+          OPENROUTER_SITE_URL: ${{ vars.OPENROUTER_SITE_URL }}
+          OPENROUTER_APP_NAME: ${{ vars.OPENROUTER_APP_NAME }}
           AI_REPAIR_MECHANICAL_ONLY: ${{ inputs.mechanical_only }}
           AI_REPAIR_SKIP_TIER2_LLM: "true"
           AI_REPAIR_MAX_LLM_FILES: ${{ inputs.max_llm_files }}
         run: npx --yes tsx scripts/ai-repair-safe-update.ts
+
+      - name: Run Premium AI repair report
+        id: premium_repair
+        continue-on-error: true
+        if: steps.deterministic_repair.outputs.status != 'success' && inputs.repair_mode == 'premium_ai'
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_REPAIR_MODEL: ${{ inputs.openrouter_model || vars.OPENROUTER_REPAIR_MODEL }}
+          OPENROUTER_SITE_URL: ${{ vars.OPENROUTER_SITE_URL }}
+          OPENROUTER_APP_NAME: ${{ vars.OPENROUTER_APP_NAME }}
+          PREMIUM_AI_REPAIR_REPORT_PATH: /tmp/premium-ai-repair-report.md
+          PREMIUM_AI_REPAIR_REPORT_JSON_PATH: /tmp/premium-ai-repair-report.json
+          AUTOPILOT_REPAIR_REPORT_PATH: /tmp/autopilot-repair-report.md
+          AUTOPILOT_REPAIR_REPORT_JSON_PATH: /tmp/autopilot-repair-report.json
+          PREMIUM_AI_REPAIR_MAX_FILES: ${{ inputs.max_llm_files }}
+        run: npx --yes tsx scripts/core-update/run-premium-ai-repair.ts
 
       - name: Upload deterministic Autopilot repair report
         if: always()
@@ -138,13 +171,23 @@ jobs:
             /tmp/autopilot-repair-report.json
           if-no-files-found: ignore
 
+      - name: Upload Premium AI repair report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-update-premium-ai-repair
+          path: |
+            /tmp/premium-ai-repair-report.md
+            /tmp/premium-ai-repair-report.json
+          if-no-files-found: ignore
+
       - name: Create Copilot escalation request
         if: >-
           (
             steps.deterministic_repair.outputs.status == 'blocked'
             || (
               steps.deterministic_repair.outputs.status == 'failed'
-              && (inputs.mechanical_only == true || steps.repair.outcome != 'success')
+              && (inputs.repair_mode == 'premium_ai' || inputs.mechanical_only == true || steps.repair.outcome != 'success')
             )
           )
           && (
@@ -166,7 +209,7 @@ jobs:
           steps.deterministic_repair.outputs.status == 'blocked'
           || (
             steps.deterministic_repair.outputs.status == 'failed'
-            && (inputs.mechanical_only == true || steps.repair.outcome != 'success')
+            && (inputs.repair_mode == 'premium_ai' || inputs.mechanical_only == true || steps.repair.outcome != 'success')
           )
         run: |
           echo "Deterministic Autopilot repair could not safely resolve all conflicts. See core-update-autopilot-repair artifact."
