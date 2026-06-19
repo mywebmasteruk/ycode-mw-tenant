@@ -194,10 +194,10 @@ jobs:
       - name: Create Copilot escalation request
         if: >-
           (
-            (steps.deterministic_repair.outputs.status == 'blocked' && (inputs.repair_mode != 'premium_ai' || steps.premium_repair.outputs.status != 'applied'))
+            (steps.deterministic_repair.outputs.status == 'blocked' && (inputs.repair_mode != 'premium_ai' || !contains(fromJSON('["applied","content_replacement_applied"]'), steps.premium_repair.outputs.status)))
             || (
               steps.deterministic_repair.outputs.status == 'failed'
-              && (inputs.mechanical_only == true || (inputs.repair_mode == 'autopilot' && steps.repair.outcome != 'success') || (inputs.repair_mode == 'premium_ai' && steps.premium_repair.outputs.status != 'applied'))
+              && (inputs.mechanical_only == true || (inputs.repair_mode == 'autopilot' && steps.repair.outcome != 'success') || (inputs.repair_mode == 'premium_ai' && !contains(fromJSON('["applied","content_replacement_applied"]'), steps.premium_repair.outputs.status)))
             )
           )
           && (
@@ -216,13 +216,13 @@ jobs:
 
       - name: Stop when repair remains blocked
         if: >-
-          (steps.deterministic_repair.outputs.status == 'blocked' && (inputs.repair_mode != 'premium_ai' || steps.premium_repair.outputs.status != 'applied'))
+          (steps.deterministic_repair.outputs.status == 'blocked' && (inputs.repair_mode != 'premium_ai' || !contains(fromJSON('["applied","content_replacement_applied"]'), steps.premium_repair.outputs.status)))
           || (
             steps.deterministic_repair.outputs.status == 'failed'
             && (
               inputs.mechanical_only == true
               || (inputs.repair_mode == 'autopilot' && steps.repair.outcome != 'success')
-              || (inputs.repair_mode == 'premium_ai' && steps.premium_repair.outputs.status != 'applied')
+              || (inputs.repair_mode == 'premium_ai' && !contains(fromJSON('["applied","content_replacement_applied"]'), steps.premium_repair.outputs.status))
             )
           )
         run: |
@@ -327,9 +327,9 @@ jobs:
             let body = repairMode === 'premium_ai' ? '### MasjidWeb Premium AI repair\n\n' : '### MasjidWeb Autopilot repair\n\n';
             body += `Deterministic repair status: **${deterministicStatus}**. Repaired: **${Number.isFinite(deterministicRepaired) ? deterministicRepaired : 0}**. Blocked: **${Number.isFinite(deterministicBlocked) ? deterministicBlocked : 0}**.\n\n`;
             if (repairMode === 'premium_ai') {
-              body += `Premium AI patch status: **${premiumStatus}**. Applied files: **${Number.isFinite(premiumApplied) ? premiumApplied : 0}**.\n\n`;
+              body += `Premium AI repair status: **${premiumStatus}**. Applied files: **${Number.isFinite(premiumApplied) ? premiumApplied : 0}**.\n\n`;
             }
-            if (deterministicStatus === 'blocked' && !(repairMode === 'premium_ai' && premiumStatus === 'applied')) {
+            if (deterministicStatus === 'blocked' && !(repairMode === 'premium_ai' && ['applied', 'content_replacement_applied'].includes(premiumStatus))) {
               body += 'Autopilot blocked this update to protect tenant data and Premium AI did not leave an applied repair. Review the repair artifacts for exact missing invariants.\n';
               body += 'Do **not** merge until a developer resolves the blocked files and the normal PR checks finish green.\n';
             } else if (repairOutcome === 'failure') {

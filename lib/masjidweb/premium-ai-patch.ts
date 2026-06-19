@@ -1,10 +1,16 @@
 import { normalize, sep } from 'node:path';
 
 const FORBIDDEN_DIFF_PATH_SEGMENTS = new Set(['', '.', '..', '.git', 'node_modules']);
+const MIN_REPAIRED_CONTENT_CHARS = 20;
 
 export type PremiumAiPatch = {
   filePath: string;
   unifiedDiff: string;
+};
+
+export type PremiumAiResolvedFile = {
+  filePath: string;
+  content: string;
 };
 
 export function normalizeDiffPath(path: string): string | null {
@@ -29,6 +35,64 @@ export function filesMentionedInDiff(diff: string): string[] {
   return [...new Set(files.filter(Boolean))].sort();
 }
 
+function parseHunkCount(value: string | undefined): number {
+  if (!value) return 1;
+  const parsed = Number.parseInt(value.slice(1), 10);
+  return Number.isFinite(parsed) ? parsed : 1;
+}
+
+export function assertUnifiedDiffSyntax(diff: string, filePath: string): void {
+  const lines = diff.split('\n');
+  let expectedOld = 0;
+  let expectedNew = 0;
+  let actualOld = 0;
+  let actualNew = 0;
+  let inHunk = false;
+
+  function finishHunk(): void {
+    if (!inHunk) return;
+    if (actualOld !== expectedOld || actualNew !== expectedNew) {
+      throw new Error(
+        `Premium AI patch for ${filePath} has malformed hunk counts (expected -${expectedOld}/+${expectedNew}, got -${actualOld}/+${actualNew})`,
+      );
+    }
+  }
+
+  for (const line of lines) {
+    const header = line.match(/^@@ -(?:\d+)(,\d+)? \+(?:\d+)(,\d+)? @@/);
+    if (header) {
+      finishHunk();
+      expectedOld = parseHunkCount(header[1]);
+      expectedNew = parseHunkCount(header[2]);
+      actualOld = 0;
+      actualNew = 0;
+      inHunk = true;
+      continue;
+    }
+
+    if (!inHunk) continue;
+    if (line.startsWith('--- ') || line.startsWith('+++ ')) {
+      finishHunk();
+      inHunk = false;
+      continue;
+    }
+    if (line.startsWith('\\')) continue;
+    if (line.startsWith(' ')) {
+      actualOld += 1;
+      actualNew += 1;
+    } else if (line.startsWith('-')) {
+      actualOld += 1;
+    } else if (line.startsWith('+')) {
+      actualNew += 1;
+    } else if (line === '') {
+      actualOld += 1;
+      actualNew += 1;
+    }
+  }
+
+  finishHunk();
+}
+
 export function assertPatchTargets(patch: PremiumAiPatch, allowedFiles: Set<string>): void {
   const declared = normalizeDiffPath(patch.filePath);
   if (!declared || !allowedFiles.has(declared)) {
@@ -48,5 +112,35 @@ export function assertPatchTargets(patch: PremiumAiPatch, allowedFiles: Set<stri
     if (!allowedFiles.has(file)) {
       throw new Error(`Premium AI patch includes disallowed file: ${file}`);
     }
+  }
+  assertUnifiedDiffSyntax(patch.unifiedDiff, patch.filePath);
+}
+
+export function decodePremiumAiContent(entry: unknown): string | null {
+  const item = entry as { content?: unknown; contentBase64?: unknown };
+  if (typeof item.content === 'string') return item.content;
+  if (typeof item.contentBase64 !== 'string') return null;
+
+  try {
+    return Buffer.from(item.contentBase64, 'base64').toString('utf8');
+  } catch {
+    return null;
+  }
+}
+
+export function assertResolvedFileTarget(file: PremiumAiResolvedFile, allowedFiles: Set<string>): string {
+  const declared = normalizeDiffPath(file.filePath);
+  if (!declared || !allowedFiles.has(declared)) {
+    throw new Error(`Premium AI content replacement targets disallowed file: ${file.filePath}`);
+  }
+  return declared;
+}
+
+export function assertResolvedFileContent(file: PremiumAiResolvedFile): void {
+  if (file.content.trim().length < MIN_REPAIRED_CONTENT_CHARS) {
+    throw new Error(`Premium AI content replacement for ${file.filePath} is empty or too short`);
+  }
+  if (/^<<<<<<<|^=======|^>>>>>>>|^\|\|\|\|\|\|\|/m.test(file.content)) {
+    throw new Error(`Premium AI content replacement for ${file.filePath} still contains conflict markers`);
   }
 }
