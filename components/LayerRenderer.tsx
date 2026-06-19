@@ -7,11 +7,12 @@ import LayerLockIndicator from '@/components/collaboration/LayerLockIndicator';
 import EditingIndicator from '@/components/collaboration/EditingIndicator';
 import { useCollaborationPresenceStore, getResourceLockKey, RESOURCE_TYPES } from '@/stores/useCollaborationPresenceStore';
 import { useAuthStore } from '@/stores/useAuthStore';
-import type { Layer, Locale, ComponentVariable, FormSettings, LinkSettings, Breakpoint, CollectionItemWithValues, Component } from '@/types';
+import type { Layer, Locale, ComponentVariable, FormSettings, LinkSettings, Breakpoint, CollectionItemWithValues, CollectionField, Component } from '@/types';
 import type { UseLiveLayerUpdatesReturn } from '@/hooks/use-live-layer-updates';
 import type { UseLiveComponentUpdatesReturn } from '@/hooks/use-live-component-updates';
-import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextEditable, isTextContentLayer, isRichTextLayer, getCollectionVariable, evaluateVisibility, findAncestorByName, filterDisabledSliderLayers, getLayerCmsFieldBinding, findLayerById } from '@/lib/layer-utils';
+import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextEditable, isTextContentLayer, isRichTextLayer, getCollectionVariable, evaluateVisibility, findAncestorByName, filterDisabledSliderLayers, getLayerCmsFieldBinding, findLayerById, applyCustomAttributes } from '@/lib/layer-utils';
 import { getMapIframeProps, DEFAULT_MAP_SETTINGS, resolveMarkerColor } from '@/lib/map-utils';
+import { HTML_TO_REACT_ATTRS } from '@/lib/parse-head-html';
 import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
 import { useCanvasSlider } from '@/hooks/use-canvas-slider';
 import { resolveFieldFromSources } from '@/lib/cms-variables-utils';
@@ -21,13 +22,13 @@ import { isValidLinkSettings } from '@/lib/link-utils';
 import { DEFAULT_ASSETS, ASSET_CATEGORIES, isAssetOfType } from '@/lib/asset-utils';
 import { parseMultiAssetFieldValue, buildAssetVirtualValues } from '@/lib/multi-asset-utils';
 import { parseMultiReferenceValue, resolveReferenceFieldsSync } from '@/lib/collection-utils';
-import { MULTI_ASSET_COLLECTION_ID } from '@/lib/collection-field-utils';
-import { buildImageSizes, generateImageSrcset, getOptimizedImageUrl, parseImageDimension } from '@/lib/asset-utils';
+import { MULTI_ASSET_COLLECTION_ID, buildGlobalsMetaMap, buildGlobalsValueMap, mergeGlobalsIntoFieldData } from '@/lib/collection-field-utils';
+import { buildImageSizes, generateImageSrcset, getOptimizedImageUrl, getSvgAspectRatioStyle, parseImageDimension } from '@/lib/asset-utils';
 import { useEditorStore } from '@/stores/useEditorStore';
 import { toast } from 'sonner';
 import { resolveInlineVariablesFromData } from '@/lib/inline-variables';
 import { renderRichText, hasBlockElementsWithInlineVariables, getTextStyleClasses, flattenTiptapParagraphs, type RichTextLinkContext, type RenderComponentBlockFn } from '@/lib/text-format-utils';
-import { hasComponentOrVariable } from '@/lib/tiptap-utils';
+import { hasComponentOrVariable, extractPlainTextFromTiptap } from '@/lib/tiptap-utils';
 import LayerContextMenu from '@/app/(builder)/ycode/components/LayerContextMenu';
 import CanvasTextEditor from '@/app/(builder)/ycode/components/CanvasTextEditor';
 import { useComponentsStore } from '@/stores/useComponentsStore';
@@ -37,6 +38,7 @@ import { useFilterStore } from '@/stores/useFilterStore';
 import { useCollectionsStore } from '@/stores/useCollectionsStore';
 import { useAssetsStore } from '@/stores/useAssetsStore';
 import { useColorVariablesStore } from '@/stores/useColorVariablesStore';
+import { useGlobalsStore } from '@/stores/useGlobalsStore';
 import { ShimmerSkeleton } from '@/components/ui/shimmer-skeleton';
 import { combineBgValues, mergeStaticBgVars } from '@/lib/tailwind-class-mapper';
 import { clsx } from 'clsx';
@@ -46,7 +48,7 @@ import FilterableCollection from '@/components/FilterableCollection';
 import LocaleSelector from '@/components/layers/LocaleSelector';
 import { usePagesStore } from '@/stores/usePagesStore';
 import { useSettingsStore } from '@/stores/useSettingsStore';
-import { generateLinkHref, resolveLinkAttrs, isLinkAtCollectionBoundary, type LinkResolutionContext } from '@/lib/link-utils';
+import { generateLinkHref, resolveLinkAttrs, isLinkAtCollectionBoundary, isLinkToCurrentPage, type LinkResolutionContext } from '@/lib/link-utils';
 import { collectEditorHiddenLayerIds, type HiddenLayerInfo } from '@/lib/animation-utils';
 import AnimationInitializer from '@/components/AnimationInitializer';
 import { transformLayerIdsForInstance, resolveVariableLinks } from '@/lib/resolve-components';
@@ -261,6 +263,7 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
               sortByInputLayerId={layer._filterConfig!.sortByInputLayerId}
               sortOrderInputLayerId={layer._filterConfig!.sortOrderInputLayerId}
               limit={layer._filterConfig!.limit}
+              maxTotal={layer._filterConfig!.maxTotal}
               paginationMode={layer._filterConfig!.paginationMode}
               layerTemplate={layer._filterConfig!.layerTemplate}
               collectionLayerClasses={layer._filterConfig!.collectionLayerClasses}
@@ -467,6 +470,12 @@ const LayerItemImpl: React.FC<{
   // Subscribe to selection state from the store for reactive updates without
   // forcing the entire LayerRenderer tree to re-render when selection changes
   const isSelected = useEditorStore((state) => state.selectedLayerId === layer.id);
+  // Preview the `current:` style state in the canvas: only the selected layer
+  // re-renders when the "Current" UI state is active (the selector returns a
+  // stable `false` for every other layer, so it doesn't trigger re-renders).
+  const isCurrentStatePreview = useEditorStore(
+    (state) => state.selectedLayerId === layer.id && state.activeUIState === 'current'
+  );
   const isEditing = editingLayerId === layer.id;
   const isDragging = activeLayerId === layer.id;
   const textEditable = isTextEditable(layer);
@@ -483,7 +492,24 @@ const LayerItemImpl: React.FC<{
   // Collection layer data (from repeaters/loops) - separate from page collection data
   // Use layer's pre-resolved values if present (from SSR), otherwise use prop from parent
   const collectionLayerItemId = layer._collectionItemId || collectionItemId;
-  const collectionLayerData = layer._collectionItemValues || collectionItemData;
+  // Site-wide global variables, keyed by id, so global-source bindings resolve
+  // anywhere regardless of collection/page context. Merged into the collection
+  // data map every resolve call already receives (global ids are unique UUIDs,
+  // so they never collide with collection field ids).
+  const globalVariables = useGlobalsStore((state) => state.globals);
+  const globalsData = useMemo(
+    () => buildGlobalsValueMap(globalVariables),
+    [globalVariables]
+  );
+  const globalsMeta = useMemo(
+    () => buildGlobalsMetaMap(globalVariables),
+    [globalVariables]
+  );
+  const baseCollectionLayerData = layer._collectionItemValues || collectionItemData;
+  const collectionLayerData = useMemo(
+    () => mergeGlobalsIntoFieldData(baseCollectionLayerData, globalsData),
+    [baseCollectionLayerData, globalsData]
+  );
   // Layer-specific data map for resolving fields with collection_layer_id
   // Merge SSR-embedded map with prop from parent (SSR data takes precedence)
   const effectiveLayerDataMap = React.useMemo(() => ({
@@ -567,8 +593,17 @@ const LayerItemImpl: React.FC<{
   // Clicks on the embedded component's internal layers should select the text layer
   const renderComponentBlock: RenderComponentBlockFn = useCallback(
     (comp, resolvedLayers, _overrides, key, innerAncestorIds) => {
+      // In edit mode, embedded rich-text component layers are resolved live and
+      // are not pre-translated (SSR pre-translates them in page-fetcher). Apply
+      // component-scope translations here so the canvas shows localized content.
+      const localizedLayers = (isEditMode && currentLocale && !currentLocale.is_default && translations)
+        ? injectTranslatedText(resolvedLayers, pageId || comp.id, translations, {
+          includeIncomplete: true,
+          defaultMasterComponentId: comp.id,
+        })
+        : resolvedLayers;
       const uniqueLayers = transformLayerIdsForInstance(
-        resolvedLayers,
+        localizedLayers,
         `${layer.id}-rtc-${key}`
       );
       return (
@@ -599,7 +634,7 @@ const LayerItemImpl: React.FC<{
       </React.Fragment>
       );
     },
-    [layer.id, sharedRendererProps, isEditMode]
+    [layer.id, sharedRendererProps, isEditMode, currentLocale, translations, pageId]
   );
 
   let htmlTag = getLayerHtmlTag(layer);
@@ -1057,12 +1092,28 @@ const LayerItemImpl: React.FC<{
       const variableDef = componentVariables.find(v => v.id === linkedVariableId);
       const overrideCategory = variableDef?.type === 'rich_text' ? 'rich_text' : 'text';
       const overrideValue = parentComponentOverrides?.[overrideCategory]?.[linkedVariableId];
+
+      // When localizing, a component-scope translation for this layer was
+      // injected into its own text variable (id preserved). Prefer it over the
+      // untranslated variable default — but an instance override still wins.
+      if (overrideValue === undefined && (layer as any)._textTranslated && textVariable) {
+        if (textVariable.type === 'dynamic_rich_text') {
+          const variable = isSimpleTextLayer
+            ? { ...textVariable, data: { ...textVariable.data, content: flattenTiptapParagraphs(textVariable.data.content) } }
+            : textVariable;
+          return renderRichText(variable as any, collectionLayerData, pageCollectionItemData || undefined, layer.textStyles, useSpanForParagraphs, isEditMode, linkContext, timezone, effectiveLayerDataMap, allComponents, renderComponentBlock, effectiveAncestorIds, isSimpleTextLayer, globalsMeta);
+        }
+        if (textVariable.type === 'dynamic_text') {
+          return (textVariable as any).data.content;
+        }
+      }
+
       const valueToRender = overrideValue ?? variableDef?.default_value;
 
       if (valueToRender !== undefined) {
         // Value is typed as ComponentVariableValue - check if it's a text variable (has 'type' property)
         if ('type' in valueToRender && valueToRender.type === 'dynamic_rich_text') {
-          return renderRichText(valueToRender as any, collectionLayerData, pageCollectionItemData || undefined, layer.textStyles, useSpanForParagraphs, isEditMode, linkContext, timezone, effectiveLayerDataMap, allComponents, renderComponentBlock, effectiveAncestorIds, isSimpleTextLayer);
+          return renderRichText(valueToRender as any, collectionLayerData, pageCollectionItemData || undefined, layer.textStyles, useSpanForParagraphs, isEditMode, linkContext, timezone, effectiveLayerDataMap, allComponents, renderComponentBlock, effectiveAncestorIds, isSimpleTextLayer, globalsMeta);
         }
         if ('type' in valueToRender && valueToRender.type === 'dynamic_text') {
           return (valueToRender as any).data.content;
@@ -1079,7 +1130,7 @@ const LayerItemImpl: React.FC<{
       const variable = isSimpleTextLayer
         ? { ...textVariable, data: { ...textVariable.data, content: flattenTiptapParagraphs(textVariable.data.content) } }
         : textVariable;
-      return renderRichText(variable as any, collectionLayerData, pageCollectionItemData || undefined, layer.textStyles, useSpanForParagraphs, isEditMode, linkContext, timezone, effectiveLayerDataMap, allComponents, renderComponentBlock, effectiveAncestorIds, isSimpleTextLayer);
+      return renderRichText(variable as any, collectionLayerData, pageCollectionItemData || undefined, layer.textStyles, useSpanForParagraphs, isEditMode, linkContext, timezone, effectiveLayerDataMap, allComponents, renderComponentBlock, effectiveAncestorIds, isSimpleTextLayer, globalsMeta);
     }
 
     // Check for inline variables in DynamicTextVariable format (legacy)
@@ -1144,8 +1195,13 @@ const LayerItemImpl: React.FC<{
     pageCollectionItemData
   );
 
-  // Get image alt text, resolve inline variables, and apply translation if available
-  const rawImageAlt = String(getDynamicTextContent(effectiveImageSettings?.alt) || 'Image');
+  // Get image alt text, resolve inline variables, and apply translation if available.
+  // Alt is an attribute and must be a plain string: if a Tiptap doc slips in
+  // (e.g. legacy data), extract its text instead of stringifying to "[object Object]".
+  const rawImageAltContent = getDynamicTextContent(effectiveImageSettings?.alt) as unknown;
+  const rawImageAlt = typeof rawImageAltContent === 'object' && rawImageAltContent !== null
+    ? (extractPlainTextFromTiptap(rawImageAltContent) || 'Image')
+    : String(rawImageAltContent || 'Image');
   const originalImageAlt = rawImageAlt.includes('<ycode-inline-variable>')
     ? resolveInlineVariablesFromData(rawImageAlt, collectionLayerData, pageCollectionItemData ?? undefined, timezone, effectiveLayerDataMap)
     : rawImageAlt;
@@ -1531,12 +1587,21 @@ const LayerItemImpl: React.FC<{
     const hasStaticFilters = !!collectionVariable.filters?.groups?.some(
       g => g.conditions.some(c => !c.inputLayerId)
     );
+    // Reference/inverse collections narrow the fetched pool client-side by the
+    // parent item's reference value, so the full candidate set must be loaded.
+    // The default page size can omit the specific referenced rows (e.g. a region
+    // sorted near the end of a large collection), hiding the nested layer.
+    const isReferenceFiltered = !!collectionVariable.source_field_id && (
+      collectionVariable.source_field_type === 'reference' ||
+      collectionVariable.source_field_type === 'multi_reference' ||
+      collectionVariable.source_field_type === 'inverse_reference'
+    );
     const pagination = collectionVariable.pagination;
     const isPaginated = !!pagination?.enabled && (pagination.mode === 'pages' || pagination.mode === 'load_more');
 
     let fetchLimit: number | undefined;
     let fetchOffset: number | undefined;
-    if (hasStaticFilters) {
+    if (hasStaticFilters || isReferenceFiltered) {
       fetchLimit = FILTERED_FETCH_LIMIT;
       fetchOffset = 0;
     } else if (isPaginated) {
@@ -1559,6 +1624,7 @@ const LayerItemImpl: React.FC<{
     isEditMode,
     collectionVariable?.id,
     collectionVariable?.source_field_type,
+    collectionVariable?.source_field_id,
     collectionVariable?.sort_by,
     collectionVariable?.sort_order,
     collectionVariable?.sort_by_inputLayerId,
@@ -1865,6 +1931,30 @@ const LayerItemImpl: React.FC<{
     pageCollectionSortedItemIds,
   };
 
+  // Editor-only: a link that targets the page currently being edited is marked
+  // with `aria-current` so its `current:` styles render in the canvas, mirroring
+  // the published "active page" behaviour. Uses the same resolution context as
+  // the published renderer so page, url and CMS (field) links all match.
+  const isCurrentPageLinkInEditor = isEditMode
+    && isLinkToCurrentPage(layer.variables?.link, {
+      pages,
+      folders,
+      collectionItemSlugs,
+      collectionItemId: collectionLayerItemId,
+      pageCollectionItemId,
+      collectionItemData: collectionLayerData,
+      pageCollectionItemData: pageCollectionItemData || undefined,
+      isPreview,
+      locale: currentLocale,
+      translations,
+      getAsset,
+      anchorMap,
+      resolvedAssets,
+      layerDataMap: effectiveLayerDataMap,
+      pageCollectionSortedItemIds,
+      pageId,
+    });
+
   // Render element-specific content
   const renderContent = () => {
     // Component instances in EDIT MODE: render component's layers directly
@@ -1907,13 +1997,6 @@ const LayerItemImpl: React.FC<{
     const Tag = htmlTag as any;
     const { style: attrStyle, ...otherAttributes } = effectiveLayer.attributes || {};
 
-    // Map HTML attributes to React JSX equivalents
-    const htmlToJsxAttrMap: Record<string, string> = {
-      'for': 'htmlFor',
-      'class': 'className',
-      'autofocus': 'autoFocus',
-    };
-
     // Convert string boolean values to actual booleans and map HTML attrs to JSX
     const normalizedAttributes = Object.fromEntries(
       Object.entries(otherAttributes)
@@ -1924,7 +2007,7 @@ const LayerItemImpl: React.FC<{
         })
         .map(([key, value]) => {
           // Map HTML attribute names to JSX equivalents
-          const jsxKey = htmlToJsxAttrMap[key] || key;
+          const jsxKey = HTML_TO_REACT_ATTRS[key.toLowerCase()] || key;
 
           // If value is already a boolean, keep it
           if (typeof value === 'boolean') {
@@ -2032,6 +2115,12 @@ const LayerItemImpl: React.FC<{
       ...(enableDragDrop && !isEditing && !isLockedByOther ? { ...normalizedAttributes, ...listeners } : normalizedAttributes),
       ...(!isEditMode && { suppressHydrationWarning: true }),
     };
+
+    // Editor: mark current-page links (and preview the selected layer's
+    // `current:` state) so the "active page" styles are visible in the canvas.
+    if (isEditMode && (isCurrentPageLinkInEditor || isCurrentStatePreview)) {
+      elementProps['aria-current'] = 'page';
+    }
 
     // Apply link attributes for elements rendered as <a> (buttons with links or <a> layers)
     if (htmlTag === 'a' && layer.variables?.link) {
@@ -2150,11 +2239,9 @@ const LayerItemImpl: React.FC<{
       elementProps.id = layer.attributes.id;
     }
 
-    // Apply custom attributes from settings
+    // Apply custom attributes from settings (map HTML attr names to JSX equivalents)
     if (layer.settings?.customAttributes) {
-      Object.entries(layer.settings.customAttributes).forEach(([name, value]) => {
-        elementProps[name] = value;
-      });
+      applyCustomAttributes(elementProps, layer.settings.customAttributes);
     }
 
     // Select with placeholder: set defaultValue so React shows the placeholder option
@@ -2682,10 +2769,17 @@ const LayerItemImpl: React.FC<{
         iconHtml = DEFAULT_ASSETS.ICON;
       }
 
+      // Derive aspect-ratio from the SVG viewBox so an icon with only one of
+      // width/height set resolves the missing axis to its true proportions
+      // instead of collapsing. Inert when both dimensions are explicitly set.
+      const iconAspectRatio = getSvgAspectRatioStyle(iconHtml);
+      const iconElementStyle = (typeof elementProps.style === 'object' && elementProps.style) || undefined;
+
       return (
         <Tag
           {...elementProps}
           data-icon="true"
+          style={iconAspectRatio ? { aspectRatio: iconAspectRatio, ...iconElementStyle } : iconElementStyle}
           dangerouslySetInnerHTML={{ __html: iconHtml }}
         />
       );
@@ -2816,11 +2910,9 @@ const LayerItemImpl: React.FC<{
             iframeProps.id = layer.attributes.id;
           }
 
-          // Apply custom attributes from settings
+          // Apply custom attributes from settings (map HTML attr names to JSX equivalents)
           if (layer.settings?.customAttributes) {
-            Object.entries(layer.settings.customAttributes).forEach(([name, value]) => {
-              iframeProps[name] = value;
-            });
+            applyCustomAttributes(iframeProps, layer.settings.customAttributes);
           }
 
           // Only add editor event handlers in edit mode (client-side only)
@@ -3154,9 +3246,17 @@ const LayerItemImpl: React.FC<{
             // what the server-side page fetcher does on /preview and published
             // routes via applyCmsTranslations.
             const baseItemValues = item.values || {};
-            const translatedItemValues = (currentLocale && !currentLocale.is_default && translations)
+            const shouldTranslateCms = !!(currentLocale && !currentLocale.is_default && translations);
+            const translatedItemValues = shouldTranslateCms
               ? applyCmsTranslations(item.id, baseItemValues, collectionFields, translations, isEditMode ? { includeIncomplete: true } : undefined)
               : baseItemValues;
+
+            // Translate referenced item values too so relationship paths render
+            // in the active locale on canvas (matches server-side page fetcher).
+            const translateRefValues = shouldTranslateCms
+              ? (refItemId: string, refValues: Record<string, string>, refFields: CollectionField[]) =>
+                applyCmsTranslations(refItemId, refValues, refFields, translations, isEditMode ? { includeIncomplete: true } : undefined)
+              : undefined;
 
             // Resolve reference fields to add relationship paths (e.g., "refFieldId.targetFieldId")
             const enhancedItemValues = collectionFields.length > 0
@@ -3164,7 +3264,9 @@ const LayerItemImpl: React.FC<{
                 translatedItemValues,
                 collectionFields,
                 itemsForReferenceResolution,
-                fieldsByCollectionId
+                fieldsByCollectionId,
+                new Set(),
+                translateRefValues
               )
               : translatedItemValues;
 

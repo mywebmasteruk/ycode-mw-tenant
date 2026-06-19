@@ -1456,9 +1456,10 @@ export default function ElementLibrary({ isOpen, onClose, liveLayerUpdates }: El
     return (
       <div
         className={cn(
-          'fixed left-64 top-14 bottom-0 w-64 bg-background border-r z-50 flex flex-col items-center justify-center p-6 text-center',
+          'fixed top-14 bottom-0 w-64 bg-background border-r z-50 flex flex-col items-center justify-center p-6 text-center',
           !isOpen && 'hidden'
         )}
+        style={{ left: `${leftSidebarWidth}px` }}
       >
         <Empty>
           <EmptyMedia variant="icon">

@@ -18,7 +18,7 @@ export interface IconProps extends React.SVGProps<SVGSVGElement> {
     | 'paragraph' | 'droplet' | 'expand' | 'collapse' | 'filter' | 'crosshair' | 'lightbox' | 'slider' | 'slide' | 'slides' | 'slide-button-prev' | 'slide-button-next'
     | 'slide-bullets' | 'slide-bullet' | 'slide-navigation' | 'slide-fraction' | 'loop-alternate' | 'loop-repeat' | 'listItem' | 'external-link'
     | 'settings' | 'center-block' | 'code-block' | 'table' | 'table-row' | 'table-cell' | 'add-column' | 'add-row' | 'delete-column' | 'delete-row' | 'delete-table' | 'header' | 'body'
-    | 'webflow' | 'figma'
+    | 'webflow' | 'figma' | 'space'
   );
 }
 
@@ -1045,6 +1045,11 @@ const ICONS: Record<IconProps['name'], React.ReactNode> = {
   figma: (
     <g transform="scale(0.5)">
       <path d="M8 24c2.208 0 4-1.792 4-4v-4H8c-2.208 0-4 1.792-4 4s1.792 4 4 4zm-4-8c0-2.208 1.792-4 4-4h4v8H8c-2.208 0-4-1.792-4-4zm0-8c0-2.208 1.792-4 4-4h4v8H8c-2.208 0-4-1.792-4-4zm8-4h4c2.208 0 4 1.792 4 4s-1.792 4-4 4h-4V4zm0 8h4c2.208 0 4 1.792 4 4s-1.792 4-4 4-4-1.792-4-4v-4z" />
+    </g>
+  ),
+  space: (
+    <g transform="scale(0.5)">
+      <path d="M4 9V13H20V9H22V14C22 14.5523 21.5523 15 21 15H3C2.44772 15 2 14.5523 2 14V9H4Z" />
     </g>
   ),
 };

@@ -9,6 +9,7 @@ import { getUnpublishedAssetFolders, publishAssetFolders, hardDeleteSoftDeletedA
 import { getUnpublishedFonts, publishFonts } from '@/lib/repositories/fontRepository';
 import { getAllLocales } from '@/lib/repositories/localeRepository';
 import { getUnpublishedTranslationsCount } from '@/lib/repositories/translationRepository';
+import { getUnpublishedGlobalVariables, publishGlobalVariables, hardDeleteSoftDeletedGlobalVariables } from '@/lib/repositories/globalVariableRepository';
 import { publishPages } from '@/lib/services/pageService';
 import { publishCollectionWithItems } from '@/lib/services/collectionService';
 import { publishLocalisation } from '@/lib/services/localisationService';
@@ -34,7 +35,7 @@ export function registerPublishingTools(server: McpServer) {
     'Check what changes are pending and need to be published. Reports unpublished pages, styles, components, collections, fonts, assets, translations, and locales.',
     {},
     async () => {
-      const [pages, styles, components, collections, fonts, assets, assetFolders, translations, locales] = await Promise.all([
+      const [pages, styles, components, collections, fonts, assets, assetFolders, translations, locales, globals] = await Promise.all([
         getUnpublishedPages().catch(() => []),
         getUnpublishedLayerStyles().catch(() => []),
         getUnpublishedComponents().catch(() => []),
@@ -44,11 +45,12 @@ export function registerPublishingTools(server: McpServer) {
         getUnpublishedAssetFolders().catch(() => []),
         getUnpublishedTranslationsCount().catch(() => 0),
         countUnpublishedLocales().catch(() => 0),
+        getUnpublishedGlobalVariables().catch(() => []),
       ]);
 
       const hasChanges = pages.length > 0 || styles.length > 0 || components.length > 0
         || collections.length > 0 || fonts.length > 0 || assets.length > 0 || assetFolders.length > 0
-        || translations > 0 || locales > 0;
+        || translations > 0 || locales > 0 || globals.length > 0;
 
       return {
         content: [{
@@ -64,6 +66,7 @@ export function registerPublishingTools(server: McpServer) {
             unpublished_asset_folders: assetFolders.length,
             unpublished_translations: translations,
             unpublished_locales: locales,
+            unpublished_global_variables: globals.map((g) => ({ id: g.id, name: g.name })),
           }, null, 2),
         }],
       };
@@ -158,6 +161,13 @@ export function registerPublishingTools(server: McpServer) {
 
       // Publish fonts
       try { await publishFonts(); } catch (e) { failed.push('fonts'); console.error('[publish] fonts failed:', e); }
+
+      // Publish global variables
+      try {
+        const globalsResult = await publishGlobalVariables();
+        changes.globalVariables = globalsResult.count;
+        await hardDeleteSoftDeletedGlobalVariables();
+      } catch { /* non-fatal */ }
 
       // Publish locales and translations
       try {
