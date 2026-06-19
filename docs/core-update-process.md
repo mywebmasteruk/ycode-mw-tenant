@@ -35,14 +35,15 @@ High-risk areas include:
 
 ## Plain-language one-click flow
 
-1. Open GitHub Actions.
-2. Run the **Create safe Ycode update PR** workflow.
-3. The workflow creates a separate update branch and pull request.
-4. If GitHub marks the PR as draft, blocked, failed, or needing developer review, do not merge it.
-5. If the PR checks pass and the PR is not draft, review it and merge when ready.
-6. Production deploys only after the PR is merged into `main`.
+1. Open Admin Maintenance.
+2. Click the primary safe-update button.
+3. The system creates a separate update branch and pull request.
+4. If GitHub marks the PR as draft, blocked, failed, or needing developer review, click **Run Premium AI Update**.
+5. Premium AI uses OpenRouter's latest Claude frontier model by default, applies safe patch diffs to the PR branch only, and runs tenant safety checks, type-check, build, and PR CI.
+6. If the PR checks pass, preview the deploy preview and approve when ready.
+7. Production deploys only after the PR is merged into `main`.
 
-This is intentionally not one-click production deployment. The safe button creates an update PR; merging is the final approval step.
+This is intentionally not one-click production approval. The safe button can prepare, repair, and test the PR; merging is the final approval step.
 
 ## Required update workflow behind the button
 

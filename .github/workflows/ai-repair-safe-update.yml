@@ -26,10 +26,10 @@ on:
           - autopilot
           - premium_ai
       openrouter_model:
-        description: Optional OpenRouter model override for this run
+        description: OpenRouter model ID or latest_claude_frontier
         required: false
         type: string
-        default: ""
+        default: "latest_claude_frontier"
       copilot_escalation_mode:
         description: Optional Copilot escalation when deterministic repair blocks
         required: false
@@ -91,6 +91,7 @@ jobs:
             scripts/check-update-safety.ts \
             scripts/git-merge-hygiene.sh \
             lib/masjidweb/autopilot-repair.ts \
+            lib/masjidweb/premium-ai-patch.ts \
             lib/masjidweb/copilot-escalation.ts \
             lib/masjidweb/reapply-tier2-seams.ts \
             lib/masjidweb/openrouter-repair.ts \
@@ -144,14 +145,23 @@ jobs:
           AI_REPAIR_MAX_LLM_FILES: ${{ inputs.max_llm_files }}
         run: npx --yes tsx scripts/ai-repair-safe-update.ts
 
-      - name: Run Premium AI repair report
+      - name: Check Premium AI configuration
+        if: steps.deterministic_repair.outputs.status != 'success' && inputs.repair_mode == 'premium_ai'
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "OPENROUTER_API_KEY is missing. Add it as a GitHub Actions secret before running Premium AI Repair." >&2
+            exit 2
+          fi
+
+      - name: Run Premium AI patch repair
         id: premium_repair
-        continue-on-error: true
         if: steps.deterministic_repair.outputs.status != 'success' && inputs.repair_mode == 'premium_ai'
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          OPENROUTER_REPAIR_MODEL: ${{ inputs.openrouter_model || vars.OPENROUTER_REPAIR_MODEL }}
+          OPENROUTER_REPAIR_MODEL: ${{ inputs.openrouter_model || vars.OPENROUTER_REPAIR_MODEL || 'latest_claude_frontier' }}
           OPENROUTER_SITE_URL: ${{ vars.OPENROUTER_SITE_URL }}
           OPENROUTER_APP_NAME: ${{ vars.OPENROUTER_APP_NAME }}
           PREMIUM_AI_REPAIR_REPORT_PATH: /tmp/premium-ai-repair-report.md
@@ -184,10 +194,10 @@ jobs:
       - name: Create Copilot escalation request
         if: >-
           (
-            steps.deterministic_repair.outputs.status == 'blocked'
+            (steps.deterministic_repair.outputs.status == 'blocked' && (inputs.repair_mode != 'premium_ai' || steps.premium_repair.outputs.status != 'applied'))
             || (
               steps.deterministic_repair.outputs.status == 'failed'
-              && (inputs.repair_mode == 'premium_ai' || inputs.mechanical_only == true || steps.repair.outcome != 'success')
+              && (inputs.mechanical_only == true || (inputs.repair_mode == 'autopilot' && steps.repair.outcome != 'success') || (inputs.repair_mode == 'premium_ai' && steps.premium_repair.outputs.status != 'applied'))
             )
           )
           && (
@@ -204,19 +214,26 @@ jobs:
           COPILOT_ESCALATION_ASSIGN_COPILOT: ${{ inputs.copilot_escalation_mode == 'assign' }}
         run: npx --yes tsx scripts/core-update/create-copilot-escalation.ts
 
-      - name: Stop when deterministic repair is blocked
+      - name: Stop when repair remains blocked
         if: >-
-          steps.deterministic_repair.outputs.status == 'blocked'
+          (steps.deterministic_repair.outputs.status == 'blocked' && (inputs.repair_mode != 'premium_ai' || steps.premium_repair.outputs.status != 'applied'))
           || (
             steps.deterministic_repair.outputs.status == 'failed'
-            && (inputs.repair_mode == 'premium_ai' || inputs.mechanical_only == true || steps.repair.outcome != 'success')
+            && (
+              inputs.mechanical_only == true
+              || (inputs.repair_mode == 'autopilot' && steps.repair.outcome != 'success')
+              || (inputs.repair_mode == 'premium_ai' && steps.premium_repair.outputs.status != 'applied')
+            )
           )
         run: |
-          echo "Deterministic Autopilot repair could not safely resolve all conflicts. See core-update-autopilot-repair artifact."
+          echo "Automated repair could not safely resolve all conflicts. See core-update repair artifacts."
           if [ "${{ inputs.copilot_escalation_mode }}" != "none" ] || [ "${{ vars.ENABLE_COPILOT_ESCALATION }}" = "true" ]; then
             echo "A constrained Copilot escalation request was created or updated. This is not merge approval."
           fi
           exit 2
+
+      - name: Install dependencies for verification
+        run: npm install --no-audit --no-fund --legacy-peer-deps
 
       - name: Critical-exports completeness check
         run: |
@@ -234,6 +251,12 @@ jobs:
           npx --yes tsx scripts/check-autopilot-guard.ts
           cat /tmp/autopilot-guard-report.md >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Tenant isolation guard
+        run: bash scripts/check-tenant-isolation.sh
+
+      - name: Type-check repaired branch
+        run: npm run type-check
+
       - name: Upload Autopilot guard report
         if: always()
         uses: actions/upload-artifact@v4
@@ -244,8 +267,21 @@ jobs:
             /tmp/autopilot-guard-report.json
           if-no-files-found: ignore
 
+      - name: Tenant safety tests
+        id: safety_tests
+        run: >-
+          npx vitest run
+          lib/masjidweb/bootstrap-tenant-owner.test.ts
+          lib/masjidweb/provisioned-tenant-rbac.test.ts
+
+      - name: Verify production build
+        id: build
+        if: steps.safety_tests.outcome == 'success'
+        run: npm run build
+
       - name: Commit and push repairs
         id: push
+        if: steps.safety_tests.outcome == 'success' && steps.build.outcome == 'success'
         run: |
           if git diff --quiet && git diff --cached --quiet; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -255,23 +291,6 @@ jobs:
           git commit -m "fix(ai): resolve safe update conflicts [automated]"
           git push origin HEAD
           echo "changed=true" >> "$GITHUB_OUTPUT"
-
-      - name: Install dependencies for build
-        if: steps.push.outputs.changed == 'true'
-        run: npm install --no-audit --no-fund --legacy-peer-deps
-
-      - name: Tenant safety tests
-        id: safety_tests
-        if: steps.push.outputs.changed == 'true'
-        run: >-
-          npx vitest run
-          lib/masjidweb/bootstrap-tenant-owner.test.ts
-          lib/masjidweb/provisioned-tenant-rbac.test.ts
-
-      - name: Verify production build
-        id: build
-        if: steps.push.outputs.changed == 'true' && steps.safety_tests.outcome == 'success'
-        run: npm run build
 
       - name: Re-run update safety check
         if: steps.push.outputs.changed == 'true'
@@ -295,17 +314,23 @@ jobs:
         with:
           script: |
             const prNumber = Number.parseInt('${{ inputs.pr_number }}', 10);
-            const repairOutcome = '${{ steps.repair.outcome }}';
+            const repairMode = '${{ inputs.repair_mode }}';
+            const repairOutcome = repairMode === 'premium_ai' ? '${{ steps.premium_repair.outcome }}' : '${{ steps.repair.outcome }}';
+            const premiumStatus = '${{ steps.premium_repair.outputs.status }}' || 'skipped';
+            const premiumApplied = Number.parseInt('${{ steps.premium_repair.outputs.applied_count }}' || '0', 10);
             const pushChanged = '${{ steps.push.outputs.changed }}' === 'true';
             const safetyOutcome = '${{ steps.safety_tests.outcome }}' || 'skipped';
             const buildOutcome = '${{ steps.build.outcome }}' || 'skipped';
             const deterministicStatus = '${{ steps.deterministic_repair.outputs.status }}' || 'unknown';
             const deterministicRepaired = Number.parseInt('${{ steps.deterministic_repair.outputs.repaired_count }}' || '0', 10);
             const deterministicBlocked = Number.parseInt('${{ steps.deterministic_repair.outputs.blocked_count }}' || '0', 10);
-            let body = '### MasjidWeb Autopilot repair\n\n';
+            let body = repairMode === 'premium_ai' ? '### MasjidWeb Premium AI repair\n\n' : '### MasjidWeb Autopilot repair\n\n';
             body += `Deterministic repair status: **${deterministicStatus}**. Repaired: **${Number.isFinite(deterministicRepaired) ? deterministicRepaired : 0}**. Blocked: **${Number.isFinite(deterministicBlocked) ? deterministicBlocked : 0}**.\n\n`;
-            if (deterministicStatus === 'blocked') {
-              body += 'Autopilot v2.2 blocked this update to protect tenant data. Review the `core-update-autopilot-repair` artifact for exact missing invariants.\n';
+            if (repairMode === 'premium_ai') {
+              body += `Premium AI patch status: **${premiumStatus}**. Applied files: **${Number.isFinite(premiumApplied) ? premiumApplied : 0}**.\n\n`;
+            }
+            if (deterministicStatus === 'blocked' && !(repairMode === 'premium_ai' && premiumStatus === 'applied')) {
+              body += 'Autopilot blocked this update to protect tenant data and Premium AI did not leave an applied repair. Review the repair artifacts for exact missing invariants.\n';
               body += 'Do **not** merge until a developer resolves the blocked files and the normal PR checks finish green.\n';
             } else if (repairOutcome === 'failure') {
               body += 'AI repair **failed**. Check the workflow logs for OpenRouter or conflict resolution errors.\n';
@@ -319,7 +344,9 @@ jobs:
               body += 'AI repair **pushed** conflict resolutions, but the **production build failed** in this workflow.\n';
               body += 'Do **not** merge until the build is fixed and the normal PR checks finish green.\n';
             } else {
-              body += 'AI repair **committed and pushed** conflict resolutions to this branch.\n';
+              body += repairMode === 'premium_ai'
+                ? 'Premium AI repair **applied, verified, committed, and pushed** conflict resolutions to this branch.\n'
+                : 'AI repair **committed and pushed** conflict resolutions to this branch.\n';
               body += 'This workflow passed local tenant safety tests and a production build, but **wait for the normal PR CI checks to finish green** before approving merge.\n';
               body += 'Refresh the admin dashboard status after PR CI completes.\n';
             }

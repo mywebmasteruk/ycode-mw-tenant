@@ -20,6 +20,92 @@ export type OpenRouterRepairResult = {
   finishReason: string | null;
 };
 
+export type OpenRouterModelSummary = {
+  id: string;
+  name?: string;
+  created?: number;
+};
+
+const LATEST_CLAUDE_FRONTIER_DIRECTIVE = 'latest_claude_frontier';
+const OPENROUTER_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._:-]*$/;
+
+export function isLatestClaudeFrontierDirective(model: string | null | undefined): boolean {
+  return model?.trim() === LATEST_CLAUDE_FRONTIER_DIRECTIVE;
+}
+
+export function isValidOpenRouterModelId(model: string | null | undefined): boolean {
+  return typeof model === 'string' && OPENROUTER_MODEL_ID_PATTERN.test(model.trim());
+}
+
+function claudeFrontierRank(model: OpenRouterModelSummary): number {
+  const haystack = `${model.id} ${model.name ?? ''}`.toLowerCase();
+  if (!haystack.includes('claude')) return 0;
+  let rank = 10;
+  if (haystack.includes('opus')) rank += 1000;
+  if (haystack.includes('sonnet')) rank += 800;
+  if (haystack.includes('4.5')) rank += 80;
+  if (haystack.includes('4.1')) rank += 70;
+  if (haystack.includes('4')) rank += 60;
+  if (haystack.includes('3.7')) rank += 30;
+  if (haystack.includes('3.5')) rank += 20;
+  if (haystack.includes('latest')) rank += 15;
+  if (model.created) rank += Math.min(50, Math.floor(model.created / 10_000_000));
+  return rank;
+}
+
+export function selectLatestClaudeFrontierModel(models: OpenRouterModelSummary[]): string | null {
+  const candidates = models
+    .filter((model) => model.id.startsWith('anthropic/') && claudeFrontierRank(model) > 0)
+    .sort((a, b) => claudeFrontierRank(b) - claudeFrontierRank(a) || (b.created ?? 0) - (a.created ?? 0));
+  return candidates[0]?.id ?? null;
+}
+
+export async function fetchOpenRouterModels(apiKey: string): Promise<OpenRouterModelSummary[]> {
+  const res = await fetch('https://openrouter.ai/api/v1/models', {
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'HTTP-Referer': process.env.OPENROUTER_SITE_URL?.trim() || 'https://github.com/mywebmasteruk/ycode-mw-tenant',
+      'X-Title': process.env.OPENROUTER_APP_NAME?.trim() || 'MasjidWeb AI Safe Update Repair',
+    },
+  });
+  const raw = await res.text();
+  let parsed: { data?: OpenRouterModelSummary[]; error?: { message?: string } } = {};
+  try {
+    parsed = JSON.parse(raw) as typeof parsed;
+  } catch {
+    throw new Error(res.ok ? 'OpenRouter models endpoint returned invalid JSON' : `OpenRouter models error (${res.status})`);
+  }
+  if (!res.ok) {
+    throw new Error(parsed.error?.message || raw.trim().slice(0, 300) || `OpenRouter models request failed (${res.status})`);
+  }
+  return Array.isArray(parsed.data) ? parsed.data.filter((model) => typeof model.id === 'string') : [];
+}
+
+export async function resolveOpenRouterRepairModel(options: {
+  apiKey: string;
+  requestedModel?: string | null;
+  fallbackModel?: string;
+}): Promise<string> {
+  const requested = options.requestedModel?.trim();
+  const fallback = options.fallbackModel ?? DEFAULT_PREMIUM_AI_REPAIR_MODEL;
+  if (requested && !isLatestClaudeFrontierDirective(requested)) {
+    if (!isValidOpenRouterModelId(requested)) {
+      throw new Error('OpenRouter model must be a model ID such as anthropic/claude-opus-4.1, or latest_claude_frontier.');
+    }
+    return requested;
+  }
+
+  try {
+    const latest = selectLatestClaudeFrontierModel(await fetchOpenRouterModels(options.apiKey));
+    if (latest) return latest;
+  } catch (error) {
+    console.warn(
+      `Could not load OpenRouter model list; falling back to configured repair model: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return fallback;
+}
+
 export function stripCodeFences(text: string): string {
   const trimmed = text.trim();
   const fenced = trimmed.match(/^```(?:[\w-]+)?\s*\n([\s\S]*?)\n```$/);

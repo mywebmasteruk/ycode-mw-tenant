@@ -1,9 +1,19 @@
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { extname, join } from 'node:path';
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, extname, join } from 'node:path';
 import { execSync } from 'node:child_process';
+import { inspectTenantSensitiveContent } from '../../lib/masjidweb/autopilot-tenant-invariants';
+import {
+  type PremiumAiPatch,
+  assertPatchTargets,
+  filesMentionedInDiff,
+} from '../../lib/masjidweb/premium-ai-patch';
 import {
   DEFAULT_PREMIUM_AI_REPAIR_MODEL,
+  assertBalancedDelimiters,
+  assertNoConflictMarkers,
   requestOpenRouterRepair,
+  resolveOpenRouterRepairModel,
   stripCodeFences,
 } from '../../lib/masjidweb/openrouter-repair';
 
@@ -15,7 +25,7 @@ const AUTOPILOT_REPORT_JSON_PATH = process.env.AUTOPILOT_REPAIR_REPORT_JSON_PATH
 const MAX_CONTEXT_FILES = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_FILES, 8);
 const MAX_FILE_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_FILE_CHARS, 60_000);
 const MAX_DOC_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_DOC_CHARS, 12_000);
-const MAX_REPLY_TOKENS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_TOKENS, 16_000);
+const MAX_REPLY_TOKENS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_TOKENS, 24_000);
 
 const TENANT_INVARIANT_DOCS = [
   'docs/masjidweb-core-seams.md',
@@ -30,7 +40,7 @@ const SAFETY_RULES = [
   'Preserve applyTenantEq, resolveEffectiveTenantId, and runWithEffectiveTenantId call paths.',
   'Never add service-role reads without tenant filters or documented tenant-owner joins.',
   'Do not auto-merge, approve, mark ready, or imply the pull request is safe.',
-  'If safety cannot be proven from the supplied context, leave the file blocked and explain exactly what must be reviewed.',
+  'If safety cannot be proven from the supplied context, return blocked with no diff.',
 ];
 
 type AutopilotReportJson = {
@@ -41,22 +51,30 @@ type AutopilotReportJson = {
 
 type PremiumAiFileAssessment = {
   filePath: string;
-  verdict: 'blocked' | 'safe_candidate' | 'needs_human_review';
+  verdict: 'blocked' | 'safe_candidate' | 'needs_human_review' | 'applied';
   summary: string;
   safetyConcerns: string[];
   unifiedDiff: string | null;
 };
 
 type PremiumAiReport = {
-  status: 'blocked' | 'no_conflicts' | 'model_failed';
-  mode: 'dry_run_report';
+  status: 'blocked' | 'applied' | 'no_conflicts' | 'model_failed' | 'patch_rejected';
+  mode: 'apply_patches';
   model: string;
   generatedAt: string;
   conflictFiles: string[];
   blockedFiles: string[];
+  appliedFiles: string[];
   summary: string;
   files: PremiumAiFileAssessment[];
   nextActions: string[];
+};
+
+type ParsedModelRepair = {
+  summary: string;
+  files: PremiumAiFileAssessment[];
+  nextActions: string[];
+  patches: PremiumAiPatch[];
 };
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
@@ -75,6 +93,10 @@ function run(command: string): string {
       .join('\n')
       .trim();
   }
+}
+
+function runOrThrow(command: string): string {
+  return execSync(command, { cwd: REPO_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
 
 function listLines(command: string): string[] {
@@ -163,17 +185,22 @@ function buildPrompt(conflictFiles: string[], blockedFiles: string[]): string {
   const fileContexts = selectedFiles.map(contextForConflictFile).join('\n\n---\n\n');
 
   return [
-    'MasjidWeb Premium AI Repair review request.',
+    'MasjidWeb Premium AI Repair request.',
     '',
-    'This is DRY-RUN REPORT MODE. Do not claim the pull request is resolved. Return machine-readable advice only.',
+    'Return a strict patch payload. The workflow will apply the patch only on the safe-update PR branch, then run tenant safety checks before committing.',
     '',
     'Safety rules:',
     ...SAFETY_RULES.map((rule) => `- ${rule}`),
     '',
     'Required output schema: return ONLY JSON, no markdown fences:',
-    '{ "summary": string, "files": [{ "filePath": string, "verdict": "blocked" | "safe_candidate" | "needs_human_review", "summary": string, "safetyConcerns": string[], "unifiedDiff": string | null }], "nextActions": string[] }',
+    '{ "summary": string, "files": [{ "filePath": string, "verdict": "blocked" | "safe_candidate" | "needs_human_review", "summary": string, "safetyConcerns": string[], "unifiedDiff": string | null }], "patches": [{ "filePath": string, "unifiedDiff": string }], "nextActions": string[] }',
     '',
-    'Do not invent files not shown. If you include unifiedDiff, it must be a standard unified diff and must preserve all safety rules. Prefer null when uncertain.',
+    'Patch requirements:',
+    '- Every patch must be a standard unified diff with --- and +++ headers.',
+    '- Diff paths must target only the conflicted files listed below.',
+    '- Prefer a small complete conflict resolution over broad rewrites.',
+    '- Use verdict "blocked" and omit patches when tenant isolation cannot be proven.',
+    '- Do not include prose outside JSON.',
     '',
     `Exact conflicted files: ${conflictFiles.join(', ') || '(none)'}`,
     `Exact blocked files: ${blockedFiles.join(', ') || '(none)'}`,
@@ -189,42 +216,91 @@ function buildPrompt(conflictFiles: string[], blockedFiles: string[]): string {
   ].join('\n');
 }
 
-function parseModelReport(raw: string, conflictFiles: string[], blockedFiles: string[], model: string): PremiumAiReport {
+function parseJsonObject(raw: string): Record<string, unknown> {
   const stripped = stripCodeFences(raw);
-  const parsed = JSON.parse(stripped) as {
-    summary?: unknown;
-    files?: unknown;
-    nextActions?: unknown;
-  };
-  const files = Array.isArray(parsed.files)
-    ? parsed.files.map((entry): PremiumAiFileAssessment => {
-      const item = entry as Partial<PremiumAiFileAssessment>;
-      const verdict = item.verdict === 'safe_candidate' || item.verdict === 'needs_human_review' ? item.verdict : 'blocked';
-      return {
-        filePath: typeof item.filePath === 'string' ? item.filePath : '(unknown)',
-        verdict,
-        summary: typeof item.summary === 'string' ? item.summary : 'No summary returned.',
-        safetyConcerns: Array.isArray(item.safetyConcerns)
-          ? item.safetyConcerns.filter((value): value is string => typeof value === 'string')
-          : [],
-        unifiedDiff: typeof item.unifiedDiff === 'string' && item.unifiedDiff.trim() ? item.unifiedDiff : null,
-      };
-    })
-    : [];
+  try {
+    return JSON.parse(stripped) as Record<string, unknown>;
+  } catch {
+    const first = stripped.indexOf('{');
+    const last = stripped.lastIndexOf('}');
+    if (first === -1 || last === -1 || last <= first) throw new Error('No JSON object found in model response');
+    return JSON.parse(stripped.slice(first, last + 1)) as Record<string, unknown>;
+  }
+}
 
+function normalizeAssessment(entry: unknown): PremiumAiFileAssessment {
+  const item = entry as Partial<PremiumAiFileAssessment>;
+  const verdict =
+    item.verdict === 'safe_candidate' || item.verdict === 'needs_human_review' || item.verdict === 'applied'
+      ? item.verdict
+      : 'blocked';
   return {
-    status: conflictFiles.length === 0 ? 'no_conflicts' : 'blocked',
-    mode: 'dry_run_report',
-    model,
-    generatedAt: new Date().toISOString(),
-    conflictFiles,
-    blockedFiles,
-    summary: typeof parsed.summary === 'string' ? parsed.summary : 'Premium AI returned a report.',
+    filePath: typeof item.filePath === 'string' ? item.filePath : '(unknown)',
+    verdict,
+    summary: typeof item.summary === 'string' ? item.summary : 'No summary returned.',
+    safetyConcerns: Array.isArray(item.safetyConcerns)
+      ? item.safetyConcerns.filter((value): value is string => typeof value === 'string')
+      : [],
+    unifiedDiff: typeof item.unifiedDiff === 'string' && item.unifiedDiff.trim() ? item.unifiedDiff : null,
+  };
+}
+
+function parsePatch(entry: unknown): PremiumAiPatch | null {
+  const item = entry as Partial<PremiumAiPatch>;
+  if (typeof item.filePath !== 'string' || typeof item.unifiedDiff !== 'string') return null;
+  const filePath = item.filePath.trim();
+  const unifiedDiff = item.unifiedDiff.trim();
+  if (!filePath || !unifiedDiff) return null;
+  return { filePath, unifiedDiff };
+}
+
+function parseModelRepair(raw: string): ParsedModelRepair {
+  const parsed = parseJsonObject(raw);
+  const files = Array.isArray(parsed.files) ? parsed.files.map(normalizeAssessment) : [];
+  const explicitPatches = Array.isArray(parsed.patches) ? parsed.patches.map(parsePatch).filter((patch): patch is PremiumAiPatch => Boolean(patch)) : [];
+  const filePatches = files
+    .filter((file) => file.verdict === 'safe_candidate' && file.unifiedDiff)
+    .map((file) => ({ filePath: file.filePath, unifiedDiff: file.unifiedDiff as string }));
+  return {
+    summary: typeof parsed.summary === 'string' ? parsed.summary : 'Premium AI returned patch guidance.',
     files,
     nextActions: Array.isArray(parsed.nextActions)
       ? parsed.nextActions.filter((value): value is string => typeof value === 'string')
-      : ['Review the report, resolve conflicts manually, then run Autopilot guard and tenant isolation checks.'],
+      : ['Review workflow logs and rerun Premium AI Repair or repair manually.'],
+    patches: [...explicitPatches, ...filePatches],
   };
+}
+
+function applyPatch(patch: PremiumAiPatch): void {
+  const tempDir = mkdtempSync(join(tmpdir(), 'mw-premium-ai-'));
+  const patchPath = join(tempDir, `${basename(patch.filePath).replace(/[^a-zA-Z0-9._-]/g, '_')}.patch`);
+  writeFileSync(patchPath, `${patch.unifiedDiff.trim()}\n`);
+  runOrThrow(`git apply --check --whitespace=nowarn ${JSON.stringify(patchPath)}`);
+  runOrThrow(`git apply --whitespace=nowarn ${JSON.stringify(patchPath)}`);
+}
+
+function validateRepairedFile(filePath: string): void {
+  const absolutePath = join(REPO_ROOT, filePath);
+  if (!existsSync(absolutePath)) throw new Error(`Repaired file is missing: ${filePath}`);
+  const content = readFileSync(absolutePath, 'utf8');
+  assertNoConflictMarkers(content, filePath);
+  assertBalancedDelimiters(content, filePath);
+  const invariantFailures = inspectTenantSensitiveContent(filePath, content);
+  if (invariantFailures.length > 0) {
+    throw new Error(`Tenant invariant failures after Premium AI patch in ${filePath}: ${invariantFailures.join('; ')}`);
+  }
+}
+
+function stageRepairedFiles(files: string[]): void {
+  for (const file of files) {
+    runOrThrow(`git add -- ${JSON.stringify(file)}`);
+  }
+}
+
+function setGithubOutput(name: string, value: string): void {
+  const outputPath = process.env.GITHUB_OUTPUT;
+  if (!outputPath) return;
+  appendFileSync(outputPath, `${name}=${value.replaceAll('\n', ' ')}\n`);
 }
 
 function formatMarkdown(report: PremiumAiReport): string {
@@ -240,7 +316,13 @@ function formatMarkdown(report: PremiumAiReport): string {
     '',
     '## Safety posture',
     '',
-    'This first slice intentionally does not auto-apply model output. A human or a later guarded patch-applier must review any suggested diff, then run conflict marker checks, Autopilot guard, tenant isolation, type-check, build, and normal PR CI before approval.',
+    report.status === 'applied'
+      ? 'Premium AI patches were applied only to the safe-update PR branch and staged for workflow verification. Approval remains locked until checks and normal PR CI are green.'
+      : 'Premium AI did not leave a committable repair. Production remains unchanged and approval must stay blocked.',
+    '',
+    '## Applied files',
+    '',
+    report.appliedFiles.length > 0 ? report.appliedFiles.map((file) => `- ${file}`).join('\n') : '- None',
     '',
     '## Files',
     '',
@@ -256,7 +338,7 @@ function formatMarkdown(report: PremiumAiReport): string {
       lines.push('- Safety concerns:', ...file.safetyConcerns.map((concern) => `  - ${concern}`));
     }
     if (file.unifiedDiff) {
-      lines.push('', '<details><summary>Suggested unified diff (not applied)</summary>', '', '```diff', file.unifiedDiff, '```', '', '</details>');
+      lines.push('', '<details><summary>Unified diff</summary>', '', '```diff', file.unifiedDiff, '```', '', '</details>');
     }
     lines.push('');
   }
@@ -272,26 +354,50 @@ function writeReports(report: PremiumAiReport): void {
   if (process.env.GITHUB_STEP_SUMMARY) {
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, markdown);
   }
+  setGithubOutput('status', report.status);
+  setGithubOutput('applied_count', String(report.appliedFiles.length));
   console.log(markdown);
+}
+
+function baseReport(args: {
+  status: PremiumAiReport['status'];
+  model: string;
+  conflictFiles: string[];
+  blockedFiles: string[];
+  appliedFiles?: string[];
+  summary: string;
+  files?: PremiumAiFileAssessment[];
+  nextActions?: string[];
+}): PremiumAiReport {
+  return {
+    status: args.status,
+    mode: 'apply_patches',
+    model: args.model,
+    generatedAt: new Date().toISOString(),
+    conflictFiles: args.conflictFiles,
+    blockedFiles: args.blockedFiles,
+    appliedFiles: args.appliedFiles ?? [],
+    summary: args.summary,
+    files: args.files ?? [],
+    nextActions: args.nextActions ?? ['Leave this update blocked until repaired and verified.'],
+  };
 }
 
 async function main(): Promise<void> {
   const conflictFiles = listConflictFiles();
   const autopilotJson = readAutopilotJson();
   const blockedFiles = blockedFilesFromAutopilot(autopilotJson, conflictFiles);
+  const requestedModel = process.env.OPENROUTER_REPAIR_MODEL?.trim() || process.env.OPENROUTER_MODEL?.trim() || DEFAULT_PREMIUM_AI_REPAIR_MODEL;
 
   if (conflictFiles.length === 0) {
-    writeReports({
+    writeReports(baseReport({
       status: 'no_conflicts',
-      mode: 'dry_run_report',
-      model: process.env.OPENROUTER_REPAIR_MODEL?.trim() || process.env.OPENROUTER_MODEL?.trim() || DEFAULT_PREMIUM_AI_REPAIR_MODEL,
-      generatedAt: new Date().toISOString(),
+      model: requestedModel,
       conflictFiles,
       blockedFiles,
-      summary: 'No conflicted files or conflict markers were found, so Premium AI Repair had nothing to review.',
-      files: [],
+      summary: 'No conflicted files or conflict markers were found, so Premium AI Repair had nothing to apply.',
       nextActions: ['Continue normal CI, preview, and approval gates.'],
-    });
+    }));
     return;
   }
 
@@ -299,8 +405,11 @@ async function main(): Promise<void> {
   if (!apiKey) {
     throw new Error('OPENROUTER_API_KEY is not set. Add it as a GitHub Actions secret before using Premium AI Repair.');
   }
+  if (!apiKey.startsWith('sk-or-') && !apiKey.startsWith('sk-')) {
+    throw new Error('OPENROUTER_API_KEY looks invalid. Set a real OpenRouter key as a GitHub Actions secret.');
+  }
 
-  const model = process.env.OPENROUTER_REPAIR_MODEL?.trim() || process.env.OPENROUTER_MODEL?.trim() || DEFAULT_PREMIUM_AI_REPAIR_MODEL;
+  const model = await resolveOpenRouterRepairModel({ apiKey, requestedModel });
   const result = await requestOpenRouterRepair({
     apiKey,
     model,
@@ -308,9 +417,9 @@ async function main(): Promise<void> {
       {
         role: 'system',
         content: [
-          'You are a frontier-model code reviewer for MasjidWeb core-update merge conflicts.',
+          'You are a frontier-model code repair agent for MasjidWeb core-update merge conflicts.',
           'Return only valid JSON using the requested schema.',
-          'Your job is to identify safe repair candidates, not to approve or merge.',
+          'Generate safe unified diffs only when tenant invariants are preserved.',
           ...SAFETY_RULES,
         ].join('\n'),
       },
@@ -319,27 +428,76 @@ async function main(): Promise<void> {
     maxTokens: MAX_REPLY_TOKENS,
   });
 
-  let report: PremiumAiReport;
+  let parsed: ParsedModelRepair;
   try {
-    report = parseModelReport(result.reply, conflictFiles, blockedFiles, result.model);
+    parsed = parseModelRepair(result.reply);
   } catch (error) {
-    report = {
+    writeReports(baseReport({
       status: 'model_failed',
-      mode: 'dry_run_report',
       model: result.model,
-      generatedAt: new Date().toISOString(),
       conflictFiles,
       blockedFiles,
       summary: `Premium AI response was not parseable JSON: ${error instanceof Error ? error.message : String(error)}`,
-      files: [],
       nextActions: ['Leave this update blocked. Inspect the workflow log, then retry Premium AI Repair or repair manually.'],
-    };
+    }));
+    throw error;
   }
 
-  writeReports(report);
+  const allowedFiles = new Set(conflictFiles);
+  const patches = parsed.patches.filter((patch, index, list) =>
+    list.findIndex((other) => other.filePath === patch.filePath && other.unifiedDiff === patch.unifiedDiff) === index,
+  );
 
-  if (report.status !== 'no_conflicts') {
-    throw new Error('Premium AI Repair is currently report-only. Suggested diffs were not applied; the update remains blocked until reviewed and verified.');
+  if (patches.length === 0) {
+    writeReports(baseReport({
+      status: 'blocked',
+      model: result.model,
+      conflictFiles,
+      blockedFiles,
+      summary: parsed.summary || 'Premium AI did not return an applicable patch.',
+      files: parsed.files,
+      nextActions: parsed.nextActions,
+    }));
+    throw new Error('Premium AI did not return any applicable unified diffs.');
+  }
+
+  try {
+    for (const patch of patches) {
+      assertPatchTargets(patch, allowedFiles);
+      applyPatch(patch);
+    }
+    const appliedFiles = uniqueSorted(patches.flatMap((patch) => filesMentionedInDiff(patch.unifiedDiff)));
+    for (const file of appliedFiles) {
+      validateRepairedFile(file);
+    }
+    stageRepairedFiles(appliedFiles);
+    writeReports(baseReport({
+      status: 'applied',
+      model: result.model,
+      conflictFiles,
+      blockedFiles,
+      appliedFiles,
+      summary: parsed.summary || `Premium AI applied repairs to ${appliedFiles.length} file(s).`,
+      files: parsed.files.map((file) =>
+        appliedFiles.includes(file.filePath) ? { ...file, verdict: 'applied' as const } : file,
+      ),
+      nextActions: [
+        'Run completeness, Autopilot guard, tenant isolation, type-check, build, and normal PR CI before approval.',
+        ...parsed.nextActions,
+      ],
+    }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    writeReports(baseReport({
+      status: 'patch_rejected',
+      model: result.model,
+      conflictFiles,
+      blockedFiles,
+      summary: `Premium AI patch was rejected before commit: ${message}`,
+      files: parsed.files,
+      nextActions: ['Leave approval blocked. Retry Premium AI Repair or repair manually with tenant-scope review.'],
+    }));
+    throw error;
   }
 }
 

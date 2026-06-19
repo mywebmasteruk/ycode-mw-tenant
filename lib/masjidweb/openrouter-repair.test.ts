@@ -3,6 +3,9 @@ import {
   assertBalancedDelimiters,
   assertNoConflictMarkers,
   checkBalancedDelimiters,
+  isLatestClaudeFrontierDirective,
+  isValidOpenRouterModelId,
+  selectLatestClaudeFrontierModel,
   stripCodeFences,
 } from "./openrouter-repair";
 
@@ -58,5 +61,24 @@ describe("checkBalancedDelimiters", () => {
     expect(() => assertBalancedDelimiters("function f() {\n", "lib/a.ts")).toThrow(
       /unbalanced/,
     );
+  });
+});
+
+describe("OpenRouter model selection", () => {
+  it("accepts OpenRouter model IDs and the latest Claude directive", () => {
+    expect(isValidOpenRouterModelId("anthropic/claude-opus-4.1")).toBe(true);
+    expect(isValidOpenRouterModelId("Anthropic: Claude Opus")).toBe(false);
+    expect(isLatestClaudeFrontierDirective("latest_claude_frontier")).toBe(true);
+  });
+
+  it("prefers the latest Claude Opus/Sonnet frontier model", () => {
+    expect(
+      selectLatestClaudeFrontierModel([
+        { id: "anthropic/claude-3.5-sonnet", name: "Claude 3.5 Sonnet", created: 1 },
+        { id: "anthropic/claude-sonnet-4", name: "Claude Sonnet 4", created: 2 },
+        { id: "anthropic/claude-opus-4.1", name: "Claude Opus 4.1", created: 3 },
+        { id: "google/gemini-2.5-pro", name: "Gemini", created: 4 },
+      ]),
+    ).toBe("anthropic/claude-opus-4.1");
   });
 });
