@@ -1,16 +1,12 @@
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { basename, extname, join } from 'node:path';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { extname, join } from 'node:path';
 import { execSync } from 'node:child_process';
 import { inspectTenantSensitiveContent } from '../../lib/masjidweb/autopilot-tenant-invariants';
 import {
-  type PremiumAiPatch,
   type PremiumAiResolvedFile,
-  assertPatchTargets,
   assertResolvedFileContent,
   assertResolvedFileTarget,
   decodePremiumAiContent,
-  filesMentionedInDiff,
 } from '../../lib/masjidweb/premium-ai-patch';
 import {
   DEFAULT_PREMIUM_AI_REPAIR_MODEL,
@@ -27,10 +23,11 @@ const REPORT_PATH = process.env.PREMIUM_AI_REPAIR_REPORT_PATH || '/tmp/premium-a
 const REPORT_JSON_PATH = process.env.PREMIUM_AI_REPAIR_REPORT_JSON_PATH || '/tmp/premium-ai-repair-report.json';
 const AUTOPILOT_REPORT_PATH = process.env.AUTOPILOT_REPAIR_REPORT_PATH || '/tmp/autopilot-repair-report.md';
 const AUTOPILOT_REPORT_JSON_PATH = process.env.AUTOPILOT_REPAIR_REPORT_JSON_PATH || '/tmp/autopilot-repair-report.json';
-const MAX_CONTEXT_FILES = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_FILES, 8);
+const REPAIR_BATCH_SIZE = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_BATCH_SIZE, 1);
 const MAX_FILE_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_FILE_CHARS, 60_000);
+const MAX_RETRY_FILE_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_RETRY_MAX_FILE_CHARS, 40_000);
 const MAX_DOC_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_DOC_CHARS, 12_000);
-const MAX_REPLY_TOKENS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_TOKENS, 24_000);
+const MAX_REPLY_TOKENS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_TOKENS, 32_000);
 
 const TENANT_INVARIANT_DOCS = [
   'docs/masjidweb-core-seams.md',
@@ -62,23 +59,48 @@ type PremiumAiFileAssessment = {
   unifiedDiff: string | null;
 };
 
+export type PremiumAiFileRepairStatus =
+  | 'applied'
+  | 'blocked'
+  | 'model_truncated'
+  | 'invalid_json'
+  | 'invariant_failed'
+  | 'skipped';
+
+export type PremiumAiFileRepairResult = {
+  filePath: string;
+  status: PremiumAiFileRepairStatus;
+  summary: string;
+  safetyConcerns: string[];
+  applied: boolean;
+  retryUsed: boolean;
+  model: string;
+  finishReason: string | null;
+  error: string | null;
+};
+
+type PremiumAiReportStatus =
+  | 'blocked'
+  | 'applied'
+  | 'content_replacement_applied'
+  | 'partial_failed'
+  | 'no_conflicts'
+  | 'model_failed'
+  | 'patch_parse_failed'
+  | 'patch_apply_failed';
+
 type PremiumAiReport = {
-  status:
-    | 'blocked'
-    | 'applied'
-    | 'content_replacement_applied'
-    | 'no_conflicts'
-    | 'model_failed'
-    | 'patch_parse_failed'
-    | 'patch_apply_failed';
+  status: PremiumAiReportStatus;
   mode: 'apply_repairs';
   model: string;
   generatedAt: string;
+  repairBatchSize: number;
   conflictFiles: string[];
   blockedFiles: string[];
   appliedFiles: string[];
   summary: string;
   files: PremiumAiFileAssessment[];
+  fileResults: PremiumAiFileRepairResult[];
   nextActions: string[];
 };
 
@@ -86,8 +108,17 @@ type ParsedModelRepair = {
   summary: string;
   files: PremiumAiFileAssessment[];
   nextActions: string[];
-  patches: PremiumAiPatch[];
   resolvedFiles: PremiumAiResolvedFile[];
+};
+
+type FileRepairAttempt = 'initial' | 'truncation_retry';
+
+type RepairFilesOneAtATimeArgs = {
+  targetFiles: string[];
+  blockedFiles: string[];
+  requestFile: (filePath: string, attempt: FileRepairAttempt) => Promise<OpenRouterRepairResult>;
+  applyFile: (file: PremiumAiResolvedFile, allowedFiles: Set<string>) => string;
+  validateFile: (filePath: string) => void;
 };
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
@@ -158,20 +189,24 @@ function blockedFilesFromAutopilot(report: AutopilotReportJson | null, conflictF
   return uniqueSorted([...(report.blockedFiles ?? []), ...actionBlocked]);
 }
 
-function contextForConflictFile(filePath: string): string {
-  const content = readRepoFile(filePath, MAX_FILE_CHARS);
-  const base = run(`git show :1:${JSON.stringify(filePath)}`);
-  const ours = run(`git show :2:${JSON.stringify(filePath)}`);
-  const theirs = run(`git show :3:${JSON.stringify(filePath)}`);
+function contextForConflictFile(filePath: string, maxFileChars = MAX_FILE_CHARS, includeStages = true): string {
+  const content = readRepoFile(filePath, maxFileChars);
   const sections = [
     `## ${filePath}`,
     '',
     '### Working tree content with conflict markers',
     fenced(content || '(file missing or not readable)', extname(filePath)),
   ];
-  if (base) sections.push('### Merge base excerpt', fenced(trimTo(base, 16_000), extname(filePath)));
-  if (ours) sections.push('### Ours excerpt', fenced(trimTo(ours, 16_000), extname(filePath)));
-  if (theirs) sections.push('### Theirs excerpt', fenced(trimTo(theirs, 16_000), extname(filePath)));
+
+  if (includeStages) {
+    const base = run(`git show :1:${JSON.stringify(filePath)}`);
+    const ours = run(`git show :2:${JSON.stringify(filePath)}`);
+    const theirs = run(`git show :3:${JSON.stringify(filePath)}`);
+    if (base) sections.push('### Merge base excerpt', fenced(trimTo(base, 16_000), extname(filePath)));
+    if (ours) sections.push('### Ours excerpt', fenced(trimTo(ours, 16_000), extname(filePath)));
+    if (theirs) sections.push('### Theirs excerpt', fenced(trimTo(theirs, 16_000), extname(filePath)));
+  }
+
   return sections.join('\n\n');
 }
 
@@ -185,81 +220,76 @@ function fenced(value: string, extension: string): string {
   return ['```' + language, value, '```'].join('\n');
 }
 
-function buildPrompt(conflictFiles: string[], blockedFiles: string[]): string {
-  const docs = TENANT_INVARIANT_DOCS
+function requiredOutputSchema(): string {
+  return '{ "summary": string, "files": [{ "filePath": string, "verdict": "blocked" | "safe_candidate" | "needs_human_review", "summary": string, "safetyConcerns": string[], "content": string | null, "contentBase64": string | null, "unifiedDiff": null }], "resolvedFiles": [{ "filePath": string, "content": string }], "patches": [], "nextActions": string[] }';
+}
+
+function tenantInvariantDocs(): string {
+  return TENANT_INVARIANT_DOCS
     .map((path) => {
       const content = readRepoFile(path);
       return content ? `## ${path}\n\n${content}` : '';
     })
     .filter(Boolean)
     .join('\n\n');
-  const autopilotMarkdown = readIfExists(AUTOPILOT_REPORT_PATH, 80_000);
-  const selectedFiles = conflictFiles.slice(0, MAX_CONTEXT_FILES);
-  const fileContexts = selectedFiles.map(contextForConflictFile).join('\n\n---\n\n');
+}
 
+function buildPromptForFile(filePath: string, conflictFiles: string[], blockedFiles: string[]): string {
+  const autopilotMarkdown = readIfExists(AUTOPILOT_REPORT_PATH, 80_000);
   return [
-    'MasjidWeb Premium AI Repair request.',
+    'MasjidWeb Premium AI Repair request for one file only.',
     '',
-    'Return strict resolved-file JSON. The workflow will write replacements only for conflicted files on the safe-update PR branch, then run tenant safety checks before committing.',
+    `Target file: ${filePath}`,
+    '',
+    'Return strict resolved-file JSON for the target file only. The workflow will write the replacement only after validating path, conflict markers, delimiter balance, and tenant invariants.',
     '',
     'Safety rules:',
     ...SAFETY_RULES.map((rule) => `- ${rule}`),
     '',
     'Required output schema: return ONLY JSON, no markdown fences:',
-    '{ "summary": string, "files": [{ "filePath": string, "verdict": "blocked" | "safe_candidate" | "needs_human_review", "summary": string, "safetyConcerns": string[], "content": string | null, "contentBase64": string | null, "unifiedDiff": string | null }], "resolvedFiles": [{ "filePath": string, "content": string }], "patches": [{ "filePath": string, "unifiedDiff": string }], "nextActions": string[] }',
+    requiredOutputSchema(),
     '',
     'Resolved-file requirements:',
-    '- Prefer resolvedFiles/content over unified diffs. Return the complete final file content for each repaired conflicted file.',
-    '- resolvedFiles paths must target only the conflicted files listed below.',
+    '- Return exactly one resolvedFiles entry when safe, and it must be the complete final content for the target file.',
+    '- Do not repair or mention replacements for any other file.',
     '- The complete content must contain no conflict markers and must not be truncated.',
-    '- Use contentBase64 instead of content when escaping large source text would be risky.',
-    '- unifiedDiff is accepted only as a legacy fallback; resolvedFiles is safer and preferred.',
-    '- Use verdict "blocked" and omit repairs when tenant isolation cannot be proven.',
+    '- Use contentBase64 instead of content when escaping source text would be risky.',
+    '- Do not return unified diffs. patches must be an empty array.',
+    '- Use verdict "blocked" and omit resolvedFiles when tenant isolation cannot be proven.',
     '- Do not include prose outside JSON.',
     '',
-    `Exact conflicted files: ${conflictFiles.join(', ') || '(none)'}`,
-    `Exact blocked files: ${blockedFiles.join(', ') || '(none)'}`,
+    `Exact conflicted files in the repository: ${conflictFiles.join(', ') || '(none)'}`,
+    `Exact blocked files from deterministic repair: ${blockedFiles.join(', ') || '(none)'}`,
     '',
     'Tenant invariant docs / summary:',
-    docs || 'Preserve MasjidWeb tenant isolation. Never remove tenant_id scoping.',
+    tenantInvariantDocs() || 'Preserve MasjidWeb tenant isolation. Never remove tenant_id scoping.',
     '',
     'Autopilot report:',
     autopilotMarkdown || '(no Autopilot report artifact found)',
     '',
-    'Conflict file context:',
-    fileContexts || '(no conflict file context found)',
+    'Target file context:',
+    contextForConflictFile(filePath),
   ].join('\n');
 }
 
-function buildPatchRecoveryPrompt(args: {
-  conflictFiles: string[];
-  blockedFiles: string[];
-  originalReply: string;
-  applyError: string;
-}): string {
+function buildTruncationRetryPromptForFile(filePath: string): string {
   return [
-    'The previous Premium AI repair returned malformed unified diffs that could not be applied safely.',
+    'The previous OpenRouter completion for this single file was truncated by the token limit.',
     '',
-    'Recover by returning complete resolved file contents only. Do not return unified diffs.',
+    `Target file: ${filePath}`,
     '',
-    'Required output schema: return ONLY JSON, no markdown fences:',
-    '{ "summary": string, "files": [{ "filePath": string, "verdict": "blocked" | "safe_candidate" | "needs_human_review", "summary": string, "safetyConcerns": string[], "content": string | null, "contentBase64": string | null }], "resolvedFiles": [{ "filePath": string, "content": string }], "patches": [], "nextActions": string[] }',
+    'Return ONLY valid JSON. Return exactly one complete resolvedFiles entry for the target file, or blocked with no resolvedFiles if unsafe.',
+    'Do not include explanations, markdown, unified diffs, or repairs for any other file.',
+    'Prefer contentBase64 if JSON escaping is risky.',
     '',
-    'Rules:',
-    '- Return complete final file contents for only the conflicted files listed below.',
-    '- Paths must exactly match the conflicted file allowlist.',
-    '- Content must contain no conflict markers and must not be truncated.',
-    '- Use contentBase64 if JSON escaping would be risky.',
-    '- If you cannot reconstruct a safe final file, return blocked and no resolvedFiles.',
+    'Required output schema:',
+    requiredOutputSchema(),
     '',
-    `Exact conflicted files: ${args.conflictFiles.join(', ') || '(none)'}`,
-    `Exact blocked files: ${args.blockedFiles.join(', ') || '(none)'}`,
+    'Safety rules:',
+    ...SAFETY_RULES.map((rule) => `- ${rule}`),
     '',
-    'Patch apply error:',
-    args.applyError,
-    '',
-    'Original model response:',
-    trimTo(args.originalReply, 120_000),
+    'Target file context only:',
+    contextForConflictFile(filePath, MAX_RETRY_FILE_CHARS, false),
   ].join('\n');
 }
 
@@ -292,15 +322,6 @@ function normalizeAssessment(entry: unknown): PremiumAiFileAssessment {
   };
 }
 
-function parsePatch(entry: unknown): PremiumAiPatch | null {
-  const item = entry as Partial<PremiumAiPatch>;
-  if (typeof item.filePath !== 'string' || typeof item.unifiedDiff !== 'string') return null;
-  const filePath = item.filePath.trim();
-  const unifiedDiff = item.unifiedDiff.trim();
-  if (!filePath || !unifiedDiff) return null;
-  return { filePath, unifiedDiff };
-}
-
 function parseResolvedFile(entry: unknown): PremiumAiResolvedFile | null {
   const item = entry as { filePath?: unknown };
   if (typeof item.filePath !== 'string') return null;
@@ -313,10 +334,6 @@ function parseResolvedFile(entry: unknown): PremiumAiResolvedFile | null {
 function parseModelRepair(raw: string): ParsedModelRepair {
   const parsed = parseJsonObject(raw);
   const files = Array.isArray(parsed.files) ? parsed.files.map(normalizeAssessment) : [];
-  const explicitPatches = Array.isArray(parsed.patches) ? parsed.patches.map(parsePatch).filter((patch): patch is PremiumAiPatch => Boolean(patch)) : [];
-  const filePatches = files
-    .filter((file) => file.verdict === 'safe_candidate' && file.unifiedDiff)
-    .map((file) => ({ filePath: file.filePath, unifiedDiff: file.unifiedDiff as string }));
   const explicitResolvedFiles = Array.isArray(parsed.resolvedFiles)
     ? parsed.resolvedFiles.map(parseResolvedFile).filter((file): file is PremiumAiResolvedFile => Boolean(file))
     : [];
@@ -329,31 +346,18 @@ function parseModelRepair(raw: string): ParsedModelRepair {
     nextActions: Array.isArray(parsed.nextActions)
       ? parsed.nextActions.filter((value): value is string => typeof value === 'string')
       : ['Review workflow logs and rerun Premium AI Repair or repair manually.'],
-    patches: [...explicitPatches, ...filePatches],
     resolvedFiles: [...explicitResolvedFiles, ...fileResolvedFiles],
   };
 }
 
-function applyPatch(patch: PremiumAiPatch): void {
-  const tempDir = mkdtempSync(join(tmpdir(), 'mw-premium-ai-'));
-  const patchPath = join(tempDir, `${basename(patch.filePath).replace(/[^a-zA-Z0-9._-]/g, '_')}.patch`);
-  writeFileSync(patchPath, `${patch.unifiedDiff.trim()}\n`);
-  runOrThrow(`git apply --check --whitespace=nowarn ${JSON.stringify(patchPath)}`);
-  runOrThrow(`git apply --whitespace=nowarn ${JSON.stringify(patchPath)}`);
+function uniqueResolvedFiles(files: PremiumAiResolvedFile[]): PremiumAiResolvedFile[] {
+  return files.filter((file, index, list) =>
+    list.findIndex((other) => other.filePath === file.filePath && other.content === file.content) === index,
+  );
 }
 
-function applyResolvedFile(file: PremiumAiResolvedFile, allowedFiles: Set<string>): string {
-  const filePath = assertResolvedFileTarget(file, allowedFiles);
-  assertResolvedFileContent({ filePath, content: file.content });
-  const content = file.content.endsWith('\n') ? file.content : `${file.content}\n`;
-  writeFileSync(join(REPO_ROOT, filePath), content);
-  return filePath;
-}
-
-function validateRepairedFile(filePath: string): void {
-  const absolutePath = join(REPO_ROOT, filePath);
-  if (!existsSync(absolutePath)) throw new Error(`Repaired file is missing: ${filePath}`);
-  const content = readFileSync(absolutePath, 'utf8');
+function validateResolvedFileContent(filePath: string, content: string): void {
+  assertResolvedFileContent({ filePath, content });
   assertNoConflictMarkers(content, filePath);
   assertBalancedDelimiters(content, filePath);
   const invariantFailures = inspectTenantSensitiveContent(filePath, content);
@@ -362,24 +366,212 @@ function validateRepairedFile(filePath: string): void {
   }
 }
 
+function applyResolvedFile(file: PremiumAiResolvedFile, allowedFiles: Set<string>): string {
+  const filePath = assertResolvedFileTarget(file, allowedFiles);
+  const content = file.content.endsWith('\n') ? file.content : `${file.content}\n`;
+  validateResolvedFileContent(filePath, content);
+  writeFileSync(join(REPO_ROOT, filePath), content);
+  return filePath;
+}
+
+function validateRepairedFile(filePath: string): void {
+  const absolutePath = join(REPO_ROOT, filePath);
+  if (!existsSync(absolutePath)) throw new Error(`Repaired file is missing: ${filePath}`);
+  const content = readFileSync(absolutePath, 'utf8');
+  validateResolvedFileContent(filePath, content);
+}
+
 function stageRepairedFiles(files: string[]): void {
   for (const file of files) {
     runOrThrow(`git add -- ${JSON.stringify(file)}`);
   }
 }
 
-function applyAndValidateResolvedFiles(resolvedFiles: PremiumAiResolvedFile[], allowedFiles: Set<string>): string[] {
-  const appliedFiles = uniqueSorted(resolvedFiles.map((file) => applyResolvedFile(file, allowedFiles)));
-  for (const file of appliedFiles) {
-    validateRepairedFile(file);
-  }
-  return appliedFiles;
-}
-
 function setGithubOutput(name: string, value: string): void {
   const outputPath = process.env.GITHUB_OUTPUT;
   if (!outputPath) return;
   appendFileSync(outputPath, `${name}=${value.replaceAll('\n', ' ')}\n`);
+}
+
+function isTruncationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes('finish_reason=length') || message.toLowerCase().includes('response was truncated');
+}
+
+function fileResult(args: {
+  filePath: string;
+  status: PremiumAiFileRepairStatus;
+  summary: string;
+  safetyConcerns?: string[];
+  applied?: boolean;
+  retryUsed?: boolean;
+  model?: string;
+  finishReason?: string | null;
+  error?: string | null;
+}): PremiumAiFileRepairResult {
+  return {
+    filePath: args.filePath,
+    status: args.status,
+    summary: args.summary,
+    safetyConcerns: args.safetyConcerns ?? [],
+    applied: args.applied ?? false,
+    retryUsed: args.retryUsed ?? false,
+    model: args.model ?? '',
+    finishReason: args.finishReason ?? null,
+    error: args.error ?? null,
+  };
+}
+
+function classifyApplicationError(error: unknown): PremiumAiFileRepairStatus {
+  if (isTruncationError(error)) return 'model_truncated';
+  return 'invariant_failed';
+}
+
+function modelErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function requestAndParseFileRepair(args: {
+  filePath: string;
+  requestFile: RepairFilesOneAtATimeArgs['requestFile'];
+  attempt: FileRepairAttempt;
+}): Promise<{ result: OpenRouterRepairResult; parsed: ParsedModelRepair }> {
+  const result = await args.requestFile(args.filePath, args.attempt);
+  return { result, parsed: parseModelRepair(result.reply) };
+}
+
+async function repairSingleFile(args: {
+  filePath: string;
+  blockedFiles: string[];
+  requestFile: RepairFilesOneAtATimeArgs['requestFile'];
+  applyFile: RepairFilesOneAtATimeArgs['applyFile'];
+  validateFile: RepairFilesOneAtATimeArgs['validateFile'];
+}): Promise<{ result: PremiumAiFileRepairResult; assessments: PremiumAiFileAssessment[]; appliedFiles: string[] }> {
+  let retryUsed = false;
+
+  async function attemptRepair(attempt: FileRepairAttempt): Promise<{ result: PremiumAiFileRepairResult; assessments: PremiumAiFileAssessment[]; appliedFiles: string[] }> {
+    const { result, parsed } = await requestAndParseFileRepair({ filePath: args.filePath, requestFile: args.requestFile, attempt });
+    const allowedFiles = new Set([args.filePath]);
+    const resolvedFiles = uniqueResolvedFiles(parsed.resolvedFiles).filter((file) => file.filePath === args.filePath);
+    const assessmentConcerns = parsed.files.flatMap((file) => file.filePath === args.filePath ? file.safetyConcerns : []);
+
+    if (resolvedFiles.length === 0) {
+      return {
+        result: fileResult({
+          filePath: args.filePath,
+          status: 'blocked',
+          summary: parsed.summary || 'Premium AI did not return a complete replacement for this file.',
+          safetyConcerns: assessmentConcerns,
+          retryUsed,
+          model: result.model,
+          finishReason: result.finishReason,
+        }),
+        assessments: parsed.files,
+        appliedFiles: [],
+      };
+    }
+
+    try {
+      const appliedFiles = uniqueSorted(resolvedFiles.map((file) => args.applyFile(file, allowedFiles)));
+      for (const file of appliedFiles) {
+        args.validateFile(file);
+      }
+      return {
+        result: fileResult({
+          filePath: args.filePath,
+          status: 'applied',
+          summary: parsed.summary || 'Premium AI returned a validated file replacement.',
+          safetyConcerns: assessmentConcerns,
+          applied: true,
+          retryUsed,
+          model: result.model,
+          finishReason: result.finishReason,
+        }),
+        assessments: parsed.files.map((file) =>
+          appliedFiles.includes(file.filePath) ? { ...file, verdict: 'applied' as const } : file,
+        ),
+        appliedFiles,
+      };
+    } catch (error) {
+      const status = classifyApplicationError(error);
+      return {
+        result: fileResult({
+          filePath: args.filePath,
+          status,
+          summary: `Premium AI replacement was rejected for this file: ${modelErrorMessage(error)}`,
+          safetyConcerns: assessmentConcerns,
+          retryUsed,
+          model: result.model,
+          finishReason: result.finishReason,
+          error: modelErrorMessage(error),
+        }),
+        assessments: parsed.files,
+        appliedFiles: [],
+      };
+    }
+  }
+
+  try {
+    return await attemptRepair('initial');
+  } catch (error) {
+    if (!isTruncationError(error)) {
+      return {
+        result: fileResult({
+          filePath: args.filePath,
+          status: 'invalid_json',
+          summary: `Premium AI response was not usable for this file: ${modelErrorMessage(error)}`,
+          error: modelErrorMessage(error),
+        }),
+        assessments: [],
+        appliedFiles: [],
+      };
+    }
+  }
+
+  retryUsed = true;
+  try {
+    return await attemptRepair('truncation_retry');
+  } catch (error) {
+    const status: PremiumAiFileRepairStatus = isTruncationError(error) ? 'model_truncated' : 'invalid_json';
+    return {
+      result: fileResult({
+        filePath: args.filePath,
+        status,
+        summary: status === 'model_truncated'
+          ? 'Premium AI response was truncated again for this single file.'
+          : `Premium AI truncation retry was not usable for this file: ${modelErrorMessage(error)}`,
+        retryUsed,
+        error: modelErrorMessage(error),
+      }),
+      assessments: [],
+      appliedFiles: [],
+    };
+  }
+}
+
+export async function repairFilesOneAtATime(args: RepairFilesOneAtATimeArgs): Promise<{
+  results: PremiumAiFileRepairResult[];
+  assessments: PremiumAiFileAssessment[];
+  appliedFiles: string[];
+}> {
+  const results: PremiumAiFileRepairResult[] = [];
+  const assessments: PremiumAiFileAssessment[] = [];
+  const appliedFiles: string[] = [];
+
+  for (const filePath of args.targetFiles) {
+    const repaired = await repairSingleFile({
+      filePath,
+      blockedFiles: args.blockedFiles,
+      requestFile: args.requestFile,
+      applyFile: args.applyFile,
+      validateFile: args.validateFile,
+    });
+    results.push(repaired.result);
+    assessments.push(...repaired.assessments);
+    appliedFiles.push(...repaired.appliedFiles);
+  }
+
+  return { results, assessments, appliedFiles: uniqueSorted(appliedFiles) };
 }
 
 function formatMarkdown(report: PremiumAiReport): string {
@@ -390,23 +582,41 @@ function formatMarkdown(report: PremiumAiReport): string {
     `Mode: ${report.mode}`,
     `Model: ${report.model}`,
     `Generated: ${report.generatedAt}`,
+    `Repair batch size: ${report.repairBatchSize}`,
     '',
     report.summary,
     '',
     '## Safety posture',
     '',
     report.status === 'applied' || report.status === 'content_replacement_applied'
-      ? 'Premium AI repairs were applied only to the safe-update PR branch and staged for workflow verification. Approval remains locked until checks and normal PR CI are green.'
-      : 'Premium AI did not leave a committable repair. Production remains unchanged and approval must stay blocked.',
+      ? 'Premium AI repairs were applied one file at a time, staged only after every target file passed validation, and remain subject to workflow verification and normal PR CI.'
+      : 'Premium AI did not leave a committable complete repair. Any applied working-tree changes remain unstaged for inspection, and approval must stay blocked.',
     '',
     '## Applied files',
     '',
     report.appliedFiles.length > 0 ? report.appliedFiles.map((file) => `- ${file}`).join('\n') : '- None',
     '',
-    '## Files',
+    '## Per-file repair results',
     '',
   ];
 
+  if (report.fileResults.length === 0) {
+    lines.push('- No per-file repair results were recorded.');
+  }
+
+  for (const result of report.fileResults) {
+    lines.push(`### ${result.filePath}`, '', `- Status: **${result.status}**`, `- Applied: ${result.applied ? 'yes' : 'no'}`, `- Retry used: ${result.retryUsed ? 'yes' : 'no'}`);
+    if (result.model) lines.push(`- Model: ${result.model}`);
+    if (result.finishReason) lines.push(`- Finish reason: ${result.finishReason}`);
+    lines.push(`- Summary: ${result.summary}`);
+    if (result.error) lines.push(`- Error: ${result.error}`);
+    if (result.safetyConcerns.length > 0) {
+      lines.push('- Safety concerns:', ...result.safetyConcerns.map((concern) => `  - ${concern}`));
+    }
+    lines.push('');
+  }
+
+  lines.push('## Model assessments', '');
   if (report.files.length === 0) {
     lines.push('- No file assessments returned.');
   }
@@ -439,13 +649,14 @@ function writeReports(report: PremiumAiReport): void {
 }
 
 function baseReport(args: {
-  status: PremiumAiReport['status'];
+  status: PremiumAiReportStatus;
   model: string;
   conflictFiles: string[];
   blockedFiles: string[];
   appliedFiles?: string[];
   summary: string;
   files?: PremiumAiFileAssessment[];
+  fileResults?: PremiumAiFileRepairResult[];
   nextActions?: string[];
 }): PremiumAiReport {
   return {
@@ -453,41 +664,25 @@ function baseReport(args: {
     mode: 'apply_repairs',
     model: args.model,
     generatedAt: new Date().toISOString(),
+    repairBatchSize: REPAIR_BATCH_SIZE,
     conflictFiles: args.conflictFiles,
     blockedFiles: args.blockedFiles,
     appliedFiles: args.appliedFiles ?? [],
     summary: args.summary,
     files: args.files ?? [],
+    fileResults: args.fileResults ?? [],
     nextActions: args.nextActions ?? ['Leave this update blocked until repaired and verified.'],
   };
 }
 
-async function requestContentRecovery(args: {
-  apiKey: string;
-  model: string;
-  conflictFiles: string[];
-  blockedFiles: string[];
-  originalReply: string;
-  applyError: string;
-}): Promise<{ result: OpenRouterRepairResult; parsed: ParsedModelRepair }> {
-  const result = await requestOpenRouterRepair({
-    apiKey: args.apiKey,
-    model: args.model,
-    messages: [
-      {
-        role: 'system',
-        content: [
-          'You are recovering a malformed MasjidWeb Premium AI patch.',
-          'Return only valid JSON using complete resolved file contents. Do not return unified diffs.',
-          'Generate safe repairs only when tenant invariants are preserved.',
-          ...SAFETY_RULES,
-        ].join('\n'),
-      },
-      { role: 'user', content: buildPatchRecoveryPrompt(args) },
-    ],
-    maxTokens: MAX_REPLY_TOKENS,
-  }, 1);
-  return { result, parsed: parseModelRepair(result.reply) };
+function assertCompleteRepair(results: PremiumAiFileRepairResult[], targetFiles: string[]): void {
+  const missing = targetFiles.filter((file) => !results.some((result) => result.filePath === file));
+  const failed = results.filter((result) => result.status !== 'applied');
+  if (missing.length > 0 || failed.length > 0) {
+    const failedSummary = failed.map((result) => `${result.filePath}: ${result.status}`).join(', ');
+    const missingSummary = missing.length > 0 ? ` Missing results: ${missing.join(', ')}.` : '';
+    throw new Error(`Premium AI did not safely repair every target file.${failedSummary ? ` Failed files: ${failedSummary}.` : ''}${missingSummary}`);
+  }
 }
 
 async function main(): Promise<void> {
@@ -517,7 +712,8 @@ async function main(): Promise<void> {
   }
 
   const model = await resolveOpenRouterRepairModel({ apiKey, requestedModel });
-  const result = await requestOpenRouterRepair({
+  const targetFiles = conflictFiles;
+  const requestFile = async (filePath: string, attempt: FileRepairAttempt): Promise<OpenRouterRepairResult> => requestOpenRouterRepair({
     apiKey,
     model,
     messages: [
@@ -525,124 +721,66 @@ async function main(): Promise<void> {
         role: 'system',
         content: [
           'You are a frontier-model code repair agent for MasjidWeb core-update merge conflicts.',
-          'Return only valid JSON using the requested schema.',
-          'Prefer complete resolved file contents over unified diffs to avoid malformed patch hunks.',
+          'Repair exactly one target file per request.',
+          'Return only valid JSON using complete resolved file contents. Do not return unified diffs.',
           'Generate safe repairs only when tenant invariants are preserved.',
           ...SAFETY_RULES,
         ].join('\n'),
       },
-      { role: 'user', content: buildPrompt(conflictFiles, blockedFiles) },
+      { role: 'user', content: attempt === 'truncation_retry' ? buildTruncationRetryPromptForFile(filePath) : buildPromptForFile(filePath, conflictFiles, blockedFiles) },
     ],
     maxTokens: MAX_REPLY_TOKENS,
+  }, 1);
+
+  const aggregate = await repairFilesOneAtATime({
+    targetFiles,
+    blockedFiles,
+    requestFile,
+    applyFile: applyResolvedFile,
+    validateFile: validateRepairedFile,
   });
 
-  let parsed: ParsedModelRepair;
   try {
-    parsed = parseModelRepair(result.reply);
-  } catch (error) {
+    assertCompleteRepair(aggregate.results, targetFiles);
+    stageRepairedFiles(aggregate.appliedFiles);
     writeReports(baseReport({
-      status: 'patch_parse_failed',
-      model: result.model,
+      status: 'content_replacement_applied',
+      model,
       conflictFiles,
       blockedFiles,
-      summary: `Premium AI response was not parseable repair JSON: ${error instanceof Error ? error.message : String(error)}`,
-      nextActions: ['Leave this update blocked. Inspect the workflow log, then retry Premium AI Repair or repair manually.'],
-    }));
-    throw error;
-  }
-
-  const allowedFiles = new Set(conflictFiles);
-  const resolvedFiles = parsed.resolvedFiles.filter((file, index, list) =>
-    list.findIndex((other) => other.filePath === file.filePath && other.content === file.content) === index,
-  );
-  const patches = parsed.patches.filter((patch, index, list) =>
-    list.findIndex((other) => other.filePath === patch.filePath && other.unifiedDiff === patch.unifiedDiff) === index,
-  );
-
-  if (resolvedFiles.length === 0 && patches.length === 0) {
-    writeReports(baseReport({
-      status: 'blocked',
-      model: result.model,
-      conflictFiles,
-      blockedFiles,
-      summary: parsed.summary || 'Premium AI did not return an applicable repair.',
-      files: parsed.files,
-      nextActions: parsed.nextActions,
-    }));
-    throw new Error('Premium AI did not return any applicable file replacements or unified diffs.');
-  }
-
-  try {
-    let appliedFiles: string[] = [];
-    let status: PremiumAiReport['status'] = 'applied';
-
-    if (resolvedFiles.length > 0) {
-      appliedFiles = applyAndValidateResolvedFiles(resolvedFiles, allowedFiles);
-      status = 'content_replacement_applied';
-    } else {
-      try {
-        for (const patch of patches) {
-          assertPatchTargets(patch, allowedFiles);
-          applyPatch(patch);
-        }
-        appliedFiles = uniqueSorted(patches.flatMap((patch) => filesMentionedInDiff(patch.unifiedDiff)));
-        for (const file of appliedFiles) {
-          validateRepairedFile(file);
-        }
-      } catch (patchError) {
-        const applyError = patchError instanceof Error ? patchError.message : String(patchError);
-        const recovery = await requestContentRecovery({
-          apiKey,
-          model: result.model,
-          conflictFiles,
-          blockedFiles,
-          originalReply: result.reply,
-          applyError,
-        });
-        if (recovery.parsed.resolvedFiles.length === 0) {
-          throw patchError;
-        }
-        const recoveryFiles = recovery.parsed.resolvedFiles.filter((file, index, list) =>
-          list.findIndex((other) => other.filePath === file.filePath && other.content === file.content) === index,
-        );
-        appliedFiles = applyAndValidateResolvedFiles(recoveryFiles, allowedFiles);
-        status = 'content_replacement_applied';
-        parsed = recovery.parsed;
-      }
-    }
-    stageRepairedFiles(appliedFiles);
-    writeReports(baseReport({
-      status,
-      model: result.model,
-      conflictFiles,
-      blockedFiles,
-      appliedFiles,
-      summary: parsed.summary || `Premium AI applied repairs to ${appliedFiles.length} file(s).`,
-      files: parsed.files.map((file) =>
-        appliedFiles.includes(file.filePath) ? { ...file, verdict: 'applied' as const } : file,
-      ),
+      appliedFiles: aggregate.appliedFiles,
+      summary: `Premium AI repaired ${aggregate.appliedFiles.length} file(s), one file per model request. All target files passed local replacement validation before staging.`,
+      files: aggregate.assessments,
+      fileResults: aggregate.results,
       nextActions: [
         'Run completeness, Autopilot guard, tenant isolation, type-check, build, and normal PR CI before approval.',
-        ...parsed.nextActions,
+        'Do not treat Premium AI completion as merge approval.',
       ],
     }));
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const status: PremiumAiReport['status'] = resolvedFiles.length > 0 ? 'patch_parse_failed' : 'patch_apply_failed';
+    const message = modelErrorMessage(error);
     writeReports(baseReport({
-      status,
-      model: result.model,
+      status: 'partial_failed',
+      model,
       conflictFiles,
       blockedFiles,
-      summary: `Premium AI repair was rejected before commit: ${message}`,
-      files: parsed.files,
-      nextActions: ['Leave approval blocked. Retry Premium AI Repair or repair manually with tenant-scope review.'],
+      appliedFiles: aggregate.appliedFiles,
+      summary: `Premium AI repair stopped before commit because not every file was safely repaired: ${message}`,
+      files: aggregate.assessments,
+      fileResults: aggregate.results,
+      nextActions: [
+        'Inspect the per-file statuses in this artifact.',
+        'Leave the working tree uncommitted unless every failed file is manually repaired and all safety checks pass.',
+        'Retry Premium AI Repair after this hardening if the only failure was model truncation or invalid aggregate JSON.',
+      ],
     }));
     throw error;
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+if (process.env.NODE_ENV !== 'test') {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}
