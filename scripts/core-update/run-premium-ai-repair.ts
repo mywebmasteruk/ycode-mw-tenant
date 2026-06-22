@@ -12,6 +12,7 @@ import {
 import {
   DEFAULT_PREMIUM_AI_REPAIR_MODEL,
   type OpenRouterRepairResult,
+  type OpenRouterUsage,
   assertBalancedDelimiters,
   assertNoConflictMarkers,
   requestOpenRouterRepair,
@@ -30,7 +31,15 @@ const MAX_FILE_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_FILE_C
 const MAX_RETRY_FILE_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_RETRY_MAX_FILE_CHARS, 40_000);
 const MAX_HUNK_CONTEXT_LINES = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_HUNK_CONTEXT_LINES, 80);
 const MAX_DOC_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_DOC_CHARS, 12_000);
-const MAX_REPLY_TOKENS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_TOKENS, 32_000);
+const MAX_REPLY_TOKENS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_TOKENS, 24_000);
+const MAX_TARGET_FILES = Math.min(parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_FILES, 4), 4);
+const MAX_TOTAL_MODEL_CALLS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_MODEL_CALLS, 8);
+const MAX_CALL_MS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_CALL_MS, 180_000);
+const MAX_TOTAL_MS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_TOTAL_MS, 900_000);
+const MAX_TRUNCATED_OR_INVALID = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_BAD_RESPONSES, 2);
+const MAX_HUNKS_PER_FILE = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_HUNKS_PER_FILE, 2);
+const ENABLE_HUNK_FALLBACK = parseBool(process.env.PREMIUM_AI_REPAIR_ENABLE_HUNK_FALLBACK);
+const HUGE_FILE_DENY_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_HUGE_FILE_DENY_CHARS, 180_000);
 const PATCH_ARTIFACT_PATH = process.env.PREMIUM_AI_REPAIR_PATCH_PATH || '/tmp/premium-ai-repair-checkpoint.patch';
 const CHECKPOINT_DIR = process.env.PREMIUM_AI_REPAIR_CHECKPOINT_DIR || '/tmp/premium-ai-checkpoints';
 
@@ -83,6 +92,7 @@ export type PremiumAiFileRepairResult = {
   retryUsed: boolean;
   model: string;
   finishReason: string | null;
+  usage: OpenRouterUsage | null;
   error: string | null;
 };
 
@@ -119,7 +129,19 @@ type PremiumAiReport = {
   summary: string;
   files: PremiumAiFileAssessment[];
   fileResults: PremiumAiFileRepairResult[];
+  metrics: PremiumAiRepairMetrics;
   nextActions: string[];
+};
+
+type PremiumAiRepairMetrics = {
+  modelCalls: number;
+  badResponses: number;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+  cost: number | null;
+  elapsedMs: number;
+  stoppedReason: string | null;
 };
 
 type ParsedModelRepair = {
@@ -138,11 +160,16 @@ type RepairFilesOneAtATimeArgs = {
   applyFile: (file: PremiumAiResolvedFile, allowedFiles: Set<string>) => string;
   validateFile: (filePath: string) => void;
   readFile?: (filePath: string) => string;
+  enableHunkFallback?: boolean;
 };
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value ?? '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseBool(value: string | undefined): boolean {
+  return value === '1' || value === 'true' || value === 'yes';
 }
 
 function run(command: string): string {
@@ -484,6 +511,19 @@ function validateRepairedFile(filePath: string): void {
   validateResolvedFileContent(filePath, content);
 }
 
+function isHugeFile(filePath: string): boolean {
+  const content = readRepoFile(filePath, Number.MAX_SAFE_INTEGER);
+  return content.length > HUGE_FILE_DENY_CHARS;
+}
+
+function filterEligibleTargetFiles(conflictFiles: string[]): { targetFiles: string[]; skippedFiles: string[] } {
+  const eligible = conflictFiles.filter((file) => !isHugeFile(file));
+  return {
+    targetFiles: eligible.slice(0, MAX_TARGET_FILES),
+    skippedFiles: [...eligible.slice(MAX_TARGET_FILES), ...conflictFiles.filter(isHugeFile)],
+  };
+}
+
 function stageRepairedFiles(files: string[]): void {
   for (const file of files) {
     runOrThrow(`git add -- ${JSON.stringify(file)}`);
@@ -599,6 +639,7 @@ function fileResult(args: {
   retryUsed?: boolean;
   model?: string;
   finishReason?: string | null;
+  usage?: OpenRouterUsage | null;
   error?: string | null;
 }): PremiumAiFileRepairResult {
   return {
@@ -610,6 +651,7 @@ function fileResult(args: {
     retryUsed: args.retryUsed ?? false,
     model: args.model ?? '',
     finishReason: args.finishReason ?? null,
+    usage: args.usage ?? null,
     error: args.error ?? null,
   };
 }
@@ -640,6 +682,7 @@ async function repairSingleFile(args: {
   applyFile: RepairFilesOneAtATimeArgs['applyFile'];
   validateFile: RepairFilesOneAtATimeArgs['validateFile'];
   readFile?: RepairFilesOneAtATimeArgs['readFile'];
+  enableHunkFallback: boolean;
 }): Promise<{ result: PremiumAiFileRepairResult; assessments: PremiumAiFileAssessment[]; appliedFiles: string[] }> {
   let retryUsed = false;
 
@@ -659,6 +702,7 @@ async function repairSingleFile(args: {
           retryUsed,
           model: result.model,
           finishReason: result.finishReason,
+          usage: result.usage ?? null,
         }),
         assessments: parsed.files,
         appliedFiles: [],
@@ -680,6 +724,7 @@ async function repairSingleFile(args: {
           retryUsed,
           model: result.model,
           finishReason: result.finishReason,
+          usage: result.usage ?? null,
         }),
         assessments: parsed.files.map((file) =>
           appliedFiles.includes(file.filePath) ? { ...file, verdict: 'applied' as const } : file,
@@ -697,6 +742,7 @@ async function repairSingleFile(args: {
           retryUsed,
           model: result.model,
           finishReason: result.finishReason,
+          usage: result.usage ?? null,
           error: modelErrorMessage(error),
         }),
         assessments: parsed.files,
@@ -734,6 +780,30 @@ async function repairSingleFile(args: {
           filePath: args.filePath,
           status: 'model_truncated',
           summary: 'Premium AI full-file repair was truncated, and no conflict hunks were available for fallback.',
+          retryUsed,
+        }),
+        assessments: [],
+        appliedFiles: [],
+      };
+    }
+    if (!args.enableHunkFallback) {
+      return {
+        result: fileResult({
+          filePath: args.filePath,
+          status: 'model_truncated',
+          summary: 'Premium AI full-file repair was truncated twice. Hunk fallback is disabled by default to prevent extra token spend on tenant-sensitive files; repair manually or rerun with PREMIUM_AI_REPAIR_ENABLE_HUNK_FALLBACK=true after changing strategy.',
+          retryUsed,
+        }),
+        assessments: [],
+        appliedFiles: [],
+      };
+    }
+    if (hunks.length > MAX_HUNKS_PER_FILE) {
+      return {
+        result: fileResult({
+          filePath: args.filePath,
+          status: 'model_truncated',
+          summary: `Premium AI full-file repair was truncated twice. Hunk fallback refused ${hunks.length} hunks (cap ${MAX_HUNKS_PER_FILE}) to prevent runaway model calls.`,
           retryUsed,
         }),
         assessments: [],
@@ -869,6 +939,7 @@ export async function repairFilesOneAtATime(args: RepairFilesOneAtATimeArgs): Pr
   const results: PremiumAiFileRepairResult[] = [];
   const assessments: PremiumAiFileAssessment[] = [];
   const appliedFiles: string[] = [];
+  let badResponses = 0;
 
   for (const filePath of args.targetFiles) {
     const repaired = await repairSingleFile({
@@ -878,10 +949,18 @@ export async function repairFilesOneAtATime(args: RepairFilesOneAtATimeArgs): Pr
       applyFile: args.applyFile,
       validateFile: args.validateFile,
       readFile: args.readFile,
+      enableHunkFallback: args.enableHunkFallback ?? false,
     });
     results.push(repaired.result);
     assessments.push(...repaired.assessments);
     appliedFiles.push(...repaired.appliedFiles);
+
+    if (repaired.result.status === 'model_truncated' || repaired.result.status === 'invalid_json') {
+      badResponses += 1;
+      if (badResponses >= MAX_TRUNCATED_OR_INVALID) {
+        break;
+      }
+    }
   }
 
   return { results, assessments, appliedFiles: uniqueSorted(appliedFiles) };
@@ -918,6 +997,17 @@ function formatMarkdown(report: PremiumAiReport): string {
     '## Applied files',
     '',
     report.appliedFiles.length > 0 ? report.appliedFiles.map((file) => `- ${file}`).join('\n') : '- None',
+    '',
+    '## Token and runtime budget',
+    '',
+    `- Model calls: ${report.metrics.modelCalls}`,
+    `- Bad responses: ${report.metrics.badResponses}`,
+    `- Prompt tokens: ${report.metrics.promptTokens ?? 'not reported'}`,
+    `- Completion tokens: ${report.metrics.completionTokens ?? 'not reported'}`,
+    `- Total tokens: ${report.metrics.totalTokens ?? 'not reported'}`,
+    `- Cost: ${report.metrics.cost === null ? 'not reported' : `$${report.metrics.cost.toFixed(6)}`}`,
+    `- Elapsed: ${Math.round(report.metrics.elapsedMs / 1000)}s`,
+    `- Stop reason: ${report.metrics.stoppedReason ?? 'none'}`,
     '',
     '## Unresolved files',
     '',
@@ -963,6 +1053,35 @@ function formatMarkdown(report: PremiumAiReport): string {
   return lines.join('\n');
 }
 
+function emptyMetrics(elapsedMs = 0, stoppedReason: string | null = null): PremiumAiRepairMetrics {
+  return {
+    modelCalls: 0,
+    badResponses: 0,
+    promptTokens: null,
+    completionTokens: null,
+    totalTokens: null,
+    cost: null,
+    elapsedMs,
+    stoppedReason,
+  };
+}
+
+function addUsage(metrics: PremiumAiRepairMetrics, usage: OpenRouterUsage | null | undefined): void {
+  if (!usage) return;
+  if (typeof usage.prompt_tokens === 'number') {
+    metrics.promptTokens = (metrics.promptTokens ?? 0) + usage.prompt_tokens;
+  }
+  if (typeof usage.completion_tokens === 'number') {
+    metrics.completionTokens = (metrics.completionTokens ?? 0) + usage.completion_tokens;
+  }
+  if (typeof usage.total_tokens === 'number') {
+    metrics.totalTokens = (metrics.totalTokens ?? 0) + usage.total_tokens;
+  }
+  if (typeof usage.cost === 'number') {
+    metrics.cost = (metrics.cost ?? 0) + usage.cost;
+  }
+}
+
 function writeReports(report: PremiumAiReport): void {
   mkdirSync(dirname(REPORT_JSON_PATH), { recursive: true });
   mkdirSync(dirname(REPORT_PATH), { recursive: true });
@@ -991,6 +1110,7 @@ function baseReport(args: {
   summary: string;
   files?: PremiumAiFileAssessment[];
   fileResults?: PremiumAiFileRepairResult[];
+  metrics?: PremiumAiRepairMetrics;
   nextActions?: string[];
 }): PremiumAiReport {
   return {
@@ -1007,13 +1127,14 @@ function baseReport(args: {
     summary: args.summary,
     files: args.files ?? [],
     fileResults: args.fileResults ?? [],
+    metrics: args.metrics ?? emptyMetrics(),
     nextActions: args.nextActions ?? ['Leave this update blocked until repaired and verified.'],
   };
 }
 
 function assertCompleteRepair(results: PremiumAiFileRepairResult[], targetFiles: string[]): void {
   const missing = targetFiles.filter((file) => !results.some((result) => result.filePath === file));
-  const failed = results.filter((result) => result.status !== 'applied');
+  const failed = results.filter((result) => !result.applied);
   if (missing.length > 0 || failed.length > 0) {
     const failedSummary = failed.map((result) => `${result.filePath}: ${result.status}`).join(', ');
     const missingSummary = missing.length > 0 ? ` Missing results: ${missing.join(', ')}.` : '';
@@ -1048,25 +1169,60 @@ async function main(): Promise<void> {
   }
 
   const model = await resolveOpenRouterRepairModel({ apiKey, requestedModel });
-  const targetFiles = conflictFiles;
-  const requestFile = async (filePath: string, attempt: FileRepairAttempt, promptOverride?: string): Promise<OpenRouterRepairResult> => requestOpenRouterRepair({
-    apiKey,
-    model,
-    messages: [
-      {
-        role: 'system',
-        content: [
-          'You are a frontier-model code repair agent for MasjidWeb core-update merge conflicts.',
-          'Repair exactly one target file per request.',
-          'Return only valid JSON using complete resolved file contents. Do not return unified diffs.',
-          'Generate safe repairs only when tenant invariants are preserved.',
-          ...SAFETY_RULES,
-        ].join('\n'),
-      },
-      { role: 'user', content: promptOverride ?? (attempt === 'truncation_retry' ? buildTruncationRetryPromptForFile(filePath) : buildPromptForFile(filePath, conflictFiles, blockedFiles)) },
-    ],
-    maxTokens: MAX_REPLY_TOKENS,
-  }, 1);
+  const startedAt = Date.now();
+  const metrics = emptyMetrics();
+  const { targetFiles, skippedFiles } = filterEligibleTargetFiles(conflictFiles);
+  const requestFile = async (filePath: string, attempt: FileRepairAttempt, promptOverride?: string): Promise<OpenRouterRepairResult> => {
+    if (metrics.stoppedReason) {
+      throw new Error(metrics.stoppedReason);
+    }
+    if (metrics.modelCalls >= MAX_TOTAL_MODEL_CALLS) {
+      metrics.stoppedReason = `model-call cap reached (${MAX_TOTAL_MODEL_CALLS})`;
+      throw new Error(metrics.stoppedReason);
+    }
+    const elapsed = Date.now() - startedAt;
+    if (elapsed > MAX_TOTAL_MS) {
+      metrics.stoppedReason = `overall runtime cap reached (${Math.round(MAX_TOTAL_MS / 1000)}s)`;
+      throw new Error(metrics.stoppedReason);
+    }
+    metrics.modelCalls += 1;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), MAX_CALL_MS);
+    try {
+      const result = await requestOpenRouterRepair({
+        apiKey,
+        model,
+        messages: [
+          {
+            role: 'system',
+            content: [
+              'You are a frontier-model code repair agent for MasjidWeb core-update merge conflicts.',
+              'Repair exactly one target file per request.',
+              'Return only valid JSON using complete resolved file contents. Do not return unified diffs.',
+              'Generate safe repairs only when tenant invariants are preserved.',
+              ...SAFETY_RULES,
+            ].join('\n'),
+          },
+          { role: 'user', content: promptOverride ?? (attempt === 'truncation_retry' ? buildTruncationRetryPromptForFile(filePath) : buildPromptForFile(filePath, conflictFiles, blockedFiles)) },
+        ],
+        maxTokens: MAX_REPLY_TOKENS,
+        signal: controller.signal,
+      }, 1);
+      addUsage(metrics, result.usage);
+      return result;
+    } catch (error) {
+      if (isTruncationError(error) || modelErrorMessage(error).includes('JSON')) {
+        metrics.badResponses += 1;
+        if (metrics.badResponses >= MAX_TRUNCATED_OR_INVALID) {
+          metrics.stoppedReason = `bad-response cap reached (${MAX_TRUNCATED_OR_INVALID})`;
+        }
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      metrics.elapsedMs = Date.now() - startedAt;
+    }
+  };
 
   const aggregate = await repairFilesOneAtATime({
     targetFiles,
@@ -1074,21 +1230,24 @@ async function main(): Promise<void> {
     requestFile,
     applyFile: applyResolvedFile,
     validateFile: validateRepairedFile,
+    enableHunkFallback: ENABLE_HUNK_FALLBACK,
   });
 
   try {
-    assertCompleteRepair(aggregate.results, targetFiles);
+    assertCompleteRepair(aggregate.results, conflictFiles);
     stageRepairedFiles(aggregate.appliedFiles);
+    metrics.elapsedMs = Date.now() - startedAt;
     writeReports(baseReport({
       status: 'content_replacement_applied',
       model,
       conflictFiles,
       blockedFiles,
       appliedFiles: aggregate.appliedFiles,
-      unresolvedFiles: [],
+      unresolvedFiles: skippedFiles,
       summary: `Premium AI repaired ${aggregate.appliedFiles.length} file(s), one file per model request. All target files passed local replacement validation before staging.`,
       files: aggregate.assessments,
       fileResults: aggregate.results,
+      metrics,
       nextActions: [
         'Run completeness, Autopilot guard, tenant isolation, type-check, build, and normal PR CI before approval.',
         'Do not treat Premium AI completion as merge approval.',
@@ -1096,7 +1255,14 @@ async function main(): Promise<void> {
     }));
   } catch (error) {
     const message = modelErrorMessage(error);
-    const unresolvedFiles = targetFiles.filter((file) => !aggregate.results.some((result) => result.filePath === file && result.applied));
+    metrics.elapsedMs = Date.now() - startedAt;
+    if (!metrics.stoppedReason && metrics.badResponses >= MAX_TRUNCATED_OR_INVALID) {
+      metrics.stoppedReason = `bad-response cap reached (${MAX_TRUNCATED_OR_INVALID})`;
+    }
+    const unresolvedFiles = uniqueSorted([
+      ...targetFiles.filter((file) => !aggregate.results.some((result) => result.filePath === file && result.applied)),
+      ...skippedFiles,
+    ]);
     const checkpoint = createCheckpointForAppliedFiles(aggregate.appliedFiles, unresolvedFiles);
     writeReports(baseReport({
       status: 'partial_failed',
@@ -1106,14 +1272,15 @@ async function main(): Promise<void> {
       appliedFiles: aggregate.appliedFiles,
       unresolvedFiles,
       checkpoint,
-      summary: `Premium AI repair stopped before final verification because not every file was safely repaired: ${message}`,
+      summary: `Premium AI failed after ${metrics.modelCalls} model call(s) across ${aggregate.results.length}/${conflictFiles.length} file(s): ${message}. No more retries are recommended until the strategy changes or a developer manually resolves the remaining tenant-sensitive files.`,
       files: aggregate.assessments,
       fileResults: aggregate.results,
+      metrics,
       nextActions: [
         checkpoint.persisted
-          ? 'Download and reapply the partial checkpoint artifact before the next Premium AI attempt so only unresolved files remain targeted.'
+          ? 'Download and inspect the partial checkpoint artifact, but do not rerun Premium AI blindly; first change strategy or repair manually.'
           : 'No partial checkpoint was created because no file passed all per-file safety gates.',
-        'Inspect unresolved per-file statuses in this artifact.',
+        'Resolve remaining tenant-sensitive conflicts manually or with a hunk-level strategy that has explicit reviewer approval.',
         'Keep approval blocked until remaining files are repaired, branch-wide checks pass, and normal PR CI is green.',
       ],
     }));

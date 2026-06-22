@@ -185,7 +185,38 @@ describe('Premium AI per-file repair aggregation', () => {
     expect(execSync('git diff --cached --name-only', { cwd: tempRoot, encoding: 'utf8' }).trim()).toBe('lib/a.ts');
   });
 
-  it('falls back to hunk-level repair after repeated truncation', async () => {
+  it('stops after repeated truncation unless hunk fallback is enabled', async () => {
+    const attempts: string[] = [];
+    const fileContent = [
+      'export function value() {',
+      '<<<<<<< HEAD',
+      '  return "ours";',
+      '=======',
+      '  return "theirs";',
+      '>>>>>>> upstream/main',
+      '}',
+      '',
+    ].join('\n');
+
+    const result = await repairFilesOneAtATime({
+      targetFiles: ['lib/a.ts'],
+      blockedFiles: ['lib/a.ts'],
+      requestFile: async (_filePath, attempt) => {
+        attempts.push(attempt);
+        throw new Error('OpenRouter response was truncated (finish_reason=length).');
+      },
+      applyFile: (file: PremiumAiResolvedFile) => file.filePath,
+      validateFile: () => undefined,
+      readFile: () => fileContent,
+    });
+
+    expect(attempts).toEqual(['initial', 'truncation_retry']);
+    expect(result.appliedFiles).toEqual([]);
+    expect(result.results).toMatchObject([{ filePath: 'lib/a.ts', status: 'model_truncated', applied: false, retryUsed: true }]);
+    expect(result.results[0]?.summary).toContain('Hunk fallback is disabled');
+  });
+
+  it('falls back to hunk-level repair after repeated truncation when enabled', async () => {
     const attempts: string[] = [];
     let fileContent = [
       'export function value() {',
@@ -237,6 +268,7 @@ describe('Premium AI per-file repair aggregation', () => {
       },
       validateFile: () => undefined,
       readFile: () => fileContent,
+      enableHunkFallback: true,
     });
 
     expect(fileContent).not.toContain('<<<<<<<');

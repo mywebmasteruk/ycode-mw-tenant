@@ -12,12 +12,21 @@ export type OpenRouterRepairOptions = {
   model: string;
   messages: OpenRouterRepairMessage[];
   maxTokens?: number;
+  signal?: AbortSignal;
+};
+
+export type OpenRouterUsage = {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+  cost?: number;
 };
 
 export type OpenRouterRepairResult = {
   reply: string;
   model: string;
   finishReason: string | null;
+  usage?: OpenRouterUsage | null;
 };
 
 export type OpenRouterModelSummary = {
@@ -225,6 +234,7 @@ export async function requestOpenRouterRepair(
           max_tokens: options.maxTokens ?? 16_000,
           temperature: 0.1,
         }),
+        signal: options.signal,
       });
 
       const raw = await res.text();
@@ -232,6 +242,7 @@ export async function requestOpenRouterRepair(
         error?: { message?: string };
         choices?: { message?: { content?: string }; finish_reason?: string }[];
         model?: string;
+        usage?: OpenRouterUsage;
       } = {};
       try {
         parsed = JSON.parse(raw) as typeof parsed;
@@ -268,6 +279,7 @@ export async function requestOpenRouterRepair(
         reply,
         model: parsed.model ?? options.model,
         finishReason,
+        usage: parsed.usage ?? null,
       };
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));

@@ -49,6 +49,7 @@ permissions:
 jobs:
   ai-repair:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -169,6 +170,13 @@ jobs:
           AUTOPILOT_REPAIR_REPORT_PATH: /tmp/autopilot-repair-report.md
           AUTOPILOT_REPAIR_REPORT_JSON_PATH: /tmp/autopilot-repair-report.json
           PREMIUM_AI_REPAIR_MAX_FILES: ${{ inputs.max_llm_files }}
+          PREMIUM_AI_REPAIR_MAX_MODEL_CALLS: "8"
+          PREMIUM_AI_REPAIR_MAX_BAD_RESPONSES: "2"
+          PREMIUM_AI_REPAIR_MAX_CALL_MS: "180000"
+          PREMIUM_AI_REPAIR_MAX_TOTAL_MS: "900000"
+          PREMIUM_AI_REPAIR_MAX_HUNKS_PER_FILE: "2"
+          PREMIUM_AI_REPAIR_ENABLE_HUNK_FALLBACK: "false"
+        timeout-minutes: 16
         run: npx --yes tsx scripts/core-update/run-premium-ai-repair.ts
 
       - name: Upload deterministic Autopilot repair report
@@ -341,9 +349,12 @@ jobs:
             body += `Deterministic repair status: **${deterministicStatus}**. Repaired: **${Number.isFinite(deterministicRepaired) ? deterministicRepaired : 0}**. Blocked: **${Number.isFinite(deterministicBlocked) ? deterministicBlocked : 0}**.\n\n`;
             if (repairMode === 'premium_ai') {
               body += `Premium AI repair status: **${premiumStatus}**. Applied files: **${Number.isFinite(premiumApplied) ? premiumApplied : 0}**.\n`;
+              if (premiumStatus === 'partial_failed') {
+                body += 'Premium AI failed after capped attempts; do **not** rerun blindly until the strategy changes or a developer manually reduces the remaining conflict set.\n';
+              }
               if (premiumCheckpointed) {
                 body += `Partial checkpoint artifact: **persisted** for **${Number.isFinite(premiumCheckpointCount) ? premiumCheckpointCount : 0}** file(s). Unresolved files: **${Number.isFinite(premiumUnresolved) ? premiumUnresolved : 0}**.\n`;
-                body += 'Download `core-update-premium-ai-partial-checkpoint` and reapply it before rerunning Premium AI so the next attempt targets only the remaining files.\n';
+                body += 'Download `core-update-premium-ai-partial-checkpoint` for review, but do not rerun Premium AI until the remaining files or strategy are changed.\n';
               }
               body += '\n';
             }
