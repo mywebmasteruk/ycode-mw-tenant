@@ -5,6 +5,7 @@ import {
   checkBalancedDelimiters,
   isLatestClaudeFrontierDirective,
   isValidOpenRouterModelId,
+  parseClaudeVersion,
   selectLatestClaudeFrontierModel,
   stripCodeFences,
 } from "./openrouter-repair";
@@ -80,5 +81,44 @@ describe("OpenRouter model selection", () => {
         { id: "google/gemini-2.5-pro", name: "Gemini", created: 4 },
       ]),
     ).toBe("anthropic/claude-opus-4.1");
+  });
+
+  it("picks the newest point release, not the highest hardcoded bonus (regression: 4.8 > 4.5)", () => {
+    // The old bonus table gave 4.5 a higher score than 4.6/4.7/4.8 because it had
+    // no rule above 4.5. The version-parsing ranker must pick the genuine latest.
+    expect(
+      selectLatestClaudeFrontierModel([
+        { id: "anthropic/claude-opus-4.5", name: "Claude Opus 4.5", created: 100 },
+        { id: "anthropic/claude-opus-4.1", name: "Claude Opus 4.1", created: 90 },
+        { id: "anthropic/claude-opus-4.8", name: "Claude Opus 4.8", created: 110 },
+        { id: "anthropic/claude-opus-4.7", name: "Claude Opus 4.7", created: 105 },
+        { id: "anthropic/claude-sonnet-4.6", name: "Claude Sonnet 4.6", created: 108 },
+      ]),
+    ).toBe("anthropic/claude-opus-4.8");
+  });
+
+  it("prefers the canonical slug over -fast / variant slugs on a version tie", () => {
+    expect(
+      selectLatestClaudeFrontierModel([
+        { id: "anthropic/claude-opus-4.8-fast", name: "Claude Opus 4.8 (fast)", created: 200 },
+        { id: "anthropic/claude-opus-4.8", name: "Claude Opus 4.8", created: 200 },
+      ]),
+    ).toBe("anthropic/claude-opus-4.8");
+  });
+
+  it("excludes Haiku and non-Claude models from frontier selection", () => {
+    expect(
+      selectLatestClaudeFrontierModel([
+        { id: "anthropic/claude-haiku-4.5", name: "Claude Haiku 4.5", created: 999 },
+        { id: "openai/gpt-5", name: "GPT-5", created: 999 },
+      ]),
+    ).toBeNull();
+  });
+
+  it("parseClaudeVersion handles both slug orderings and ignores dates", () => {
+    expect(parseClaudeVersion("anthropic/claude-opus-4.8")).toBe(4.8);
+    expect(parseClaudeVersion("anthropic/claude-3.5-sonnet")).toBe(3.5);
+    expect(parseClaudeVersion("anthropic/claude-opus-4")).toBe(4);
+    expect(parseClaudeVersion("anthropic/claude-opus-4.1-20260101")).toBe(4.1);
   });
 });

@@ -1,6 +1,6 @@
 /** Default repair model (override with OPENROUTER_MODEL). Use vars for Opus on high-risk only. */
-export const DEFAULT_AI_REPAIR_MODEL = 'anthropic/claude-sonnet-4';
-export const DEFAULT_PREMIUM_AI_REPAIR_MODEL = 'anthropic/claude-opus-4.1';
+export const DEFAULT_AI_REPAIR_MODEL = 'anthropic/claude-sonnet-4.6';
+export const DEFAULT_PREMIUM_AI_REPAIR_MODEL = 'anthropic/claude-opus-4.8';
 
 export type OpenRouterRepairMessage = {
   role: 'system' | 'user' | 'assistant';
@@ -46,20 +46,50 @@ export function isValidOpenRouterModelId(model: string | null | undefined): bool
   return typeof model === 'string' && OPENROUTER_MODEL_ID_PATTERN.test(model.trim());
 }
 
+/**
+ * Parse the highest plausible version number (e.g. 4.8) from a model id/name.
+ * Anthropic OpenRouter slugs put the version next to the tier in either order
+ * (`claude-opus-4.8`, `claude-3.5-sonnet`); the only small numbers in these ids
+ * are version numbers, so the max version-shaped number is the model version.
+ * Numbers ≥ 50 (dates/years in any dated variant) are ignored.
+ */
+export function parseClaudeVersion(haystack: string): number {
+  const matches = haystack.match(/\d+(?:\.\d+)?/g);
+  if (!matches) return 0;
+  const versions = matches
+    .map(Number)
+    .filter((n) => Number.isFinite(n) && n > 0 && n < 50);
+  return versions.length ? Math.max(...versions) : 0;
+}
+
+/**
+ * Rank Claude frontier models so the *newest* is selected automatically — by tier
+ * (Opus is most capable), then parsed version, then recency (the `created` tiebreak
+ * in {@link selectLatestClaudeFrontierModel}). This replaces a hardcoded per-release
+ * bonus table that silently rotted: it had no rule above 4.5, so 4.6/4.7/4.8 scored
+ * *below* 4.5 and "latest_claude_frontier" never picked the actual latest model.
+ * Haiku and non-Claude models are not frontier repair models (rank 0).
+ */
 function claudeFrontierRank(model: OpenRouterModelSummary): number {
   const haystack = `${model.id} ${model.name ?? ''}`.toLowerCase();
   if (!haystack.includes('claude')) return 0;
-  let rank = 10;
-  if (haystack.includes('opus')) rank += 1000;
-  if (haystack.includes('sonnet')) rank += 800;
-  if (haystack.includes('4.5')) rank += 80;
-  if (haystack.includes('4.1')) rank += 70;
-  if (haystack.includes('4')) rank += 60;
-  if (haystack.includes('3.7')) rank += 30;
-  if (haystack.includes('3.5')) rank += 20;
-  if (haystack.includes('latest')) rank += 15;
-  if (model.created) rank += Math.min(50, Math.floor(model.created / 10_000_000));
-  return rank;
+
+  let tier: number;
+  if (haystack.includes('opus')) tier = 2_000_000;
+  else if (haystack.includes('sonnet')) tier = 1_000_000;
+  else return 0; // haiku / unknown — not used for safe-update repair
+
+  const version = parseClaudeVersion(haystack);
+
+  // Prefer the canonical slug over speed/preview/dated variants on a version tie
+  // (e.g. anthropic/claude-opus-4.8 over anthropic/claude-opus-4.8-fast). The
+  // penalty is tiny so it never crosses a version boundary.
+  const id = model.id.toLowerCase();
+  let penalty = 0;
+  if (id.includes(':')) penalty += 1;
+  if (/-(fast|beta|preview|thinking|mini|air|lite|nano)\b/.test(id)) penalty += 1;
+
+  return tier + version * 1000 - penalty;
 }
 
 export function selectLatestClaudeFrontierModel(models: OpenRouterModelSummary[]): string | null {
