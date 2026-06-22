@@ -191,6 +191,16 @@ jobs:
             /tmp/premium-ai-repair-report.json
           if-no-files-found: ignore
 
+      - name: Upload Premium AI partial checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-update-premium-ai-partial-checkpoint
+          path: |
+            /tmp/premium-ai-repair-checkpoint.patch
+            /tmp/premium-ai-checkpoints/**
+          if-no-files-found: ignore
+
       - name: Create Copilot escalation request
         if: >-
           (
@@ -318,6 +328,9 @@ jobs:
             const repairOutcome = repairMode === 'premium_ai' ? '${{ steps.premium_repair.outcome }}' : '${{ steps.repair.outcome }}';
             const premiumStatus = '${{ steps.premium_repair.outputs.status }}' || 'skipped';
             const premiumApplied = Number.parseInt('${{ steps.premium_repair.outputs.applied_count }}' || '0', 10);
+            const premiumCheckpointed = '${{ steps.premium_repair.outputs.checkpoint_persisted }}' === 'true';
+            const premiumCheckpointCount = Number.parseInt('${{ steps.premium_repair.outputs.checkpoint_count }}' || '0', 10);
+            const premiumUnresolved = Number.parseInt('${{ steps.premium_repair.outputs.unresolved_count }}' || '0', 10);
             const pushChanged = '${{ steps.push.outputs.changed }}' === 'true';
             const safetyOutcome = '${{ steps.safety_tests.outcome }}' || 'skipped';
             const buildOutcome = '${{ steps.build.outcome }}' || 'skipped';
@@ -327,10 +340,17 @@ jobs:
             let body = repairMode === 'premium_ai' ? '### MasjidWeb Premium AI repair\n\n' : '### MasjidWeb Autopilot repair\n\n';
             body += `Deterministic repair status: **${deterministicStatus}**. Repaired: **${Number.isFinite(deterministicRepaired) ? deterministicRepaired : 0}**. Blocked: **${Number.isFinite(deterministicBlocked) ? deterministicBlocked : 0}**.\n\n`;
             if (repairMode === 'premium_ai') {
-              body += `Premium AI repair status: **${premiumStatus}**. Applied files: **${Number.isFinite(premiumApplied) ? premiumApplied : 0}**.\n\n`;
+              body += `Premium AI repair status: **${premiumStatus}**. Applied files: **${Number.isFinite(premiumApplied) ? premiumApplied : 0}**.\n`;
+              if (premiumCheckpointed) {
+                body += `Partial checkpoint artifact: **persisted** for **${Number.isFinite(premiumCheckpointCount) ? premiumCheckpointCount : 0}** file(s). Unresolved files: **${Number.isFinite(premiumUnresolved) ? premiumUnresolved : 0}**.\n`;
+                body += 'Download `core-update-premium-ai-partial-checkpoint` and reapply it before rerunning Premium AI so the next attempt targets only the remaining files.\n';
+              }
+              body += '\n';
             }
             if (deterministicStatus === 'blocked' && !(repairMode === 'premium_ai' && ['applied', 'content_replacement_applied'].includes(premiumStatus))) {
-              body += 'Autopilot blocked this update to protect tenant data and Premium AI did not leave an applied repair. Review the repair artifacts for exact missing invariants.\n';
+              body += premiumCheckpointed
+                ? 'Premium AI checkpointed individually safe files, but unresolved files remain. Review the checkpoint and repair artifacts for exact remaining blockers.\n'
+                : 'Autopilot blocked this update to protect tenant data and Premium AI did not leave an applied repair. Review the repair artifacts for exact missing invariants.\n';
               body += 'Do **not** merge until a developer resolves the blocked files and the normal PR checks finish green.\n';
             } else if (repairOutcome === 'failure') {
               body += 'AI repair **failed**. Check the workflow logs for OpenRouter or conflict resolution errors.\n';
