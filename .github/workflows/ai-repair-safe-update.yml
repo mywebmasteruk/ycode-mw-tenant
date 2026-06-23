@@ -276,6 +276,17 @@ jobs:
       - name: Tenant isolation guard
         run: bash scripts/check-tenant-isolation.sh
 
+      # Static differential proof: the repaired branch must not drop any
+      # applyTenantEq()/tenant_id scope that exists on the pre-update baseline.
+      # Catches a merge/AI repair silently removing tenant scoping even where the
+      # behavioral tests above have no coverage. Blocks approval on regression.
+      - name: Tenant isolation differential gate
+        env:
+          ISOLATION_GATE_BASELINE_REF: origin/main
+        run: |
+          git fetch --no-tags --depth=1 origin main || git fetch --no-tags origin main
+          npx --yes tsx scripts/core-update/run-tenant-isolation-gate.ts
+
       - name: Type-check repaired branch
         run: npm run type-check
 

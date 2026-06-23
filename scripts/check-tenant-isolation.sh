@@ -32,6 +32,7 @@ TENANT_ISOLATION_TESTS=(
   lib/masjidweb/provisioned-tenant-rbac.test.ts
   lib/masjidweb/auth-users-tenant-scope.test.ts
   lib/masjidweb/apply-tenant-eq.test.ts
+  lib/masjidweb/tenant-isolation-gate.test.ts
   lib/masjidweb/collection-item-timestamp-scope.test.ts
   lib/masjidweb/tenant-cache-tags.test.ts
   lib/masjidweb/api-keys-form-submissions-rls-migration.test.ts

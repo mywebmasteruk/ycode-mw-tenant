@@ -1,0 +1,146 @@
+import { describe, expect, it } from 'vitest';
+import {
+  analyzeTenantIsolation,
+  isolationRegressions,
+  TENANT_SCOPED_TABLES,
+} from './tenant-isolation-gate';
+
+const scopedRead = `
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
+export async function getSettings(client, tenantId) {
+  let query = client.from('settings').select('*').order('key');
+  query = applyTenantEq(query, tenantId);
+  return query;
+}
+`;
+
+const unscopedRead = `
+export async function getSettings(client) {
+  const { data } = await client.from('settings').select('*');
+  return data;
+}
+`;
+
+const scopedWrite = `
+export async function saveSetting(client, tenantId, key, value) {
+  const row = { key, value, ...(tenantId ? { tenant_id: tenantId } : {}) };
+  return client.from('settings').upsert(row, { onConflict: 'tenant_id,key' });
+}
+`;
+
+const unscopedWrite = `
+export async function saveSetting(client, key, value) {
+  return client.from('settings').upsert({ key, value });
+}
+`;
+
+describe('analyzeTenantIsolation', () => {
+  it('passes a tenant-scoped read (applyTenantEq)', () => {
+    expect(analyzeTenantIsolation('settingsRepository.ts', scopedRead)).toEqual([]);
+  });
+
+  it('flags an unscoped read on a tenant table', () => {
+    const findings = analyzeTenantIsolation('settingsRepository.ts', unscopedRead);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ table: 'settings', op: 'read' });
+  });
+
+  it('passes a tenant-scoped write (tenant_id in payload)', () => {
+    expect(analyzeTenantIsolation('settingsRepository.ts', scopedWrite)).toEqual([]);
+  });
+
+  it('flags an upsert with no tenant_id in the payload', () => {
+    const findings = analyzeTenantIsolation('settingsRepository.ts', unscopedWrite);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ table: 'settings', op: 'write' });
+  });
+
+  it('passes a literal .eq(tenant_id) scope', () => {
+    const src = `export async function f(client, t) {
+      return client.from('pages').select('*').eq('tenant_id', t);
+    }`;
+    expect(analyzeTenantIsolation('pageRepository.ts', src)).toEqual([]);
+  });
+
+  it('ignores non-tenant tables', () => {
+    const src = `export async function f(client) {
+      return client.from('migrations').select('*');
+    }`;
+    expect(analyzeTenantIsolation('x.ts', src)).toEqual([]);
+  });
+
+  it('honors the isolation-ok escape hatch on the line above', () => {
+    const src = `export async function f(client) {
+      // isolation-ok: platform-wide locale catalog, not tenant data
+      return client.from('locales').select('*');
+    }`;
+    expect(analyzeTenantIsolation('x.ts', src)).toEqual([]);
+  });
+
+  it('flags only the unscoped query when a function mixes scoped and unscoped (per-variable)', () => {
+    const src = `export async function f(client, t) {
+      let a = client.from('pages').select('*');
+      a = applyTenantEq(a, t);
+      const b = await client.from('assets').select('*');
+      return [a, b];
+    }`;
+    const findings = analyzeTenantIsolation('x.ts', src);
+    // 'a' is scoped via applyTenantEq(a, …); 'b' is an unscoped inline read → exactly one finding.
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ table: 'assets', op: 'read' });
+  });
+
+  it('canonical tenant table set includes the core CMS tables', () => {
+    for (const t of ['pages', 'collection_items', 'page_layers', 'settings', 'assets']) {
+      expect(TENANT_SCOPED_TABLES.has(t)).toBe(true);
+    }
+  });
+});
+
+describe('isolationRegressions (differential gate)', () => {
+  const baseline = `export async function f(client) {
+    // isolation-ok: platform-wide content-hash backfill
+    return client.from('pages').select('*').is('content_hash', null);
+  }`;
+  // Same legitimately-global query, still annotated → no regression.
+  const unchanged = baseline;
+  // A merge dropped the applyTenantEq scope from a previously-scoped read.
+  const baselineScoped = `export async function g(client, t) {
+    let q = client.from('pages').select('*');
+    q = applyTenantEq(q, t);
+    return q;
+  }`;
+  const droppedScope = `export async function g(client, t) {
+    return client.from('pages').select('*');
+  }`;
+
+  it('passes when the file is unchanged (pre-existing global pattern baselined out)', () => {
+    const base = analyzeTenantIsolation('pageRepository.ts', baseline);
+    const merged = analyzeTenantIsolation('pageRepository.ts', unchanged);
+    expect(isolationRegressions(base, merged)).toEqual([]);
+  });
+
+  it('fails when a merge drops a previously-present tenant scope', () => {
+    const base = analyzeTenantIsolation('pageRepository.ts', baselineScoped);
+    const merged = analyzeTenantIsolation('pageRepository.ts', droppedScope);
+    const regressions = isolationRegressions(base, merged);
+    expect(regressions).toHaveLength(1);
+    expect(regressions[0]).toMatchObject({ fn: 'g', table: 'pages', op: 'read' });
+  });
+
+  it('does not flag a pre-existing unscoped access that was already in baseline', () => {
+    // Same already-unscoped read in both → not a regression (baseline accepts it).
+    const src = `export async function h(client) { return client.from('pages').select('*'); }`;
+    const base = analyzeTenantIsolation('pageRepository.ts', src);
+    const merged = analyzeTenantIsolation('pageRepository.ts', src);
+    expect(isolationRegressions(base, merged)).toEqual([]);
+  });
+});
+
+describe('tenant table set', () => {
+  it('includes the core CMS tables (sanity)', () => {
+    for (const t of ['pages', 'collection_items', 'page_layers', 'settings', 'assets']) {
+      expect(TENANT_SCOPED_TABLES.has(t)).toBe(true);
+    }
+  });
+});
