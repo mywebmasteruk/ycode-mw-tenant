@@ -17,6 +17,7 @@ import type { PageData } from '@/lib/page-fetcher'
 import { buildSlugPath, buildLocalizedSlugPath } from '@/lib/page-utils'
 import { getTranslatableKey } from '@/lib/locale-runtime'
 import { getValuesByFieldId } from '@/lib/repositories/collectionItemValueRepository'
+import { resolveCustomCodePlaceholders } from '@/lib/resolve-cms-variables'
 
 import type { Locale, Page, PageFolder, Translation } from '@/types'
 
@@ -39,6 +40,13 @@ export interface ResolvedPage {
   outputKey: string
   hasSlider: boolean
   interactions: ExportedInteraction[]
+  /**
+   * Page-level custom code from `page.settings.custom_code.{head,body}`.
+   * Already placeholder-resolved against the dynamic page's collection
+   * item when applicable. Null when the page has no per-page custom code.
+   */
+  pageCustomCodeHead: string | null
+  pageCustomCodeBody: string | null
 }
 
 interface PageCmsSettings {
@@ -167,7 +175,25 @@ function renderResolved(
     components: data.components,
     locale: data.locale ?? ctx.locale ?? null,
     translations: data.translations ?? ctx.translations,
+    pageId: page.id,
   })
+
+  // Page-level custom code lives at `page.settings.custom_code.{head,body}`.
+  // For dynamic pages, the stored template may contain `{{FieldName}}`
+  // placeholders that need resolution against the current item — mirrors
+  // what PageRenderer.tsx does for the live site.
+  const customCode = page.settings?.custom_code
+  const rawHead = customCode?.head || ''
+  const rawBody = customCode?.body || ''
+  const shouldResolvePlaceholders =
+    page.is_dynamic && data.collectionItem && (data.collectionFields?.length ?? 0) > 0
+  const pageCustomCodeHead = shouldResolvePlaceholders
+    ? resolveCustomCodePlaceholders(rawHead, data.collectionItem!, data.collectionFields!)
+    : rawHead
+  const pageCustomCodeBody = shouldResolvePlaceholders
+    ? resolveCustomCodePlaceholders(rawBody, data.collectionItem!, data.collectionFields!)
+    : rawBody
+
   return {
     page,
     bodyHtml,
@@ -176,5 +202,7 @@ function renderResolved(
     outputKey,
     hasSlider: layerTreeContains(layers, 'slider'),
     interactions: collectInteractions(layers),
+    pageCustomCodeHead: pageCustomCodeHead || null,
+    pageCustomCodeBody: pageCustomCodeBody || null,
   }
 }

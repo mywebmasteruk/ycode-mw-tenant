@@ -50,6 +50,36 @@ interface CollectionLayerActions {
 
 type CollectionLayerStore = CollectionLayerState & CollectionLayerActions;
 
+/**
+ * Shared in-flight/result cache for layer fetches, keyed by the full request
+ * signature. Multiple layers bound to the same collection with identical params
+ * (common with reference collections repeated across component instances) reuse
+ * one request instead of each firing its own. Cleared on invalidation.
+ */
+const sharedLayerRequests = new Map<string, Promise<{ items: CollectionItemWithValues[]; total: number }>>();
+
+/** Build a stable request key from layer fetch params. */
+const buildRequestKey = (
+  collectionId: string,
+  sortBy: string | undefined,
+  sortOrder: 'asc' | 'desc' | undefined,
+  limit: number | undefined,
+  offset: number | undefined,
+  filters: Array<{ fieldId: string; operator: string; value: string }> | undefined
+): string =>
+  `${collectionId}::${sortBy ?? ''}::${sortOrder}::${limit ?? ''}::${offset ?? ''}::${JSON.stringify(filters ?? null)}`;
+
+/** Drop shared cache entries belonging to a collection (or all when omitted). */
+const clearSharedRequests = (collectionId?: string): void => {
+  if (!collectionId) {
+    sharedLayerRequests.clear();
+    return;
+  }
+  for (const key of sharedLayerRequests.keys()) {
+    if (key.startsWith(`${collectionId}::`)) sharedLayerRequests.delete(key);
+  }
+};
+
 export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) => ({
   // Initial state
   layerData: {},
@@ -187,21 +217,33 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
     }));
 
     try {
-      // Fetch items using existing API with layer-specific parameters
-      const response = await collectionsApi.getItems(collectionId, {
-        sortBy,
-        sortOrder,
-        limit,
-        offset,
-        filters,
-      });
-
-      if (response.error) {
-        throw new Error(response.error);
+      // Reuse a shared request when another layer already fetched (or is
+      // fetching) the same collection with identical params. Prevents N
+      // identical network calls when a collection is repeated across instances.
+      const requestKey = buildRequestKey(collectionId, sortBy, sortOrder, limit, offset, filters);
+      let request = sharedLayerRequests.get(requestKey);
+      if (!request) {
+        request = (async () => {
+          const response = await collectionsApi.getItems(collectionId, {
+            sortBy,
+            sortOrder,
+            limit,
+            offset,
+            filters,
+          });
+          if (response.error) {
+            throw new Error(response.error);
+          }
+          const fetchedItems = response.data?.items || [];
+          const fetchedTotal = typeof response.data?.total === 'number' ? response.data.total : fetchedItems.length;
+          return { items: fetchedItems, total: fetchedTotal };
+        })();
+        sharedLayerRequests.set(requestKey, request);
+        // Drop on failure so a later attempt can retry.
+        request.catch(() => sharedLayerRequests.delete(requestKey));
       }
 
-      const items = response.data?.items || [];
-      const total = typeof response.data?.total === 'number' ? response.data.total : items.length;
+      const { items, total } = await request;
 
       // Store fetched data keyed by layerId
       set((state) => ({
@@ -247,6 +289,7 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
 
   // Clear all layer data
   clearAllLayerData: () => {
+    clearSharedRequests();
     set({
       layerData: {},
       layerTotal: {},
@@ -288,6 +331,7 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
     }
     const updatedReferenced = { ...referencedItems };
     delete updatedReferenced[collectionId];
+    clearSharedRequests(collectionId);
     set({
       layerConfig: updatedConfig,
       referencedItems: updatedReferenced,
@@ -304,27 +348,47 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
       .filter(([_, config]) => config.collectionId === collectionId)
       .map(([layerId]) => layerId);
 
-    // Refetch each layer without showing loading state
+    // Refetch each layer without showing loading state. Layers sharing the same
+    // collection + params reuse one request via the shared cache.
     for (const layerId of layersToRefetch) {
       const config = layerConfig[layerId];
       if (config) {
         try {
-          const response = await collectionsApi.getItems(config.collectionId, {
-            sortBy: config.sortBy,
-            sortOrder: config.sortOrder,
-            limit: config.limit,
-            offset: config.offset,
-            filters: config.filters,
-          });
-
-          if (!response.error && response.data?.items) {
-            const total = typeof response.data.total === 'number' ? response.data.total : response.data.items.length;
-            // Update data silently (no loading state change)
-            set((state) => ({
-              layerData: { ...state.layerData, [layerId]: response.data!.items },
-              layerTotal: { ...state.layerTotal, [layerId]: total },
-            }));
+          const requestKey = buildRequestKey(
+            config.collectionId,
+            config.sortBy,
+            config.sortOrder,
+            config.limit,
+            config.offset,
+            config.filters
+          );
+          let request = sharedLayerRequests.get(requestKey);
+          if (!request) {
+            request = (async () => {
+              const response = await collectionsApi.getItems(config.collectionId, {
+                sortBy: config.sortBy,
+                sortOrder: config.sortOrder,
+                limit: config.limit,
+                offset: config.offset,
+                filters: config.filters,
+              });
+              if (response.error) {
+                throw new Error(response.error);
+              }
+              const fetchedItems = response.data?.items || [];
+              const fetchedTotal = typeof response.data?.total === 'number' ? response.data.total : fetchedItems.length;
+              return { items: fetchedItems, total: fetchedTotal };
+            })();
+            sharedLayerRequests.set(requestKey, request);
+            request.catch(() => sharedLayerRequests.delete(requestKey));
           }
+
+          const { items, total } = await request;
+          // Update data silently (no loading state change)
+          set((state) => ({
+            layerData: { ...state.layerData, [layerId]: items },
+            layerTotal: { ...state.layerTotal, [layerId]: total },
+          }));
         } catch (error) {
           console.error(`[CollectionLayerStore] Error refetching layer ${layerId}:`, error);
         }

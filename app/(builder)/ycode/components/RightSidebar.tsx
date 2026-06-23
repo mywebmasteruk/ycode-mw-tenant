@@ -34,6 +34,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 // 4. Internal components
 import AddAttributeModal from './AddAttributeModal';
 import BackgroundsControls from './BackgroundsControls';
+import CustomAttributeRow from './CustomAttributeRow';
 import BorderControls from './BorderControls';
 import ComponentVariablesDialog from './ComponentVariablesDialog';
 import EffectControls from './EffectControls';
@@ -77,6 +78,7 @@ import { useEditorStore } from '@/stores/useEditorStore';
 import { useComponentsStore } from '@/stores/useComponentsStore';
 import { usePagesStore } from '@/stores/usePagesStore';
 import { useCollectionsStore } from '@/stores/useCollectionsStore';
+import { useGlobalsStore } from '@/stores/useGlobalsStore';
 import { useLayerStylesStore } from '@/stores/useLayerStylesStore';
 import { useCanvasTextEditorStore } from '@/stores/useCanvasTextEditorStore';
 import { useEditorActions, useEditorUrl } from '@/hooks/use-editor-url';
@@ -258,6 +260,7 @@ const RightSidebar = React.memo(function RightSidebar({
   const collections = useCollectionsStore((state) => state.collections);
   const fields = useCollectionsStore((state) => state.fields);
   const loadFields = useCollectionsStore((state) => state.loadFields);
+  const globals = useGlobalsStore((state) => state.globals);
 
   // Resolve the active variant id while editing a component, falling back to
   // the first variant if state references a stale id.
@@ -1692,8 +1695,8 @@ const RightSidebar = React.memo(function RightSidebar({
   const fieldGroups = useMemo(() => {
     if (!selectedLayerId || !allLayers.length) return undefined;
     const page = editingComponentId ? null : currentPage;
-    return buildFieldGroupsForLayer(selectedLayerId, allLayers, page, fields, collections);
-  }, [selectedLayerId, allLayers, currentPage, fields, collections, editingComponentId]);
+    return buildFieldGroupsForLayer(selectedLayerId, allLayers, page, fields, collections, globals);
+  }, [selectedLayerId, allLayers, currentPage, fields, collections, globals, editingComponentId]);
 
   // Get collection fields for the currently selected collection layer (for Sort By dropdown)
   const selectedCollectionFields = useMemo(() => {
@@ -1836,6 +1839,23 @@ const RightSidebar = React.memo(function RightSidebar({
         }
       });
     }
+  };
+
+  // Handle editing custom attribute (supports renaming the attribute key)
+  const handleEditAttribute = (oldName: string, newName: string, newValue: string) => {
+    if (!selectedLayerId || !newName.trim()) return;
+    const currentSettings = selectedLayer?.settings || {};
+    const currentAttributes = { ...currentSettings.customAttributes };
+    if (oldName !== newName) {
+      delete currentAttributes[oldName];
+    }
+    currentAttributes[newName] = newValue;
+    handleLayerUpdate(selectedLayerId, {
+      settings: {
+        ...currentSettings,
+        customAttributes: currentAttributes
+      }
+    });
   };
 
   if (!selectedLayerId || !selectedLayer) {
@@ -2997,20 +3017,13 @@ const RightSidebar = React.memo(function RightSidebar({
               {selectedLayer?.settings?.customAttributes && (
                 <div className="flex flex-col gap-1">
                   {Object.entries(selectedLayer.settings.customAttributes).map(([name, value]) => (
-                    <div
+                    <CustomAttributeRow
                       key={name}
-                      className="flex items-center justify-between pl-3 pr-1 h-8 bg-muted text-muted-foreground rounded-lg"
-                    >
-                      <span>{name}=&quot;{value as string}&quot;</span>
-                      <span
-                        role="button"
-                        tabIndex={0}
-                        className="p-0.5 rounded-sm opacity-70 hover:opacity-100 transition-opacity cursor-pointer"
-                        onClick={() => handleRemoveAttribute(name)}
-                      >
-                        <Icon name="x" className="size-2.5" />
-                      </span>
-                    </div>
+                      name={name}
+                      value={value as string}
+                      onEdit={handleEditAttribute}
+                      onRemove={handleRemoveAttribute}
+                    />
                   ))}
                 </div>
               )}

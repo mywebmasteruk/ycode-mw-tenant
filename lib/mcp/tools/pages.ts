@@ -47,13 +47,16 @@ export function registerPageTools(server: McpServer) {
 
   server.tool(
     'create_page',
-    'Create a new page. Returns the created page with its ID. The page is created as a draft — use the publish tool to make it live.',
+    `Create a new page. Returns the created page with its ID. The page is unpublished — use the publish tool to make it live.
+
+DRAFT STATUS: Set is_publishable to false to keep this page as a draft that is skipped when the site is published (it will not go live until you flip it back to publishable). Defaults to publishable.`,
     {
       name: z.string().describe('Page title (e.g. "About Us", "Contact")'),
       slug: z.string().optional().describe('URL slug. Auto-generated from name if omitted.'),
       page_folder_id: z.string().nullable().optional().describe('Parent folder ID, or null for root'),
       is_index: z.boolean().optional().describe('Set to true to make this the homepage'),
       is_dynamic: z.boolean().optional().describe('Set to true for CMS dynamic pages'),
+      is_publishable: z.boolean().optional().describe('Set to false to keep the page as a draft that is excluded from publishing. Defaults to true.'),
     },
     async (args) => {
       const isIndex = args.is_index || false;
@@ -67,6 +70,7 @@ export function registerPageTools(server: McpServer) {
         name: args.name,
         slug,
         is_published: false,
+        ...(args.is_publishable !== undefined ? { is_publishable: args.is_publishable } : {}),
         page_folder_id: folderId,
         order: maxOrder + 1,
         depth: 0,
@@ -97,7 +101,8 @@ export function registerPageTools(server: McpServer) {
     `Update a page's metadata: name, slug, folder, homepage flag, dynamic flag, and error-page assignment.
 
 ERROR PAGES: Set error_page to 401, 404, or 500 to designate this as the auth-required / not-found / server-error page for the site. Pass null to clear.
-DYNAMIC PAGES: Set is_dynamic true to turn this into a CMS-driven page (then use update_page_settings.cms to bind it to a collection).`,
+DYNAMIC PAGES: Set is_dynamic true to turn this into a CMS-driven page (then use update_page_settings.cms to bind it to a collection).
+DRAFT STATUS: Set is_publishable to false to keep the page as a draft that is skipped when the site is published; set true to allow it to go live on the next publish.`,
     {
       page_id: z.string().describe('The page ID to update'),
       name: z.string().optional().describe('New page title'),
@@ -105,6 +110,7 @@ DYNAMIC PAGES: Set is_dynamic true to turn this into a CMS-driven page (then use
       page_folder_id: z.string().nullable().optional().describe('Move to folder ID, or null for root'),
       is_index: z.boolean().optional().describe('Mark as the homepage (only one page can be the index)'),
       is_dynamic: z.boolean().optional().describe('Turn into a CMS dynamic page'),
+      is_publishable: z.boolean().optional().describe('Set false to keep the page as a draft excluded from publishing; true to allow it to go live on publish.'),
       error_page: z.union([z.literal(401), z.literal(404), z.literal(500)]).nullable().optional()
         .describe('Designate as 401 / 404 / 500 error page. Pass null to clear.'),
     },

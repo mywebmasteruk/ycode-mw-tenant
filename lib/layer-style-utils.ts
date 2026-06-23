@@ -31,6 +31,44 @@ export function applyStyleToLayer(layer: Layer, style: LayerStyle): Layer {
 }
 
 /**
+ * Set a layer's full ordered style stack (combo classes), low -> high priority,
+ * and re-flatten the resolved classes/design from the referenced styles.
+ *
+ * Later styles win on conflicting properties, mirroring Webflow combo classes.
+ * Per-chip overrides are pruned to the styles that remain in the stack, and the
+ * legacy single-blob `styleOverrides` is dropped so the stack drives the render.
+ * An empty stack detaches all styles while preserving the current rendered look.
+ */
+export function setLayerStyleStack(
+  layer: Layer,
+  styleIds: string[],
+  stylesById: Map<string, LayerStyle>,
+): Layer {
+  if (styleIds.length === 0) {
+    return detachStyleFromLayer(layer);
+  }
+
+  const prevMap = layer.styleOverridesByStyle ?? {};
+  const map: NonNullable<Layer['styleOverridesByStyle']> = {};
+  for (const id of styleIds) {
+    if (prevMap[id]) map[id] = prevMap[id];
+  }
+
+  const next: Layer = {
+    ...layer,
+    styleIds,
+    styleId: styleIds[0],
+    styleOverridesByStyle: Object.keys(map).length > 0 ? map : undefined,
+    styleOverrides: undefined,
+  };
+
+  const classes = resolveLayerClasses(next, stylesById);
+  next.classes = classes;
+  next.design = buildDesign(classes);
+  return next;
+}
+
+/**
  * Detach style from a layer
  * Copies the current effective styling (style + overrides) to the layer's own classes/design
  * Then removes the style link and overrides
