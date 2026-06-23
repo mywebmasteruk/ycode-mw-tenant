@@ -91,13 +91,19 @@ function main(): void {
 
   const resolved: string[] = [];
   const deferred: { file: string; reason: string }[] = [];
+  // Original (conflicted) content of every file we touch, so we can roll back
+  // cleanly if the batch doesn't type-check.
+  const originalContent = new Map<string, string>();
 
   for (const file of targets) {
+    const abs = join(REPO_ROOT, file);
+    if (!originalContent.has(file)) originalContent.set(file, readFileSync(abs, 'utf8'));
+
     // Upstream (theirs) view: prefer the merge stage; else resolve the file's
     // own conflict markers to the upstream side.
     let upstream = tryGit(`show :3:${file}`);
     if (upstream === null) {
-      const withMarkers = readFileSync(join(REPO_ROOT, file), 'utf8');
+      const withMarkers = originalContent.get(file)!;
       upstream = withMarkers.includes('<<<<<<<') ? takeTheirs(withMarkers) : withMarkers;
     }
     if (upstream === null) {
@@ -114,8 +120,7 @@ function main(): void {
     const regressions = isolationRegressions(baseline, after);
 
     if (regressions.length === 0 && residual.length === 0) {
-      writeFileSync(join(REPO_ROOT, file), code);
-      git(`add ${file}`);
+      writeFileSync(abs, code);
       resolved.push(file);
     } else {
       const why =
@@ -124,6 +129,40 @@ function main(): void {
           : `${residual.length} query form(s) the codemod cannot mechanically scope`;
       deferred.push({ file, reason: why });
     }
+  }
+
+  // Type-check guard: gate-pass proves isolation but not type-correctness. Taking
+  // the upstream side of one conflict can leave a `tenantId` reference undeclared
+  // elsewhere in a partially-merged file. If the resolved batch doesn't compile,
+  // roll the whole batch back to its conflicted state and defer to the LLM —
+  // never leave broken code in the tree.
+  if (resolved.length > 0) {
+    // Other still-conflicted files have markers (syntax errors), so attribute
+    // tsc errors PER FILE and roll back only resolved files that themselves fail
+    // to type-check. (gate-pass proves isolation; this proves compilation.)
+    let tscOut = '';
+    try {
+      execSync('npx --yes tsc --noEmit', { cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+      const err = e as { stdout?: Buffer; stderr?: Buffer };
+      tscOut = `${err.stdout?.toString() ?? ''}\n${err.stderr?.toString() ?? ''}`;
+    }
+    const filesWithErrors = new Set<string>();
+    for (const ln of tscOut.split('\n')) {
+      const m = ln.match(/^(\S[^(]*\.ts)\(\d+,\d+\):\s+error TS/);
+      if (m) filesWithErrors.add(m[1].replace(/\\/g, '/'));
+    }
+    const bad = resolved.filter((f) => filesWithErrors.has(f));
+    if (bad.length > 0) {
+      for (const file of bad) {
+        writeFileSync(join(REPO_ROOT, file), originalContent.get(file)!);
+        deferred.push({ file, reason: 'codemod output did not type-check (rolled back to conflict)' });
+      }
+    }
+    const good = resolved.filter((f) => !filesWithErrors.has(f));
+    for (const file of good) tryGit(`add '${file}'`);
+    resolved.length = 0;
+    resolved.push(...good);
   }
 
   console.log(`Deterministic Tier-2 resolver: ${targets.length} conflicted Tier-2 file(s).`);
