@@ -27,8 +27,14 @@ const REPORT_JSON_PATH = process.env.PREMIUM_AI_REPAIR_REPORT_JSON_PATH || '/tmp
 const AUTOPILOT_REPORT_PATH = process.env.AUTOPILOT_REPAIR_REPORT_PATH || '/tmp/autopilot-repair-report.md';
 const AUTOPILOT_REPORT_JSON_PATH = process.env.AUTOPILOT_REPAIR_REPORT_JSON_PATH || '/tmp/autopilot-repair-report.json';
 const REPAIR_BATCH_SIZE = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_BATCH_SIZE, 1);
-const MAX_FILE_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_FILE_CHARS, 60_000);
-const MAX_RETRY_FILE_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_RETRY_MAX_FILE_CHARS, 40_000);
+// A merge-conflicted file carries BOTH sides plus markers, so it is ~1.5-2x the
+// resolved size. The old 60k/40k caps truncated large tenant repos (e.g. the
+// conflicted publish/route.ts and collectionItemRepository.ts), and the model
+// correctly *blocked* rather than risk dropping tenant filters in the unseen tail.
+// The repair model has a 1M-token context window, so send the whole file: 240k
+// chars is ~60k tokens, far below context, and still env-overridable to bound cost.
+const MAX_FILE_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_FILE_CHARS, 240_000);
+const MAX_RETRY_FILE_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_RETRY_MAX_FILE_CHARS, 160_000);
 const MAX_HUNK_CONTEXT_LINES = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_HUNK_CONTEXT_LINES, 80);
 const MAX_DOC_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_DOC_CHARS, 12_000);
 const MAX_REPLY_TOKENS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_TOKENS, 24_000);
