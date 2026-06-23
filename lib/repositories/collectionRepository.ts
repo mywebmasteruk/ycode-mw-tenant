@@ -420,32 +420,11 @@ export async function deleteCollection(id: string, isPublished: boolean = false)
   if (items && items.length > 0) {
     const itemIds = items.map(item => item.id);
 
-<<<<<<< HEAD
-    let valUpd = client
-      .from('collection_item_values')
-      .update({
-        deleted_at: now,
-        updated_at: now,
-      })
-      .in('item_id', itemIds)
-      .eq('is_published', isPublished)
-      .is('deleted_at', null);
-||||||| 1e44661
-    const { error: valuesError } = await client
-      .from('collection_item_values')
-      .update({
-        deleted_at: now,
-        updated_at: now,
-      })
-      .in('item_id', itemIds)
-      .eq('is_published', isPublished)
-      .is('deleted_at', null);
-=======
     // Chunk the id list so large `.in()` filters don't overflow the request URL
     // length limit (which returns 400 Bad Request).
     for (let i = 0; i < itemIds.length; i += SUPABASE_IN_FILTER_CHUNK_SIZE) {
       const idsChunk = itemIds.slice(i, i + SUPABASE_IN_FILTER_CHUNK_SIZE);
-      const { error: valuesError } = await client
+      let valUpd = client
         .from('collection_item_values')
         .update({
           deleted_at: now,
@@ -454,25 +433,16 @@ export async function deleteCollection(id: string, isPublished: boolean = false)
         .in('item_id', idsChunk)
         .eq('is_published', isPublished)
         .is('deleted_at', null);
->>>>>>> upstream/main
 
-<<<<<<< HEAD
-    if (effectiveTenantId) {
-      valUpd = valUpd.eq('tenant_id', effectiveTenantId);
-    }
+      if (effectiveTenantId) {
+        valUpd = valUpd.eq('tenant_id', effectiveTenantId);
+      }
 
-    const { error: valuesError } = await valUpd;
+      const { error: valuesError } = await valUpd;
 
-    if (valuesError) {
-      console.error('Error soft-deleting collection item values:', valuesError);
-||||||| 1e44661
-    if (valuesError) {
-      console.error('Error soft-deleting collection item values:', valuesError);
-=======
       if (valuesError) {
         console.error('Error soft-deleting collection item values:', valuesError);
       }
->>>>>>> upstream/main
     }
   }
 }

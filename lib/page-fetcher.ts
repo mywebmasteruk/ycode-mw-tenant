@@ -238,55 +238,20 @@ export async function loadTranslationsForLocale(
       return { locale: null, translations: {} };
     }
 
-<<<<<<< HEAD
-    // Fetch all translations for this locale. Supabase caps PostgREST
-    // responses at 1000 rows by default — projects with more translations
-    // were silently truncated, causing entire layers to render in the
-    // source language on SSR while the editor (which fetches via its own
-    // paginated API) showed them correctly. Page through explicit ranges.
-    // NOTE: translations table has no tenant_id column; isolation is via locale_id (locales are tenant-scoped)
-    const PAGE_SIZE = 1000;
-    const translations: Translation[] = [];
-    for (let from = 0; ; from += PAGE_SIZE) {
-      const { data: page, error } = await supabase
-        .from('translations')
-        .select('*')
-        .eq('locale_id', locale.id)
-        .eq('is_published', isPublished)
-        .is('deleted_at', null)
-        .range(from, from + PAGE_SIZE - 1);
-||||||| 1e44661
-    // Fetch all translations for this locale. Supabase caps PostgREST
-    // responses at 1000 rows by default — projects with more translations
-    // were silently truncated, causing entire layers to render in the
-    // source language on SSR while the editor (which fetches via its own
-    // paginated API) showed them correctly. Page through explicit ranges.
-    const PAGE_SIZE = 1000;
-    const translations: Translation[] = [];
-    for (let from = 0; ; from += PAGE_SIZE) {
-      const { data: page, error } = await supabase
-        .from('translations')
-        .select('*')
-        .eq('locale_id', locale.id)
-        .eq('is_published', isPublished)
-        .is('deleted_at', null)
-        .range(from, from + PAGE_SIZE - 1);
-=======
     // Load the per-locale "scaffold" only: page/folder/component translations
     // plus CMS *slug* rows. This covers routing, SEO, page/component rendering
     // and URL generation. The bulk CMS *content* translations (text/rich text)
     // — which dominate large catalogues and previously made every render fetch
     // the entire locale catalogue — are loaded on demand per rendered item via
     // `ensureCmsTranslations`.
-    const scaffold = await getLocaleScaffoldTranslations(locale.id, isPublished, tenantId);
->>>>>>> upstream/main
+    const scaffold = await getLocaleScaffoldTranslations(locale.id, isPublished, tenantId ?? undefined);
 
     const translationsMap: Record<string, Translation> = {};
     for (const translation of scaffold) {
       translationsMap[getTranslatableKey(translation)] = translation;
     }
 
-    registerTranslationContext(translationsMap, locale.id, isPublished, tenantId);
+    registerTranslationContext(translationsMap, locale.id, isPublished, tenantId ?? undefined);
 
     return { locale, translations: translationsMap };
   } catch (error) {
@@ -411,15 +376,8 @@ async function getCollectionItemBySlug(
             // Extract item ID from translation key
             const itemId = translation.source_id;
 
-<<<<<<< HEAD
-            // Verify this item belongs to the correct collection
-||||||| 1e44661
-            // Verify this item belongs to the correct collection
-            const { data: item, error: itemError } = await supabase
-=======
             // Verify this item belongs to the correct collection. On the public
             // path also require is_publishable so unpublished items can't resolve.
->>>>>>> upstream/main
             let itemQuery = supabase
               .from('collection_items')
               .select('*')
@@ -427,14 +385,8 @@ async function getCollectionItemBySlug(
               .eq('collection_id', collectionId)
               .eq('is_published', isPublished)
               .is('deleted_at', null);
-<<<<<<< HEAD
             itemQuery = applyTenantEq(itemQuery, tenantId);
-||||||| 1e44661
-              .is('deleted_at', null)
-              .single();
-=======
             if (isPublished) itemQuery = itemQuery.eq('is_publishable', true);
->>>>>>> upstream/main
             const { data: item, error: itemError } = await itemQuery.single();
 
             if (!itemError && item) {
@@ -462,33 +414,18 @@ async function getCollectionItemBySlug(
       return null;
     }
 
-<<<<<<< HEAD
-    // Verify the item belongs to the correct collection
-    let verifyQuery = supabase
-||||||| 1e44661
-    // Verify the item belongs to the correct collection
-    const { data: item, error: itemError } = await supabase
-=======
     // Verify the item belongs to the correct collection. On the public path
     // also require is_publishable so unpublished items can't resolve.
-    let itemQuery = supabase
->>>>>>> upstream/main
+    let verifyQuery = supabase
       .from('collection_items')
       .select('*')
       .eq('id', valueData.item_id)
       .eq('collection_id', collectionId)
       .eq('is_published', isPublished)
       .is('deleted_at', null);
-<<<<<<< HEAD
     verifyQuery = applyTenantEq(verifyQuery, tenantId);
+    if (isPublished) verifyQuery = verifyQuery.eq('is_publishable', true);
     const { data: item, error: itemError } = await verifyQuery.single();
-||||||| 1e44661
-      .is('deleted_at', null)
-      .single();
-=======
-    if (isPublished) itemQuery = itemQuery.eq('is_publishable', true);
-    const { data: item, error: itemError } = await itemQuery.single();
->>>>>>> upstream/main
 
     if (itemError || !item) {
       return null;

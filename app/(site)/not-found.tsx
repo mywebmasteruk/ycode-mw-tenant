@@ -11,7 +11,7 @@ import YcodeBadge from '@/components/YcodeBadge';
 function fetchCachedCustom404(tenantId?: string) {
   return unstable_cache(
     async () => {
-      const data = await fetchErrorPage(404, true, tenantId);
+      const data = await fetchErrorPage(404, true);
       return data ? slimPageData(data) : null;
     },
     ['error-404'],

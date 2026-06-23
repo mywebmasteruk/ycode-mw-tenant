@@ -163,20 +163,12 @@ export async function getValuesByItemIds(
       .whereIn('item_id', safeItemIds)
       .andWhere('is_published', is_published)
       .whereNull('deleted_at');
-<<<<<<< HEAD
 
     if (tenantId) {
       query = query.andWhere('tenant_id', tenantId);
     }
-    if (fieldIds) {
-      query = query.whereIn('field_id', fieldIds);
-||||||| 1e44661
-    if (fieldIds) {
-      query = query.whereIn('field_id', fieldIds);
-=======
     if (safeFieldIds) {
       query = query.whereIn('field_id', safeFieldIds);
->>>>>>> upstream/main
     }
 
     allRows = await query;
@@ -195,19 +187,11 @@ export async function getValuesByItemIds(
           .in('item_id', chunk)
           .eq('is_published', is_published)
           .is('deleted_at', null);
-<<<<<<< HEAD
         if (tenantId) {
           q = q.eq('tenant_id', tenantId);
         }
-        if (fieldIds) {
-          q = q.in('field_id', fieldIds);
-||||||| 1e44661
-        if (fieldIds) {
-          q = q.in('field_id', fieldIds);
-=======
         if (safeFieldIds) {
           q = q.in('field_id', safeFieldIds);
->>>>>>> upstream/main
         }
         const { data, error } = await q.limit(5000);
 

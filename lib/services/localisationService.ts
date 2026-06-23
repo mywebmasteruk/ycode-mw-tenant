@@ -8,15 +8,9 @@
  */
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
-<<<<<<< HEAD
+import { SUPABASE_IN_FILTER_CHUNK_SIZE, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
-import { SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
-||||||| 1e44661
-import { SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
-=======
-import { SUPABASE_IN_FILTER_CHUNK_SIZE, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
->>>>>>> upstream/main
 import { getAllTranslationRows } from '@/lib/repositories/translationRepository';
 import type { Locale, Translation, TranslationSourceType } from '@/types';
 
@@ -367,25 +361,6 @@ export async function publishLocalisation(): Promise<PublishLocalisationResult> 
     // length limit (which returns 400 Bad Request).
     if (softDeletedDraftTranslations.length > 0) {
       const translationIds = softDeletedDraftTranslations.map((translation: Translation) => translation.id);
-<<<<<<< HEAD
-      let deleteQuery = client
-        .from('translations')
-        .update({ deleted_at: deletedAt })
-        .in('id', translationIds)
-        .eq('is_published', true)
-        .is('deleted_at', null);
-      deleteQuery = applyTenantEq(deleteQuery, tenantId);
-      const { error: deleteTranslationsError } = await deleteQuery;
-||||||| 1e44661
-      const { error: deleteTranslationsError } = await client
-        .from('translations')
-        .update({ deleted_at: deletedAt })
-        .in('id', translationIds)
-        .eq('is_published', true)
-        .is('deleted_at', null);
-=======
->>>>>>> upstream/main
-
       for (let i = 0; i < translationIds.length; i += SUPABASE_IN_FILTER_CHUNK_SIZE) {
         const idsChunk = translationIds.slice(i, i + SUPABASE_IN_FILTER_CHUNK_SIZE);
         const { error: deleteTranslationsError } = await client

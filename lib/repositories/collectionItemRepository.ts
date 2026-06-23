@@ -57,8 +57,7 @@ export async function getTopItemsPerCollection(
 
   const tenantId = await resolveEffectiveTenantId();
 
-<<<<<<< HEAD
-  // RPC does not filter by tenant — use manual path when tenant is resolved.
+  // RPC does not filter by tenant — only use when no tenant context.
   if (!tenantId) {
     const { data, error } = await client.rpc('get_top_items_per_collection', {
       p_collection_ids: collectionIds,
@@ -71,80 +70,35 @@ export async function getTopItemsPerCollection(
     }
   }
 
-  {
-    // Fallback / tenant-scoped path
-    let manualQuery = client
-      .from('collection_items')
-      .select('*')
-      .in('collection_id', collectionIds)
-      .eq('is_published', is_published)
-      .is('deleted_at', null)
-      .order('collection_id', { ascending: true })
-      .order('manual_order', { ascending: true })
-      .order('created_at', { ascending: false })
-      .limit(collectionIds.length * limit);
-||||||| 1e44661
-  if (error) {
-    // Fallback to manual approach if RPC doesn't exist yet
-    let manualQuery = client
-      .from('collection_items')
-      .select('*')
-      .in('collection_id', collectionIds)
-      .eq('is_published', is_published)
-      .is('deleted_at', null)
-      .order('collection_id', { ascending: true })
-      .order('manual_order', { ascending: true })
-      .order('created_at', { ascending: false })
-      .limit(collectionIds.length * limit);
-=======
-  if (error) {
-    // RPC missing — fetch each collection's top N independently. A single
-    // shared query with `.limit(collectionIds.length * limit)` ordered by
-    // collection_id lets a large early-sorting collection consume the whole
-    // row budget and starve later collections to zero rows (breaking, e.g.,
-    // reference-field lookups). Per-collection limits guarantee fair coverage.
-    const perCollection = await Promise.all(
-      collectionIds.map(async (collectionId) => {
-        let query = client
-          .from('collection_items')
-          .select('*')
-          .eq('collection_id', collectionId)
-          .eq('is_published', is_published)
-          .is('deleted_at', null)
-          .order('manual_order', { ascending: true })
-          .order('created_at', { ascending: false })
-          .limit(limit);
->>>>>>> upstream/main
+  // Tenant-scoped or RPC-missing fallback — per-collection limits guarantee fair coverage.
+  const perCollection = await Promise.all(
+    collectionIds.map(async (collectionId) => {
+      let query = client
+        .from('collection_items')
+        .select('*')
+        .eq('collection_id', collectionId)
+        .eq('is_published', is_published)
+        .is('deleted_at', null)
+        .order('manual_order', { ascending: true })
+        .order('created_at', { ascending: false })
+        .limit(limit);
 
-<<<<<<< HEAD
-    manualQuery = applyTenantEq(manualQuery, tenantId);
+      query = applyTenantEq(query, tenantId);
 
-    // For published queries, only include publishable items
-    if (is_published) {
-      manualQuery = manualQuery.eq('is_publishable', true);
-    }
-||||||| 1e44661
-    // For published queries, only include publishable items
-    if (is_published) {
-      manualQuery = manualQuery.eq('is_publishable', true);
-    }
-=======
-        // For published queries, only include publishable items
-        if (is_published) {
-          query = query.eq('is_publishable', true);
-        }
->>>>>>> upstream/main
+      // For published queries, only include publishable items
+      if (is_published) {
+        query = query.eq('is_publishable', true);
+      }
 
-        const { data: rows, error: rowsError } = await query;
-        if (rowsError) {
-          throw new Error(`Failed to fetch items: ${rowsError.message}`);
-        }
-        return rows || [];
-      })
-    );
+      const { data: rows, error: rowsError } = await query;
+      if (rowsError) {
+        throw new Error(`Failed to fetch items: ${rowsError.message}`);
+      }
+      return rows || [];
+    })
+  );
 
-    return perCollection.flat();
-  }
+  return perCollection.flat();
 }
 
 export interface CreateCollectionItemData {
@@ -194,94 +148,9 @@ export async function getItemsByCollectionId(
     ? `%${filters.search.trim()}%`
     : null;
 
-<<<<<<< HEAD
-    // Query collection_item_values for matching values (same published state)
-    let searchValQ = client
-      .from('collection_item_values')
-      .select('item_id')
-      .ilike('value', searchTerm)
-      .eq('is_published', is_published)
-      .is('deleted_at', null);
-||||||| 1e44661
-    // Query collection_item_values for matching values (same published state)
-    const { data: matchingValues, error: searchError } = await client
-      .from('collection_item_values')
-      .select('item_id')
-      .ilike('value', searchTerm)
-      .eq('is_published', is_published)
-      .is('deleted_at', null);
-=======
   // itemIds filter (bounded list, e.g. multi-reference fields).
   const filterIds = filters?.itemIds ?? null;
->>>>>>> upstream/main
 
-<<<<<<< HEAD
-    searchValQ = applyTenantEq(searchValQ, tenantId);
-
-    const { data: matchingValues, error: searchError } = await searchValQ;
-
-    if (searchError) {
-      throw new Error(`Failed to search items: ${searchError.message}`);
-    }
-
-    if (matchingValues) {
-      // Get unique item IDs
-      matchingItemIds = [...new Set(matchingValues.map(v => v.item_id))];
-
-      // If no matches found, return early
-      if (matchingItemIds.length === 0) {
-        return { items: [], total: 0 };
-      }
-    }
-  }
-
-  // Combine itemIds filter with search results (intersection if both present)
-  let filterIds: string[] | null = null;
-  if (filters?.itemIds) {
-    if (matchingItemIds !== null) {
-      // Intersection: only IDs that are in both lists
-      filterIds = filters.itemIds.filter(id => matchingItemIds!.includes(id));
-      if (filterIds.length === 0) {
-        return { items: [], total: 0 };
-      }
-    } else {
-      filterIds = filters.itemIds;
-    }
-  } else if (matchingItemIds !== null) {
-    filterIds = matchingItemIds;
-  }
-||||||| 1e44661
-    if (searchError) {
-      throw new Error(`Failed to search items: ${searchError.message}`);
-    }
-
-    if (matchingValues) {
-      // Get unique item IDs
-      matchingItemIds = [...new Set(matchingValues.map(v => v.item_id))];
-
-      // If no matches found, return early
-      if (matchingItemIds.length === 0) {
-        return { items: [], total: 0 };
-      }
-    }
-  }
-
-  // Combine itemIds filter with search results (intersection if both present)
-  let filterIds: string[] | null = null;
-  if (filters?.itemIds) {
-    if (matchingItemIds !== null) {
-      // Intersection: only IDs that are in both lists
-      filterIds = filters.itemIds.filter(id => matchingItemIds!.includes(id));
-      if (filterIds.length === 0) {
-        return { items: [], total: 0 };
-      }
-    } else {
-      filterIds = filters.itemIds;
-    }
-  } else if (matchingItemIds !== null) {
-    filterIds = matchingItemIds;
-  }
-=======
   // When searching, filter through an embedded inner join on
   // collection_item_values rather than collecting matching item ids and using
   // `.in('id', ...)`. The values table has no collection_id, but the embed is
@@ -290,7 +159,6 @@ export async function getItemsByCollectionId(
   const selectColumns = searchTerm
     ? '*, collection_item_values!inner(item_id)'
     : '*';
->>>>>>> upstream/main
 
   // Build count query
   let countQuery = client
@@ -299,44 +167,8 @@ export async function getItemsByCollectionId(
     .eq('collection_id', collection_id)
     .eq('is_published', is_published);
 
-<<<<<<< HEAD
   countQuery = applyTenantEq(countQuery, tenantId);
 
-  if (is_published) {
-    countQuery = countQuery.eq('is_publishable', true);
-  }
-  if (filterIds !== null) {
-    countQuery = countQuery.in('id', filterIds);
-  }
-  if (filters && 'deleted' in filters) {
-    if (filters.deleted === false) {
-      countQuery = countQuery.is('deleted_at', null);
-    } else if (filters.deleted === true) {
-      countQuery = countQuery.not('deleted_at', 'is', null);
-    }
-  } else {
-    countQuery = countQuery.is('deleted_at', null);
-  }
-
-||||||| 1e44661
-  if (is_published) {
-    countQuery = countQuery.eq('is_publishable', true);
-  }
-  if (filterIds !== null) {
-    countQuery = countQuery.in('id', filterIds);
-  }
-  if (filters && 'deleted' in filters) {
-    if (filters.deleted === false) {
-      countQuery = countQuery.is('deleted_at', null);
-    } else if (filters.deleted === true) {
-      countQuery = countQuery.not('deleted_at', 'is', null);
-    }
-  } else {
-    countQuery = countQuery.is('deleted_at', null);
-  }
-
-=======
->>>>>>> upstream/main
   // Build data query
   let query = client
     .from('collection_items')
@@ -346,13 +178,9 @@ export async function getItemsByCollectionId(
     .order('manual_order', { ascending: true })
     .order('created_at', { ascending: false });
 
-<<<<<<< HEAD
   query = applyTenantEq(query, tenantId);
 
-||||||| 1e44661
-=======
   // For published queries, only include publishable items
->>>>>>> upstream/main
   if (is_published) {
     countQuery = countQuery.eq('is_publishable', true);
     query = query.eq('is_publishable', true);
