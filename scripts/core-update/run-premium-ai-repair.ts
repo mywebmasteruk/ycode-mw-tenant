@@ -38,11 +38,18 @@ const MAX_RETRY_FILE_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_RETR
 const MAX_HUNK_CONTEXT_LINES = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_HUNK_CONTEXT_LINES, 80);
 const MAX_DOC_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_DOC_CHARS, 12_000);
 const MAX_REPLY_TOKENS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_TOKENS, 24_000);
-const MAX_TARGET_FILES = Math.min(parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_FILES, 4), 4);
-const MAX_TOTAL_MODEL_CALLS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_MODEL_CALLS, 8);
+// A single upstream Ycode update can conflict with more tenant-seam files than
+// the old 4-file cap allowed (this update had 7), leaving the repair permanently
+// blocked on the unattended files. Raise the per-run ceiling to 12 so one click
+// can clear a realistic multi-file update. The post-repair tenant-isolation guard,
+// tenant tests, type-check, and build still gate Approve, so safety is unchanged —
+// only throughput grows. Time/call budgets scale with file count (Opus 4.8 takes
+// ~1-3 min per large file), so the total-time and model-call caps rise to match.
+const MAX_TARGET_FILES = Math.min(parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_FILES, 10), 12);
+const MAX_TOTAL_MODEL_CALLS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_MODEL_CALLS, 24);
 const MAX_CALL_MS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_CALL_MS, 180_000);
-const MAX_TOTAL_MS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_TOTAL_MS, 900_000);
-const MAX_TRUNCATED_OR_INVALID = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_BAD_RESPONSES, 2);
+const MAX_TOTAL_MS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_TOTAL_MS, 2_700_000);
+const MAX_TRUNCATED_OR_INVALID = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_BAD_RESPONSES, 5);
 const MAX_HUNKS_PER_FILE = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_HUNKS_PER_FILE, 2);
 const ENABLE_HUNK_FALLBACK = parseBool(process.env.PREMIUM_AI_REPAIR_ENABLE_HUNK_FALLBACK);
 const HUGE_FILE_DENY_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_HUGE_FILE_DENY_CHARS, 180_000);

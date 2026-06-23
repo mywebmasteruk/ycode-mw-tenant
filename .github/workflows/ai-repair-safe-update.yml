@@ -16,7 +16,7 @@ on:
         description: Max files to send to OpenRouter per run
         required: false
         type: string
-        default: "8"
+        default: "10"
       repair_mode:
         description: Repair mode for blocked safe-update PRs
         required: false
@@ -170,13 +170,13 @@ jobs:
           AUTOPILOT_REPAIR_REPORT_PATH: /tmp/autopilot-repair-report.md
           AUTOPILOT_REPAIR_REPORT_JSON_PATH: /tmp/autopilot-repair-report.json
           PREMIUM_AI_REPAIR_MAX_FILES: ${{ inputs.max_llm_files }}
-          PREMIUM_AI_REPAIR_MAX_MODEL_CALLS: "8"
-          PREMIUM_AI_REPAIR_MAX_BAD_RESPONSES: "2"
+          PREMIUM_AI_REPAIR_MAX_MODEL_CALLS: "24"
+          PREMIUM_AI_REPAIR_MAX_BAD_RESPONSES: "5"
           PREMIUM_AI_REPAIR_MAX_CALL_MS: "180000"
-          PREMIUM_AI_REPAIR_MAX_TOTAL_MS: "900000"
+          PREMIUM_AI_REPAIR_MAX_TOTAL_MS: "2700000"
           PREMIUM_AI_REPAIR_MAX_HUNKS_PER_FILE: "2"
           PREMIUM_AI_REPAIR_ENABLE_HUNK_FALLBACK: "false"
-        timeout-minutes: 16
+        timeout-minutes: 50
         run: npx --yes tsx scripts/core-update/run-premium-ai-repair.ts
 
       - name: Upload deterministic Autopilot repair report
