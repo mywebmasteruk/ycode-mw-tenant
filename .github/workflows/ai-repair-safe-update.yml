@@ -49,7 +49,11 @@ permissions:
 jobs:
   ai-repair:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Job ceiling must exceed the Premium AI repair budget (up to 45 min for a
+    # multi-file run) PLUS the post-repair verification (deps install, tenant
+    # guards, tenant tests, type-check, production build ≈ 15 min). A step can
+    # never outlive its job, so this caps everything — keep it above the sum.
+    timeout-minutes: 70
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
