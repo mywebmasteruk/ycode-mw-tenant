@@ -135,6 +135,19 @@ jobs:
           AUTOPILOT_REPAIR_REPORT_JSON_PATH: /tmp/autopilot-repair-report.json
         run: npx --yes tsx scripts/core-update/run-autopilot-repair.ts
 
+      # Deterministic Tier-2 resolver: resolve mechanical repository conflicts by
+      # taking upstream + re-applying the tenant pattern (codemod), accepted only
+      # when the isolation gate proves it. Runs in BOTH modes, BEFORE any LLM, so
+      # mechanical files never reach the model (they were the invalid_json cases).
+      - name: Deterministic Tier-2 codemod resolver
+        id: tier2_codemod
+        continue-on-error: true
+        env:
+          ISOLATION_GATE_BASELINE_REF: origin/main
+        run: |
+          git fetch --no-tags --depth=1 origin main || git fetch --no-tags origin main
+          npx --yes tsx scripts/core-update/run-tenant-codemod-resolver.ts
+
       - name: Run AI conflict repair
         id: repair
         if: steps.deterministic_repair.outputs.status == 'failed' && inputs.mechanical_only == false && inputs.repair_mode == 'autopilot'
