@@ -16,7 +16,7 @@ import { getSettingsByKeys } from '@/lib/repositories/settingsRepository';
 import { getAssetById } from '@/lib/repositories/assetRepository';
 import { getAllLocales } from '@/lib/repositories/localeRepository';
 import { getAllPublishedPageFolders } from '@/lib/repositories/pageFolderRepository';
-import { getTranslationsByLocale } from '@/lib/repositories/translationRepository';
+import { getSlugTranslationsByLocale } from '@/lib/repositories/translationRepository';
 import { buildSvgDataUrl, getAssetProxyUrl } from '@/lib/asset-utils';
 import { generateColorVariablesCss } from '@/lib/repositories/colorVariableRepository';
 import { buildPageHreflangAlternates } from '@/lib/hreflang-utils';
@@ -194,7 +194,8 @@ const fetchHreflangDataset = cache(async (): Promise<HreflangDataset> => {
   if (locales.length > 1) {
     for (const locale of locales) {
       if (locale.is_default) continue;
-      const translations = await getTranslationsByLocale(locale.id, true);
+      // hreflang alternates only need slug rows to build localized URLs.
+      const translations = await getSlugTranslationsByLocale(locale.id, true);
       const map: Record<string, Translation> = {};
       for (const t of translations) {
         map[getTranslatableKey(t)] = t;

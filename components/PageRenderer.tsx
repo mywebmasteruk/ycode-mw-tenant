@@ -17,12 +17,18 @@ import { getAllPages } from '@/lib/repositories/pageRepository';
 import { getAllPageFolders } from '@/lib/repositories/pageFolderRepository';
 import { getMapboxAccessToken, getGoogleMapsEmbedApiKey } from '@/lib/map-server';
 import { getAllColorVariables } from '@/lib/repositories/colorVariableRepository';
+import { getAllGlobalVariables } from '@/lib/repositories/globalVariableRepository';
 import { getSettingByKey } from '@/lib/repositories/settingsRepository';
 import { getItemsWithValues, getItemsWithValuesByIds } from '@/lib/repositories/collectionItemRepository';
+import { getValuesByItemIds } from '@/lib/repositories/collectionItemValueRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
 import { REF_PAGE_PREFIX, REF_COLLECTION_PREFIX, isCollectionItemKeyword, parseCollectionLinkValue } from '@/lib/link-utils';
 import { getClassesString, hasPasswordFormLayer } from '@/lib/layer-utils';
-import type { Layer, Component, Page, CollectionItemWithValues, CollectionField, Locale, PageFolder, PasswordProtectionContext } from '@/types';
+import { buildGlobalsMetaMap, buildGlobalsValueMap } from '@/lib/collection-field-utils';
+import { buildLocalizedPageUrls, type LocalizedDynamicSlug } from '@/lib/page-utils';
+import { getTranslatableKey } from '@/lib/locale-runtime';
+import { getSlugTranslationsByLocale } from '@/lib/repositories/translationRepository';
+import type { Layer, BackgroundsDesign, Component, Page, CollectionItemWithValues, CollectionField, Locale, PageFolder, PasswordProtectionContext, Translation } from '@/types';
 
 interface PageLinkRef { collection_item_id: string; page_id: string }
 
@@ -82,6 +88,12 @@ function collectLayerPageLinks(layers: Layer[]): PageLinkRef[] {
         }
       }
     }
+    // Form redirect_url: extract page refs so the target item slug is pre-fetched
+    const redirectUrl = layer.settings?.form?.redirect_url;
+    if (redirectUrl?.type === 'page') {
+      const { collection_item_id, id: page_id } = redirectUrl.page ?? {};
+      if (collection_item_id && page_id) results.push({ collection_item_id, page_id });
+    }
     const textVar = layer.variables?.text as any;
     if (textVar?.type === 'dynamic_rich_text' && textVar.data?.content) {
       results.push(...collectTiptapPageLinks(textVar.data.content));
@@ -128,10 +140,59 @@ function extractCollectionItemSlugs(layers: Layer[]): Record<string, string> {
 }
 
 /**
+ * The public renderer styles layers from their compiled `classes`; the structured
+ * `design` object is builder-only metadata used to regenerate those classes in the
+ * editor. The only part read at render time is `design.backgrounds.bgImageVars` /
+ * `bgGradientVars`, which are applied as inline CSS custom properties (see
+ * LayerRendererPublic and lib/page-fetcher). Everything else — including
+ * `backgroundColor` / `backgroundClip` (already baked into `classes`) — is dropped.
+ * On a content-heavy page the full design tree can be ~30% of the serialized RSC
+ * Flight payload.
+ */
+function stripDesignForClient(design: Layer['design']): Layer['design'] | undefined {
+  const backgrounds = design?.backgrounds;
+  if (!backgrounds) return undefined;
+  const slim: BackgroundsDesign = {};
+  if (backgrounds.bgImageVars) slim.bgImageVars = backgrounds.bgImageVars;
+  if (backgrounds.bgGradientVars) slim.bgGradientVars = backgrounds.bgGradientVars;
+  if (!slim.bgImageVars && !slim.bgGradientVars) return undefined;
+  return { backgrounds: slim };
+}
+
+/**
+ * Rich-text inline styles (`textStyles`) are applied at render time via their
+ * compiled `classes` (see getTextStyleClasses). The accompanying `design`,
+ * `styleOverrides`, `styleId`, and `label` are builder-only, so keep just `classes`.
+ *
+ * We must preserve an entry whenever its `classes` is a string — even an empty one.
+ * `getTextStyleClasses` does `textStyles?.[key]?.classes ?? DEFAULT_TEXT_STYLES[...]`,
+ * so an explicit `classes: ''` suppresses the default, whereas an absent entry falls
+ * back to it. Dropping empty-string entries would silently re-introduce default
+ * styling. Entries with no `classes` string already resolve to the default, so
+ * omitting them is equivalent to keeping them.
+ */
+function stripTextStylesForClient(textStyles: Layer['textStyles']): Layer['textStyles'] | undefined {
+  if (!textStyles) return undefined;
+  const slim: NonNullable<Layer['textStyles']> = {};
+  let kept = false;
+  for (const [key, style] of Object.entries(textStyles)) {
+    if (typeof style?.classes === 'string') {
+      slim[key] = { classes: style.classes };
+      kept = true;
+    }
+  }
+  return kept ? slim : undefined;
+}
+
+/**
  * Strip heavy SSR-only data from the layer tree before passing to client
  * components. After resolveCollectionLayers, all variables are pre-resolved
  * into the layers — _collectionItemValues and _layerDataMap are redundant
- * and can be enormous (e.g. 50 articles × full rich text bodies).
+ * and can be enormous (e.g. 50 articles × full rich text bodies). All builder-only
+ * style metadata (`design`, `styleIds`, `styleId`, `styleOverrides`,
+ * `styleOverridesByStyle`, and per-`textStyles` design) is likewise dropped — the
+ * published `classes` strings are already fully resolved, so the client never needs
+ * to re-resolve them (see stripDesignForClient / stripTextStylesForClient).
  *
  * The RSC Flight payload serializes everything passed to 'use client'
  * components, so stripping here avoids doubling the response size.
@@ -143,6 +204,27 @@ function stripSSROnlyData(layers: Layer[]): Layer[] {
     delete stripped._collectionItemValues;
     delete stripped._collectionItemSlug;
     delete stripped._layerDataMap;
+
+    // Builder-only style resolution inputs. The flat `classes` string is the
+    // already-resolved output, so the public renderer never reads these.
+    delete stripped.styleIds;
+    delete stripped.styleId;
+    delete stripped.styleOverrides;
+    delete stripped.styleOverridesByStyle;
+
+    const slimDesign = stripDesignForClient(stripped.design);
+    if (slimDesign) {
+      stripped.design = slimDesign;
+    } else {
+      delete stripped.design;
+    }
+
+    const slimTextStyles = stripTextStylesForClient(stripped.textStyles);
+    if (slimTextStyles) {
+      stripped.textStyles = slimTextStyles;
+    } else {
+      delete stripped.textStyles;
+    }
 
     if (stripped._filterConfig?.layerTemplate) {
       stripped._filterConfig = {
@@ -408,6 +490,73 @@ export default async function PageRenderer({
     console.error('[PageRenderer] Error fetching link resolution data:', error);
   }
 
+  // Referenced/ref item slugs above are stored in the source language. On a
+  // non-default locale, swap each to its translated slug so dynamic-page links
+  // resolve to the localized URL (e.g. /fr/.../a-fr instead of /fr/.../a-en).
+  if (translations && locale && !locale.is_default) {
+    for (const itemId of Object.keys(collectionItemSlugs)) {
+      const translatedSlug = translations[`cms:${itemId}:field:key:slug`]?.content_value;
+      if (translatedSlug) {
+        collectionItemSlugs[itemId] = translatedSlug;
+      }
+    }
+  }
+
+  // Pre-compute localized URLs for the locale selector so switching language
+  // preserves translated folder/page/CMS slugs instead of reusing the source slug.
+  // Only runs on multi-locale pages that actually render a locale selector.
+  let localizedPageUrls: Record<string, string> | undefined;
+  if (
+    availableLocales.length > 1 &&
+    layerTreeHasLayer(resolvedLayers, l => l.name === 'localeSelector')
+  ) {
+    try {
+      const translationsByLocale: Record<string, Record<string, Translation>> = {};
+      await Promise.all(
+        availableLocales
+          .filter(l => !l.is_default)
+          .map(async (l) => {
+            // Reuse already-loaded translations for the current locale
+            if (locale && l.id === locale.id && translations) {
+              translationsByLocale[l.id] = translations as Record<string, Translation>;
+              return;
+            }
+            // Only slug rows are needed to build localized URLs for the locale
+            // switcher — avoid loading the full CMS-content catalogue per locale.
+            const rows = await getSlugTranslationsByLocale(l.id, usePublishedData);
+            const map: Record<string, Translation> = {};
+            for (const t of rows) {
+              map[getTranslatableKey(t)] = t;
+            }
+            translationsByLocale[l.id] = map;
+          })
+      );
+
+      // Dynamic pages need the translated CMS item slug per locale
+      let dynamicSlug: LocalizedDynamicSlug | null = null;
+      if (page.is_dynamic && collectionItem) {
+        const slugField = collectionFields.find(f => f.key === 'slug');
+        if (slugField) {
+          // collectionItem.values are already translated for the current locale,
+          // so fetch the raw (default-locale) slug to use as the default + fallback.
+          const rawValues = await getValuesByItemIds([collectionItem.id], usePublishedData, undefined, [slugField.id]);
+          const sourceSlug = rawValues[collectionItem.id]?.[slugField.id];
+          if (sourceSlug) {
+            dynamicSlug = {
+              itemId: collectionItem.id,
+              contentKey: slugField.key ? `field:key:${slugField.key}` : `field:id:${slugField.id}`,
+              defaultValue: String(sourceSlug),
+            };
+          }
+        }
+      }
+
+      localizedPageUrls = buildLocalizedPageUrls(page, folders, availableLocales, translationsByLocale, dynamicSlug);
+    } catch (error) {
+      console.error('[PageRenderer] Error building localized page URLs:', error);
+    }
+  }
+
   // Extract custom code from page settings and resolve placeholders for dynamic pages
   const rawPageCustomCodeHead = page.settings?.custom_code?.head || '';
   const rawPageCustomCodeBody = page.settings?.custom_code?.body || '';
@@ -458,12 +607,18 @@ export default async function PageRenderer({
   }
 
   // Fetch server-side settings needed by LayerRenderer (map tokens, color variables, timezone)
-  const [mapboxToken, googleMapsEmbedKey, serverColorVariables, timezoneSetting] = await Promise.all([
+  // Globals follow the page's draft/published mode so previews see draft values.
+  const [mapboxToken, googleMapsEmbedKey, serverColorVariables, timezoneSetting, globalVariables] = await Promise.all([
     getMapboxAccessToken(),
     getGoogleMapsEmbedApiKey(),
     getAllColorVariables(),
     getSettingByKey('timezone').catch(() => null),
+    getAllGlobalVariables(usePublishedData).catch(() => []),
   ]);
+  // Flat id -> value map merged into resolution at render time.
+  const globalsData = buildGlobalsValueMap(globalVariables);
+  // Flat id -> metadata map used to resolve global type/name at render time.
+  const globalsMeta = buildGlobalsMetaMap(globalVariables);
   const serverSettings: Record<string, unknown> = {};
   if (mapboxToken) {
     serverSettings.mapbox_access_token = mapboxToken;
@@ -494,6 +649,14 @@ export default async function PageRenderer({
           }
         }
       }
+    }
+  }
+
+  // Image-typed globals store an asset id as their value — pre-resolve those
+  // assets so global-bound images render on published pages (no client store).
+  for (const global of globalVariables) {
+    if (global.type === 'image' && global.value) {
+      layerAssetIds.add(global.value);
     }
   }
 
@@ -700,16 +863,19 @@ export default async function PageRenderer({
         data-layer-id="body"
         data-layer-type="div"
         data-is-empty={hasLayers ? 'false' : 'true'}
+        lang={(locale?.code || availableLocales.find((l) => l.is_default)?.code) || undefined}
       >
         <LayerRendererPublic
           layers={childLayers}
           isPublished={page.is_published}
+          pageId={page.id}
           pageCollectionItemId={collectionItem?.id}
           pageCollectionItemData={collectionItem?.values || undefined}
           pageCollectionSortedItemIds={pageCollectionSortedItemIds}
           hiddenLayerInfo={hiddenLayerInfo}
           currentLocale={locale}
           availableLocales={availableLocales}
+          localizedPageUrls={localizedPageUrls}
           pages={pages as any}
           folders={folders as any}
           collectionItemSlugs={collectionItemSlugs}
@@ -718,6 +884,8 @@ export default async function PageRenderer({
           resolvedAssets={resolvedAssets}
           components={components}
           serverSettings={serverSettings}
+          globalsData={Object.keys(globalsData).length > 0 ? globalsData : undefined}
+          globalsMeta={Object.keys(globalsMeta).length > 0 ? globalsMeta : undefined}
           lcpCandidateLayerId={lcpCandidateLayerId}
           passwordProtection={is401Page ? passwordProtection : undefined}
         />

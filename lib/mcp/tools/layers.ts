@@ -106,9 +106,11 @@ and regenerates Tailwind CSS classes.
 
 IMPORTANT: Set isActive: true on any design category you want to apply.
 
-HOVER/FOCUS STATES: Set ui_state to apply styles only on hover, focus, or active.
+HOVER/FOCUS STATES: Set ui_state to apply styles only on hover, focus, active, disabled, or current.
 Example: { backgrounds: { isActive: true, backgroundColor: "#3b82f6" }, ui_state: "hover" }
 produces the class "hover:bg-[#3b82f6]".
+The "current" state styles a navigation link when it points to the page currently
+being viewed (aria-current) — use it for active nav-link and pagination styling.
 
 GRADIENTS: Use bgGradientVars in backgrounds to set CSS gradients.
 Example: { backgrounds: { isActive: true, bgGradientVars: { "--bg-img": "linear-gradient(135deg, #667eea 0%, #764ba2 100%)" } } }
@@ -118,8 +120,8 @@ For gradient text: also set backgroundClip: "text" and color to "transparent".`,
       layer_id: z.string().describe('The layer ID to update'),
       breakpoint: z.enum(['desktop', 'tablet', 'mobile']).default('desktop')
         .describe('Responsive breakpoint. Desktop is default.'),
-      ui_state: z.enum(['neutral', 'hover', 'focus', 'active', 'disabled']).default('neutral')
-        .describe('UI state to style. Use "hover" for hover effects, "focus" for focus styles, etc.'),
+      ui_state: z.enum(['neutral', 'hover', 'focus', 'active', 'disabled', 'current']).default('neutral')
+        .describe('UI state to style. Use "hover" for hover effects, "focus" for focus styles, "current" for the active/current navigation link, etc.'),
       design: designSchema,
     },
     async ({ page_id, layer_id, breakpoint, ui_state, design }) => {

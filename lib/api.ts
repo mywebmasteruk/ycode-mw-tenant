@@ -217,6 +217,7 @@ export const publishApi = {
     layerStyles: number;
     assets: number;
     translations: number;
+    globalVariables: number;
     total: number;
   }>> {
     return apiRequest('/ycode/api/publish/preview');
@@ -244,6 +245,7 @@ export const publishApi = {
       layerStyles: number;
       locales: number;
       translations: number;
+      globalVariables: number;
       css: boolean;
     };
     published_at_setting: Setting;
@@ -997,6 +999,37 @@ export const colorVariablesApi = {
     return apiRequest<{ success: boolean }>('/ycode/api/color-variables/reorder', {
       method: 'PUT',
       body: JSON.stringify({ orderedIds }),
+    });
+  },
+};
+
+export const globalVariablesApi = {
+  async getAll(): Promise<ApiResponse<import('@/types').GlobalVariable[]>> {
+    return apiRequest<import('@/types').GlobalVariable[]>('/ycode/api/globals');
+  },
+
+  async create(
+    data: import('@/types').CreateGlobalVariableData
+  ): Promise<ApiResponse<import('@/types').GlobalVariable>> {
+    return apiRequest<import('@/types').GlobalVariable>('/ycode/api/globals', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async update(
+    id: string,
+    data: import('@/types').UpdateGlobalVariableData
+  ): Promise<ApiResponse<import('@/types').GlobalVariable>> {
+    return apiRequest<import('@/types').GlobalVariable>(`/ycode/api/globals/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async delete(id: string): Promise<ApiResponse<{ success: boolean }>> {
+    return apiRequest<{ success: boolean }>(`/ycode/api/globals/${id}`, {
+      method: 'DELETE',
     });
   },
 };

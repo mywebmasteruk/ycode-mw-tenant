@@ -13,6 +13,7 @@ import { registerLayerTools } from '@/lib/mcp/tools/layers';
 import { registerBatchTools } from '@/lib/mcp/tools/batch';
 import { registerLayoutTools } from '@/lib/mcp/tools/layouts';
 import { registerCollectionTools } from '@/lib/mcp/tools/collections';
+import { registerCollectionLayerTools } from '@/lib/mcp/tools/collection-layers';
 import { registerStyleTools } from '@/lib/mcp/tools/styles';
 import { registerAssetTools } from '@/lib/mcp/tools/assets';
 import { registerAssetFolderTools } from '@/lib/mcp/tools/asset-folders';
@@ -39,6 +40,7 @@ export function createMcpServer(): McpServer {
   registerBatchTools(server);
   registerLayoutTools(server);
   registerCollectionTools(server);
+  registerCollectionLayerTools(server);
   registerStyleTools(server);
   registerAssetTools(server);
   registerAssetFolderTools(server);
