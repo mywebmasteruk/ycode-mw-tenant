@@ -146,6 +146,12 @@ jobs:
           ISOLATION_GATE_BASELINE_REF: origin/main
         run: |
           git fetch --no-tags --depth=1 origin main || git fetch --no-tags origin main
+          # The codemod + isolation gate use the TypeScript compiler API
+          # (`import ts from 'typescript'`), so node_modules must exist before this
+          # $0 deterministic pass — which runs before the verification install.
+          # package-lock.json is still conflicted here, so install from package.json
+          # without the lockfile (--no-package-lock) to avoid the merge-marker parse error.
+          npm install --no-audit --no-fund --legacy-peer-deps --no-package-lock
           npx --yes tsx scripts/core-update/run-tenant-codemod-resolver.ts
 
       - name: Run AI conflict repair
