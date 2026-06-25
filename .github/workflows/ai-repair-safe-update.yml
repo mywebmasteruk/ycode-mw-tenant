@@ -91,6 +91,7 @@ jobs:
             scripts/core-update/run-autopilot-repair.ts \
             scripts/core-update/run-premium-ai-repair.ts \
             scripts/core-update/run-tenant-codemod-resolver.ts \
+            scripts/core-update/run-tenant-codemod-resolver.test.ts \
             scripts/core-update/run-tenant-isolation-gate.ts \
             scripts/core-update/create-copilot-escalation.ts \
             scripts/reapply-tier2-seams.ts \
@@ -99,7 +100,9 @@ jobs:
             scripts/git-merge-hygiene.sh \
             lib/masjidweb/autopilot-repair.ts \
             lib/masjidweb/tenant-scope-codemod.ts \
+            lib/masjidweb/tenant-scope-codemod.test.ts \
             lib/masjidweb/tenant-isolation-gate.ts \
+            lib/masjidweb/tenant-isolation-gate.test.ts \
             lib/masjidweb/apply-tenant-id.ts \
             lib/masjidweb/premium-ai-patch.ts \
             lib/masjidweb/copilot-escalation.ts \
