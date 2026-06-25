@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { PremiumAiResolvedFile } from '../../lib/masjidweb/premium-ai-patch';
-import { createCheckpointForAppliedFiles, repairFilesOneAtATime } from './run-premium-ai-repair';
+import { createCheckpointForAppliedFiles, repairFilesOneAtATime, requiredOutputSchema } from './run-premium-ai-repair';
 
 describe('Premium AI per-file repair aggregation', () => {
   it('applies a valid single-file response', async () => {
@@ -145,6 +145,77 @@ describe('Premium AI per-file repair aggregation', () => {
     expect(attempts).toEqual(['initial:normal', 'json_repair:strict']);
     expect(result.appliedFiles).toEqual(['lib/a.ts']);
     expect(result.results).toMatchObject([{ filePath: 'lib/a.ts', status: 'applied', applied: true, retryUsed: true }]);
+  });
+
+  it('decodes a base64 resolved file and applies the exact content', async () => {
+    let appliedContent = '';
+    // Content that would break a raw JSON string (newlines + quotes + tab) but is
+    // safe inside base64 — the mandated form.
+    const finalSource = 'export const a = 1;\nconst s = "with \\"quotes\\" and a tab\there";\n';
+    const result = await repairFilesOneAtATime({
+      targetFiles: ['lib/a.ts'],
+      blockedFiles: ['lib/a.ts'],
+      requestFile: async (filePath) => ({
+        reply: JSON.stringify({
+          summary: 'Resolved via base64.',
+          files: [{ filePath, verdict: 'safe_candidate', summary: 'Safe', safetyConcerns: [], content: null, unifiedDiff: null }],
+          resolvedFiles: [{ filePath, contentBase64: Buffer.from(finalSource, 'utf8').toString('base64') }],
+          patches: [],
+          nextActions: [],
+        }),
+        model: 'test/model',
+        finishReason: 'stop',
+      }),
+      applyFile: (file: PremiumAiResolvedFile) => {
+        appliedContent = file.content;
+        return file.filePath;
+      },
+      validateFile: () => undefined,
+    });
+
+    expect(result.appliedFiles).toEqual(['lib/a.ts']);
+    expect(appliedContent).toBe(finalSource);
+  });
+
+  it('recovers from invalid JSON when the retry returns base64 content', async () => {
+    let appliedContent = '';
+    const resolved = 'export const recovered = true;\n// a line with "quotes"\n';
+    const result = await repairFilesOneAtATime({
+      targetFiles: ['lib/a.ts'],
+      blockedFiles: ['lib/a.ts'],
+      requestFile: async (filePath, attempt) => {
+        if (attempt === 'initial') {
+          // Real failure mode: a big raw content string with a literal newline → invalid JSON.
+          return { reply: '{"resolvedFiles":[{"filePath":"lib/a.ts","content":"line1\nline2"}]}', model: 'test/model', finishReason: 'stop' };
+        }
+        return {
+          reply: JSON.stringify({
+            summary: 'Retry via base64.',
+            files: [{ filePath, verdict: 'safe_candidate', summary: 'Safe', safetyConcerns: [], content: null, unifiedDiff: null }],
+            resolvedFiles: [{ filePath, contentBase64: Buffer.from(resolved, 'utf8').toString('base64') }],
+            patches: [],
+            nextActions: [],
+          }),
+          model: 'test/model',
+          finishReason: 'stop',
+        };
+      },
+      applyFile: (file: PremiumAiResolvedFile) => {
+        appliedContent = file.content;
+        return file.filePath;
+      },
+      validateFile: () => undefined,
+    });
+
+    expect(result.appliedFiles).toEqual(['lib/a.ts']);
+    expect(appliedContent).toBe(resolved);
+    expect(result.results[0]).toMatchObject({ status: 'applied', applied: true, retryUsed: true });
+  });
+
+  it('mandates base64 for resolved file content in the output schema', () => {
+    const schema = requiredOutputSchema();
+    expect(schema).toContain('"resolvedFiles": [{ "filePath": string, "contentBase64": string }]');
+    expect(schema).not.toContain('"resolvedFiles": [{ "filePath": string, "content": string }]');
   });
 
   it('persists validated partial repairs as a patch artifact', () => {

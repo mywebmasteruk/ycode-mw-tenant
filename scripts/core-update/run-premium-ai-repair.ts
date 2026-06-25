@@ -279,8 +279,8 @@ function fenced(value: string, extension: string): string {
   return ['```' + language, value, '```'].join('\n');
 }
 
-function requiredOutputSchema(): string {
-  return '{ "summary": string, "files": [{ "filePath": string, "verdict": "blocked" | "safe_candidate" | "needs_human_review", "summary": string, "safetyConcerns": string[], "content": string | null, "contentBase64": string | null, "unifiedDiff": null }], "resolvedFiles": [{ "filePath": string, "content": string }], "patches": [], "nextActions": string[] }';
+export function requiredOutputSchema(): string {
+  return '{ "summary": string, "files": [{ "filePath": string, "verdict": "blocked" | "safe_candidate" | "needs_human_review", "summary": string, "safetyConcerns": string[], "content": null, "contentBase64": string | null, "unifiedDiff": null }], "resolvedFiles": [{ "filePath": string, "contentBase64": string }], "patches": [], "nextActions": string[] }';
 }
 
 function tenantInvariantDocs(): string {
@@ -293,7 +293,7 @@ function tenantInvariantDocs(): string {
     .join('\n\n');
 }
 
-function buildPromptForFile(filePath: string, conflictFiles: string[], blockedFiles: string[]): string {
+export function buildPromptForFile(filePath: string, conflictFiles: string[], blockedFiles: string[]): string {
   const autopilotMarkdown = readIfExists(AUTOPILOT_REPORT_PATH, 80_000);
   return [
     'MasjidWeb Premium AI Repair request for one file only.',
@@ -312,7 +312,7 @@ function buildPromptForFile(filePath: string, conflictFiles: string[], blockedFi
     '- Return exactly one resolvedFiles entry when safe, and it must be the complete final content for the target file.',
     '- Do not repair or mention replacements for any other file.',
     '- The complete content must contain no conflict markers and must not be truncated.',
-    '- Use contentBase64 instead of content when escaping source text would be risky.',
+    '- ALWAYS return the resolved file as contentBase64 (base64-encoded UTF-8 of the complete final file). Never put the file in the plain "content" field — large files break JSON escaping and cause invalid_json failures.',
     '- Do not return unified diffs. patches must be an empty array.',
     '- Use verdict "blocked" and omit resolvedFiles when tenant isolation cannot be proven.',
     '- Do not include prose outside JSON.',
@@ -339,7 +339,7 @@ function buildTruncationRetryPromptForFile(filePath: string): string {
     '',
     'Return ONLY valid JSON. Return exactly one complete resolvedFiles entry for the target file, or blocked with no resolvedFiles if unsafe.',
     'Do not include explanations, markdown, unified diffs, or repairs for any other file.',
-    'Prefer contentBase64 if JSON escaping is risky.',
+    'Return the resolved file as contentBase64 (base64-encoded UTF-8), never the plain content field.',
     '',
     'Required output schema:',
     requiredOutputSchema(),
@@ -360,7 +360,7 @@ function buildJsonRepairPromptForFile(filePath: string, invalidReply: string): s
     '',
     'Retry once. Return ONLY strict valid JSON for this target file. No markdown fences, no prose, no comments, no trailing commas.',
     'Return exactly one complete resolvedFiles entry for the target file, or blocked with no resolvedFiles if unsafe.',
-    'Prefer contentBase64 if escaping source text would be risky.',
+    'Return the resolved file as contentBase64 (base64-encoded UTF-8), never the plain content field — this avoids the JSON escaping that broke the previous reply.',
     '',
     'Required output schema:',
     requiredOutputSchema(),
