@@ -100,6 +100,7 @@ jobs:
             lib/masjidweb/autopilot-repair.ts \
             lib/masjidweb/tenant-scope-codemod.ts \
             lib/masjidweb/tenant-isolation-gate.ts \
+            lib/masjidweb/apply-tenant-id.ts \
             lib/masjidweb/premium-ai-patch.ts \
             lib/masjidweb/copilot-escalation.ts \
             lib/masjidweb/reapply-tier2-seams.ts \

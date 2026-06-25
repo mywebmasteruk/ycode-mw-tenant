@@ -34,6 +34,7 @@ interface Edit {
 
 const IMPORT_TENANT_ID = "import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';";
 const IMPORT_APPLY_EQ = "import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';";
+const IMPORT_APPLY_ID = "import { applyTenantId } from '@/lib/masjidweb/apply-tenant-id';";
 
 const WRITE_METHODS = new Set(['insert', 'upsert']);
 const FILTER_METHODS = new Set(['update', 'delete']);
@@ -210,6 +211,7 @@ export function reapplyTenantScoping(source: string, filePath = 'repo.ts'): Code
   const residual: CodemodResult['residual'] = [];
   let needTenantIdImport = false;
   let needApplyEqImport = false;
+  let needApplyIdImport = false;
   // Track which function bodies already got a `const tenantId = …` inserted.
   const tenantVarByBody = new Map<ts.Block, string>();
 
@@ -268,9 +270,16 @@ export function reapplyTenantScoping(source: string, filePath = 'repo.ts'): Code
           }
           changes.push(`Added tenant_id to ${table} write payload (line ${line}).`);
         } else if (writePayloadLiterals(node, body).length === 0 && writeArg(node)) {
-          // A payload we cannot resolve to an object literal (e.g. a spread-only
-          // arg or a function result) — leave for the gate/LLM fallback.
-          residual.push({ line, table, snippet: 'non-literal write payload' });
+          // A payload we cannot reach as an inline object literal (a pre-built
+          // array, a mapped variable, a function result). Wrap it in the
+          // applyTenantId() helper, which stamps tenant_id onto the object or
+          // each array element at runtime. The gate recognizes applyTenantId().
+          const arg = writeArg(node)!;
+          const tv = ensureTenantVar(body);
+          edits.push({ start: arg.getStart(sf), end: arg.getStart(sf), text: 'applyTenantId(' });
+          edits.push({ start: arg.getEnd(), end: arg.getEnd(), text: `, ${tv})` });
+          needApplyIdImport = true;
+          changes.push(`Scoped ${table} write payload via applyTenantId (line ${line}).`);
         }
         ts.forEachChild(node, visit);
         return;
@@ -334,6 +343,9 @@ export function reapplyTenantScoping(source: string, filePath = 'repo.ts'): Code
   }
   if (needApplyEqImport && !/applyTenantEq/.test(source.split('\n').filter((l) => l.startsWith('import')).join('\n'))) {
     importsToAdd.push(IMPORT_APPLY_EQ);
+  }
+  if (needApplyIdImport && !/applyTenantId/.test(source.split('\n').filter((l) => l.startsWith('import')).join('\n'))) {
+    importsToAdd.push(IMPORT_APPLY_ID);
   }
   if (importsToAdd.length > 0) {
     const lastImport = [...sf.statements].reverse().find((s) => ts.isImportDeclaration(s));

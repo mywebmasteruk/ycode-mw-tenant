@@ -103,6 +103,18 @@ export async function f(client, tenantId) {
     expect(residual).toHaveLength(1);
     expect(residual[0]).toMatchObject({ table: 'pages' });
   });
+
+  it('wraps a non-literal write payload in applyTenantId', () => {
+    const upstream = `export async function f(client, rows) {
+  const { error } = await client.from('pages').upsert(rows);
+  return error;
+}`;
+    const { code, residual } = reapplyTenantScoping(upstream);
+    expect(residual).toHaveLength(0);
+    expect(code).toContain('applyTenantId(rows, tenantId)');
+    expect(code).toContain('const tenantId = await resolveEffectiveTenantId();');
+    expect(code).toContain('import { applyTenantId }');
+  });
 });
 
 describe('reapplyTenantScoping — real settingsRepository round-trip', () => {
