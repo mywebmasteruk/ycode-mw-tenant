@@ -85,11 +85,20 @@ export async function f(client, tenantId) {
     expect(code.match(/applyTenantEq\(query/g)?.length).toBe(1);
   });
 
-  it('reports residual for forms it cannot mechanically scope (inline await)', () => {
+  it('scopes an inline-awaited read inline via applyTenantEq', () => {
     const upstream = `export async function f(client) {
   const { data } = await client.from('pages').select('*');
   return data;
 }`;
+    const { code, residual } = reapplyTenantScoping(upstream);
+    expect(residual).toHaveLength(0);
+    expect(code).toContain("applyTenantEq(client.from('pages').select('*'), tenantId)");
+    expect(code).toContain('const tenantId = await resolveEffectiveTenantId();');
+    expect(code).toContain('import { applyTenantEq }');
+  });
+
+  it('reports residual for a tenant query outside any function body', () => {
+    const upstream = `export const rows = client.from('pages').select('*');`;
     const { residual } = reapplyTenantScoping(upstream);
     expect(residual).toHaveLength(1);
     expect(residual[0]).toMatchObject({ table: 'pages' });

@@ -304,8 +304,22 @@ export function reapplyTenantScoping(source: string, filePath = 'repo.ts'): Code
           return;
         }
       }
-      // Could not mechanically scope (inline await, non-assigned chain, etc.)
-      residual.push({ line, table, snippet: `${op} not assigned to a variable` });
+      // Not assigned to a reassignable variable (inline `await client.from(...)`,
+      // `return client.from(...)`, destructure, call argument, .map() callback…).
+      // Wrap the chain inline: `applyTenantEq(<chain>, tenantId)`. The isolation
+      // gate recognizes inline applyTenantEq() as scoped, and the `unscoped` guard
+      // above keeps it idempotent (already-scoped chains are never re-wrapped).
+      {
+        const tv = ensureTenantVar(body);
+        const start = top.getStart(sf);
+        const end = top.getEnd();
+        edits.push({ start, end: start, text: 'applyTenantEq(' });
+        edits.push({ start: end, end, text: `, ${tv})` });
+        needApplyEqImport = true;
+        changes.push(`Scoped ${table} ${op} via inline applyTenantEq (line ${line}).`);
+      }
+      ts.forEachChild(node, visit);
+      return;
     }
     ts.forEachChild(node, visit);
   };
