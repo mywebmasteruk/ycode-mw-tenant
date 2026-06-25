@@ -118,19 +118,14 @@ export function assertPatchTargets(patch: PremiumAiPatch, allowedFiles: Set<stri
 
 export function decodePremiumAiContent(entry: unknown): string | null {
   const item = entry as { content?: unknown; contentBase64?: unknown };
-  // Prefer a non-empty plain `content`; otherwise fall back to `contentBase64`
-  // (the mandated form for resolved files — it avoids the JSON-escaping failures
-  // that large raw `content` strings cause, the root of invalid_json).
-  if (typeof item.content === 'string' && item.content.length > 0) return item.content;
-  if (typeof item.contentBase64 === 'string' && item.contentBase64.length > 0) {
-    try {
-      return Buffer.from(item.contentBase64, 'base64').toString('utf8');
-    } catch {
-      return null;
-    }
-  }
   if (typeof item.content === 'string') return item.content;
-  return null;
+  if (typeof item.contentBase64 !== 'string') return null;
+
+  try {
+    return Buffer.from(item.contentBase64, 'base64').toString('utf8');
+  } catch {
+    return null;
+  }
 }
 
 export function assertResolvedFileTarget(file: PremiumAiResolvedFile, allowedFiles: Set<string>): string {
