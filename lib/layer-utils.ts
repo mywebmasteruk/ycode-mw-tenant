@@ -15,9 +15,51 @@ import { parseMultiReferenceValue, normalizeBooleanValue } from '@/lib/collectio
 import { getInheritedValue } from '@/lib/tailwind-class-mapper';
 import cloneDeep from 'lodash/cloneDeep';
 import { layerHasLink, hasLinkInTree, hasRichTextLinks } from '@/lib/link-utils';
+import { HTML_TO_REACT_ATTRS } from '@/lib/parse-head-html';
 
 // Alias for backwards compatibility within this file
 const hasLinkSettings = layerHasLink;
+
+/**
+ * Parse an inline CSS style string into a React style object.
+ * Splits on the first colon per rule so values containing colons (e.g. urls) survive.
+ * CSS custom properties (--var) are preserved verbatim; other props are camelCased.
+ */
+export function parseStyleStringToObject(style: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const rule of style.split(';')) {
+    const trimmed = rule.trim();
+    if (!trimmed) continue;
+    const colonIndex = trimmed.indexOf(':');
+    if (colonIndex === -1) continue;
+    const prop = trimmed.slice(0, colonIndex).trim();
+    const value = trimmed.slice(colonIndex + 1).trim();
+    if (!prop || !value) continue;
+    const key = prop.startsWith('--') ? prop : prop.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+    result[key] = value;
+  }
+  return result;
+}
+
+/**
+ * Apply user-defined custom attributes onto a React props object, mapping HTML
+ * attribute names to their JSX equivalents. A string `style` attribute is parsed
+ * into an object and merged with any existing style (React rejects style strings).
+ */
+export function applyCustomAttributes(
+  target: Record<string, unknown>,
+  customAttributes: Record<string, string>,
+): void {
+  for (const [name, value] of Object.entries(customAttributes)) {
+    const jsxName = HTML_TO_REACT_ATTRS[name.toLowerCase()] || name;
+    if (jsxName === 'style' && typeof value === 'string') {
+      const existing = (typeof target.style === 'object' && target.style ? target.style : {}) as Record<string, string>;
+      target.style = { ...existing, ...parseStyleStringToObject(value) };
+      continue;
+    }
+    target[jsxName] = value;
+  }
+}
 
 // ─── Cached Layer Index ───
 
@@ -1426,7 +1468,8 @@ export function resolveFieldValue(
   fieldVariable: FieldVariable,
   collectionItemData?: Record<string, string>,
   pageCollectionItemData?: Record<string, string> | null,
-  layerDataMap?: Record<string, Record<string, string>>
+  layerDataMap?: Record<string, Record<string, string>>,
+  globalsData?: Record<string, string>
 ): string | undefined {
   const { field_id, source, collection_layer_id, relationships = [] } = fieldVariable.data;
   if (!field_id) {
@@ -1445,7 +1488,8 @@ export function resolveFieldValue(
     collectionItemData,
     pageCollectionItemData,
     collection_layer_id,
-    layerDataMap
+    layerDataMap,
+    globalsData
   );
 }
 
@@ -2010,14 +2054,58 @@ export function evaluateCondition(
     const fieldId = condition.fieldId;
     if (!fieldId) return true;
 
-    // Use source-aware resolution (collection layer data first, then page data)
+    // Use source-aware resolution (collection layer data first, then page data).
+    // Multi-reference / multi-asset values can arrive already parsed as arrays
+    // (e.g. from the SSR collection cache). `String([...])` would comma-join them
+    // into an unparseable string, so serialize arrays back to JSON — the form
+    // every downstream parser (parseMultiReferenceValue, JSON.parse, `[`-prefix
+    // checks) expects.
     const rawValue = resolveFieldFromSources(fieldId, undefined, collectionLayerData, pageCollectionData);
-    const value = String(rawValue ?? '');
-    let compareValue = String(condition.value ?? '');
-    let compareValue2 = condition.value2;
-    let effectiveOperator = condition.operator;
+    const value = Array.isArray(rawValue) ? JSON.stringify(rawValue) : String(rawValue ?? '');
     const fieldType = condition.fieldType || 'text';
     const isDateOnly = fieldType === 'date_only';
+
+    // Resolve the compare value. In 'current_page' mode it is bound to the
+    // current dynamic page item instead of the static `condition.value`:
+    //   - reference fields inject the page item's own ID into the compared ID
+    //     set (alongside any statically picked IDs), so reference operators parse
+    //     it normally — this is the "Current Category/Tag" pattern
+    //   - scalar fields compare against the page item's `currentPageFieldId` value
+    // Reference detection also keys off the operator so it stays correct even if
+    // `fieldType` was not persisted on the condition.
+    let compareValue = String(condition.value ?? '');
+    if (condition.valueMode === 'current_page') {
+      const isReferenceField = fieldType === 'reference'
+        || fieldType === 'multi_reference'
+        || ['is_one_of', 'is_not_one_of', 'contains_all_of', 'contains_exactly'].includes(condition.operator);
+
+      // When the page item context is unavailable (e.g. the editor preview before
+      // a CMS item is selected), skip the condition instead of filtering everything
+      // out — mirrors the `self` source returning true when there is no current item.
+      if (isReferenceField && !pageCollectionItemId) return true;
+      if (!isReferenceField && !pageCollectionData) return true;
+
+      if (isReferenceField) {
+        const ids = parseItemIdList(condition.value);
+        if (pageCollectionItemId && !ids.includes(pageCollectionItemId)) {
+          ids.push(pageCollectionItemId);
+        }
+        compareValue = JSON.stringify(ids);
+      } else if (condition.currentPageFieldId) {
+        compareValue = String(pageCollectionData?.[condition.currentPageFieldId] ?? '');
+      }
+    }
+    let compareValue2 = condition.value2;
+    let effectiveOperator = condition.operator;
+
+    // In 'current_page' mode the compare set is a single injected page-item id, so
+    // 'contains exactly' (exact set equality) can essentially never match a real
+    // multi-reference field — it would only keep items whose entire reference set is
+    // just the current item. The intent of the "Current X" pattern is "contains the
+    // current item", so treat it as 'contains_all_of'.
+    if (condition.valueMode === 'current_page' && effectiveOperator === 'contains_exactly') {
+      effectiveOperator = 'contains_all_of';
+    }
 
     if (isDateFieldType(fieldType) && isDatePreset(compareValue)) {
       const resolved = resolveDateFilterValue(effectiveOperator, compareValue, compareValue2, timezone);
@@ -4269,17 +4357,22 @@ export function updateLayerProps(
 
 /**
  * Find all layers with a custom anchor ID (settings.id takes priority over attributes.id).
+ * Deduplicates by anchor ID since an `#id` link resolves to the first match, so a
+ * repeated ID (e.g. duplicated component instances) would otherwise produce duplicate
+ * dropdown options and React key collisions.
  * Used by link settings to populate anchor selection dropdowns.
  */
 export function findLayersWithAnchorId(layers: Layer[]): Array<{ layer: Layer; id: string }> {
   const result: Array<{ layer: Layer; id: string }> = [];
+  const seen = new Set<string>();
   const stack: Layer[] = [...layers];
 
   while (stack.length > 0) {
     const layer = stack.pop()!;
 
     const layerId = layer.settings?.id || layer.attributes?.id;
-    if (layerId) {
+    if (layerId && !seen.has(layerId)) {
+      seen.add(layerId);
       result.push({ layer, id: layerId });
     }
 
