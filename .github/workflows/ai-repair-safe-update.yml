@@ -195,7 +195,7 @@ jobs:
           PREMIUM_AI_REPAIR_MAX_FILES: ${{ inputs.max_llm_files }}
           PREMIUM_AI_REPAIR_MAX_MODEL_CALLS: "24"
           PREMIUM_AI_REPAIR_MAX_BAD_RESPONSES: "5"
-          PREMIUM_AI_REPAIR_MAX_CALL_MS: "180000"
+          PREMIUM_AI_REPAIR_MAX_CALL_MS: "300000"
           PREMIUM_AI_REPAIR_MAX_TOTAL_MS: "2700000"
           PREMIUM_AI_REPAIR_MAX_HUNKS_PER_FILE: "2"
           PREMIUM_AI_REPAIR_ENABLE_HUNK_FALLBACK: "false"
@@ -254,6 +254,32 @@ jobs:
           COPILOT_ESCALATION_CREATE_ISSUE: ${{ inputs.copilot_escalation_mode == 'issue' || inputs.copilot_escalation_mode == 'assign' }}
           COPILOT_ESCALATION_ASSIGN_COPILOT: ${{ inputs.copilot_escalation_mode == 'assign' }}
         run: npx --yes tsx scripts/core-update/create-copilot-escalation.ts
+
+      # Cross-run resume: the Premium AI step resolves a different subset of the
+      # hard files each run (LLM nondeterminism). Without persisting partial
+      # progress, every run restarts from the original conflicts and never
+      # converges. Commit the cleanly-resolved files on a partial run so the next
+      # run only retries what's left. The PR is NOT marked ready here — the full
+      # isolation gate + type-check + build below still gate approval, so a
+      # partial commit never implies the update is safe. Escape hatch if a
+      # persisted file later fails verification: re-run Prepare to recreate the
+      # PR branch from scratch.
+      - name: Persist partial repairs for cross-run resume
+        if: inputs.repair_mode == 'premium_ai' && steps.premium_repair.outputs.status == 'partial_failed'
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No resolved files to persist."
+            exit 0
+          fi
+          # Safety: never persist a change that adds conflict markers.
+          if git diff --cached | grep -qE '^\+(<<<<<<<|>>>>>>>|\|\|\|\|\|\|\|)'; then
+            echo "Refusing to persist: a staged change still contains conflict markers."
+            git reset
+            exit 0
+          fi
+          git commit -m "fix(ai): persist partial safe-update repairs for resume [automated]"
+          git push origin HEAD
 
       - name: Stop when repair remains blocked
         if: >-
