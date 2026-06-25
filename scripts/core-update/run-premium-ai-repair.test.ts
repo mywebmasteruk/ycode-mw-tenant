@@ -147,6 +147,29 @@ describe('Premium AI per-file repair aggregation', () => {
     expect(result.results).toMatchObject([{ filePath: 'lib/a.ts', status: 'applied', applied: true, retryUsed: true }]);
   });
 
+  it('sanitizes literal control characters in resolved content and applies on the first attempt', async () => {
+    let appliedContent = '';
+    // The real failure mode: a resolved file returned in the `content` string with
+    // raw newlines -> "Bad control character in string literal" -> invalid_json.
+    const reply =
+      '{"summary":"ok","files":[{"filePath":"lib/a.ts","verdict":"safe_candidate","summary":"s","safetyConcerns":[],"unifiedDiff":null}],' +
+      '"resolvedFiles":[{"filePath":"lib/a.ts","content":"export const x = 1;\nexport const y = 2;\n"}],"patches":[],"nextActions":[]}';
+    const result = await repairFilesOneAtATime({
+      targetFiles: ['lib/a.ts'],
+      blockedFiles: ['lib/a.ts'],
+      requestFile: async () => ({ reply, model: 'test/model', finishReason: 'stop' }),
+      applyFile: (file: PremiumAiResolvedFile) => {
+        appliedContent = file.content;
+        return file.filePath;
+      },
+      validateFile: () => undefined,
+    });
+
+    expect(result.appliedFiles).toEqual(['lib/a.ts']);
+    expect(appliedContent).toBe('export const x = 1;\nexport const y = 2;\n');
+    expect(result.results[0]).toMatchObject({ status: 'applied', applied: true, retryUsed: false });
+  });
+
   it('persists validated partial repairs as a patch artifact', () => {
     const previousCwd = process.cwd();
     const tempRoot = mkdtempSync(join(tmpdir(), 'premium-ai-checkpoint-test-'));

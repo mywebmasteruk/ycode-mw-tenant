@@ -412,16 +412,72 @@ function buildHunkRepairPrompt(args: { filePath: string; fileContent: string; hu
   ].join('\n');
 }
 
+/**
+ * Escape unescaped literal control characters (newlines, tabs, …) that appear
+ * INSIDE JSON string literals. Models routinely return a resolved file in the
+ * `content` string with raw newlines, which is invalid JSON ("Bad control
+ * character in string literal"). Escaping them to \n/\t/\u00XX makes the JSON
+ * parseable and round-trips to the exact same characters. Control chars outside
+ * strings (valid JSON whitespace between tokens) are left untouched.
+ */
+function sanitizeJsonControlChars(raw: string): string {
+  let out = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (escaped) {
+      out += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      out += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      out += ch;
+      continue;
+    }
+    const code = raw.charCodeAt(i);
+    if (inString && code < 0x20) {
+      if (ch === '\n') out += '\\n';
+      else if (ch === '\r') out += '\\r';
+      else if (ch === '\t') out += '\\t';
+      else out += `\\u${code.toString(16).padStart(4, '0')}`;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
 function parseJsonObject(raw: string): Record<string, unknown> {
   const stripped = stripCodeFences(raw);
-  try {
-    return JSON.parse(stripped) as Record<string, unknown>;
-  } catch {
-    const first = stripped.indexOf('{');
-    const last = stripped.lastIndexOf('}');
-    if (first === -1 || last === -1 || last <= first) throw new Error('No JSON object found in model response');
-    return JSON.parse(stripped.slice(first, last + 1)) as Record<string, unknown>;
-  }
+  const tryParse = (candidate: string): Record<string, unknown> | null => {
+    try {
+      return JSON.parse(candidate) as Record<string, unknown>;
+    } catch {
+      // Recover the common failure: raw control chars inside string literals.
+      try {
+        return JSON.parse(sanitizeJsonControlChars(candidate)) as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    }
+  };
+
+  const direct = tryParse(stripped);
+  if (direct) return direct;
+
+  const first = stripped.indexOf('{');
+  const last = stripped.lastIndexOf('}');
+  if (first === -1 || last === -1 || last <= first) throw new Error('No JSON object found in model response');
+  const sliced = tryParse(stripped.slice(first, last + 1));
+  if (sliced) return sliced;
+  throw new Error('No JSON object found in model response');
 }
 
 function normalizeAssessment(entry: unknown): PremiumAiFileAssessment {
