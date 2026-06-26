@@ -46,6 +46,7 @@ interface CollectionLayerActions {
   // Pagination actions
   fetchPage: (layerId: string, page: number) => Promise<{ items: CollectionItemWithValues[]; meta: CollectionPaginationMeta } | null>;
   setPaginationMeta: (layerId: string, meta: CollectionPaginationMeta) => void;
+  setLayerTotal: (layerId: string, total: number) => void;
 }
 
 type CollectionLayerStore = CollectionLayerState & CollectionLayerActions;
@@ -396,6 +397,16 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
     set((state) => ({
       paginationMeta: { ...state.paginationMeta, [layerId]: meta },
     }));
+  },
+
+  // Set the total matching rows for a layer. Used by multi-asset collection
+  // layers, which build virtual items client-side instead of fetching via
+  // fetchLayerData (so layerTotal is never populated by the normal flow).
+  setLayerTotal: (layerId, total) => {
+    set((state) => {
+      if (state.layerTotal[layerId] === total) return state;
+      return { layerTotal: { ...state.layerTotal, [layerId]: total } };
+    });
   },
 
   // Fetch a specific page for a layer with pagination

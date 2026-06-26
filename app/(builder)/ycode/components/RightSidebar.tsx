@@ -2693,6 +2693,10 @@ const RightSidebar = React.memo(function RightSidebar({
                   {/* Sort By - only show if a real collection source is selected */}
                   {hasBoundCollectionSource(getCollectionVariable(selectedLayer)) && (
                     <>
+                      {/* Sort by/order are hidden for multi-asset: order is the
+                          image order in the field and there are no fields to sort by. */}
+                      {getCollectionVariable(selectedLayer)?.source_field_type !== 'multi_asset' && (
+                      <>
                       <div className="grid grid-cols-3">
                         <Label variant="muted">Sort by</Label>
                         <div className="col-span-2 *:w-full flex">
@@ -2799,6 +2803,8 @@ const RightSidebar = React.memo(function RightSidebar({
                               )}
                             </div>
                           </div>
+                      )}
+                      </>
                       )}
 
                       {/* Total Limit */}
