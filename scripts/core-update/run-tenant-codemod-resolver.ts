@@ -85,9 +85,38 @@ export function takeTheirs(content: string): string | null {
   return out.join('\n');
 }
 
+/**
+ * Tier-2 files that AUTO-MERGED cleanly (no conflict) but still gained unscoped
+ * tenant-table queries vs the baseline — i.e. upstream added new queries in a
+ * region that didn't collide with the seam, so they slipped in without scoping.
+ * The conflict-only pass misses these; the gate (correctly) fails on them. Scope
+ * them deterministically too. Excludes files with conflict markers (handled by
+ * conflictedFiles()).
+ */
+function autoMergedFilesNeedingScoping(): string[] {
+  return TIER2_REPOSITORY_FILES.filter((f) => {
+    let cur: string;
+    try {
+      cur = readFileSync(join(REPO_ROOT, f), 'utf8');
+    } catch {
+      return false;
+    }
+    if (cur.includes('<<<<<<<')) return false;
+    const baseSrc = tryGit(`show ${BASELINE_REF}:${f}`);
+    const baseline = baseSrc !== null ? analyzeTenantIsolation(f, baseSrc) : [];
+    const after = analyzeTenantIsolation(f, cur);
+    return isolationRegressions(baseline, after).length > 0;
+  });
+}
+
 function main(): void {
   const tier2 = new Set(TIER2_REPOSITORY_FILES);
-  const targets = conflictedFiles().filter((f) => tier2.has(f));
+  const targets = [
+    ...new Set([
+      ...conflictedFiles().filter((f) => tier2.has(f)),
+      ...autoMergedFilesNeedingScoping(),
+    ]),
+  ];
 
   const resolved: string[] = [];
   const deferred: { file: string; reason: string }[] = [];

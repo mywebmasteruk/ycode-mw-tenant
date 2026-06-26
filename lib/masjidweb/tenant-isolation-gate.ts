@@ -76,6 +76,13 @@ export const TIER2_REPOSITORY_FILES: readonly string[] = [
   'lib/repositories/assetRepository.ts',
   'lib/repositories/assetFolderRepository.ts',
   'lib/repositories/colorVariableRepository.ts',
+  // Tier-3 services that follow the same mechanical tenant-scoping pattern —
+  // included so the codemod resolves them deterministically ($0) and the gate
+  // enforces them, instead of deferring to the premium AI. (cacheService is
+  // intentionally excluded — its invalidation logic is genuinely behavioral.)
+  'lib/services/collectionService.ts',
+  'lib/services/localisationService.ts',
+  'lib/services/pageService.ts',
 ];
 
 export type QueryOp = 'read' | 'write';
@@ -276,7 +283,11 @@ function readIsScoped(top: ts.Node, sf: ts.SourceFile, scope: ts.Node): boolean 
  * property/assignment is the right granularity here.
  */
 function hasWriteScopeEvidence(text: string): boolean {
-  return /\btenant_id\b\s*:/.test(text) || /\btenant_id\b\s*=/.test(text);
+  return (
+    /\btenant_id\b\s*:/.test(text) ||
+    /\btenant_id\b\s*=/.test(text) ||
+    /\bapplyTenantId\s*\(/.test(text) // payload wrapped in the applyTenantId() helper
+  );
 }
 
 /** Lines (1-based) that carry the `isolation-ok:` escape hatch. */

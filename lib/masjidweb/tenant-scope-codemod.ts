@@ -34,6 +34,7 @@ interface Edit {
 
 const IMPORT_TENANT_ID = "import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';";
 const IMPORT_APPLY_EQ = "import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';";
+const IMPORT_APPLY_ID = "import { applyTenantId } from '@/lib/masjidweb/apply-tenant-id';";
 
 const WRITE_METHODS = new Set(['insert', 'upsert']);
 const FILTER_METHODS = new Set(['update', 'delete']);
@@ -108,6 +109,30 @@ function existingTenantVar(body: ts.Block): string | null {
   };
   visit(body);
   return found;
+}
+
+/** True if `name` is already a parameter or declared variable of this function —
+ *  so the codemod must not insert a colliding `const <name>`. */
+function nameTakenInFunction(body: ts.Block, name: string): boolean {
+  const fn = body.parent;
+  if (
+    fn &&
+    (ts.isFunctionDeclaration(fn) ||
+      ts.isFunctionExpression(fn) ||
+      ts.isArrowFunction(fn) ||
+      ts.isMethodDeclaration(fn))
+  ) {
+    for (const p of fn.parameters) {
+      if (ts.isIdentifier(p.name) && p.name.text === name) return true;
+    }
+  }
+  let taken = false;
+  const visit = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === name) taken = true;
+    if (!taken) ts.forEachChild(n, visit);
+  };
+  visit(body);
+  return taken;
 }
 
 /** The `<x> = client.from(...)…` / `let <x> = …` variable this chain is assigned to. */
@@ -210,6 +235,7 @@ export function reapplyTenantScoping(source: string, filePath = 'repo.ts'): Code
   const residual: CodemodResult['residual'] = [];
   let needTenantIdImport = false;
   let needApplyEqImport = false;
+  let needApplyIdImport = false;
   // Track which function bodies already got a `const tenantId = …` inserted.
   const tenantVarByBody = new Map<ts.Block, string>();
 
@@ -218,17 +244,24 @@ export function reapplyTenantScoping(source: string, filePath = 'repo.ts'): Code
     if (existing) return existing;
     const cached = tenantVarByBody.get(body);
     if (cached) return cached;
+    // Avoid colliding with an existing `tenantId` parameter/variable (e.g. repo
+    // functions declared `(…, tenantId?: string)`) — pick a free name.
+    const name = !nameTakenInFunction(body, 'tenantId')
+      ? 'tenantId'
+      : !nameTakenInFunction(body, 'effectiveTenantId')
+        ? 'effectiveTenantId'
+        : '__effectiveTenantId';
     // Insert at the start of the function body.
     const insertPos = body.getStart(sf) + 1; // after `{`
     const indent = lineIndent(source, body.statements[0]?.getStart(sf) ?? insertPos);
     edits.push({
       start: insertPos,
       end: insertPos,
-      text: `\n${indent}const tenantId = await resolveEffectiveTenantId();`,
+      text: `\n${indent}const ${name} = await resolveEffectiveTenantId();`,
     });
     needTenantIdImport = true;
-    tenantVarByBody.set(body, 'tenantId');
-    return 'tenantId';
+    tenantVarByBody.set(body, name);
+    return name;
   };
 
   const visit = (node: ts.Node): void => {
@@ -268,9 +301,16 @@ export function reapplyTenantScoping(source: string, filePath = 'repo.ts'): Code
           }
           changes.push(`Added tenant_id to ${table} write payload (line ${line}).`);
         } else if (writePayloadLiterals(node, body).length === 0 && writeArg(node)) {
-          // A payload we cannot resolve to an object literal (e.g. a spread-only
-          // arg or a function result) — leave for the gate/LLM fallback.
-          residual.push({ line, table, snippet: 'non-literal write payload' });
+          // A payload we cannot reach as an inline object literal (a pre-built
+          // array, a mapped variable, a function result). Wrap it in the
+          // applyTenantId() helper, which stamps tenant_id onto the object or
+          // each array element at runtime. The gate recognizes applyTenantId().
+          const arg = writeArg(node)!;
+          const tv = ensureTenantVar(body);
+          edits.push({ start: arg.getStart(sf), end: arg.getStart(sf), text: 'applyTenantId(' });
+          edits.push({ start: arg.getEnd(), end: arg.getEnd(), text: `, ${tv})` });
+          needApplyIdImport = true;
+          changes.push(`Scoped ${table} write payload via applyTenantId (line ${line}).`);
         }
         ts.forEachChild(node, visit);
         return;
@@ -304,31 +344,22 @@ export function reapplyTenantScoping(source: string, filePath = 'repo.ts'): Code
           return;
         }
       }
-      // No intermediate variable. If the chain is directly awaited
-      // (`const { data } = await client.from(…)…`, optionally `.single()`),
-      // wrap the filter builder in applyTenantEq() so destructured-await reads
-      // are scoped deterministically — no LLM fallback needed.
-      if (top.parent && ts.isAwaitExpression(top.parent)) {
-        // Strip a trailing `.single()` / `.maybeSingle()` so we wrap the filter
-        // builder, not its single-row result (which has no `.eq`).
-        let wrapNode: ts.Node = top;
-        if (
-          ts.isCallExpression(top) &&
-          ts.isPropertyAccessExpression(top.expression) &&
-          (top.expression.name.text === 'single' || top.expression.name.text === 'maybeSingle')
-        ) {
-          wrapNode = top.expression.expression;
-        }
+      // Not assigned to a reassignable variable (inline `await client.from(...)`,
+      // `return client.from(...)`, destructure, call argument, .map() callback…).
+      // Wrap the chain inline: `applyTenantEq(<chain>, tenantId)`. The isolation
+      // gate recognizes inline applyTenantEq() as scoped, and the `unscoped` guard
+      // above keeps it idempotent (already-scoped chains are never re-wrapped).
+      {
         const tv = ensureTenantVar(body);
-        edits.push({ start: wrapNode.getStart(sf), end: wrapNode.getStart(sf), text: 'applyTenantEq(' });
-        edits.push({ start: wrapNode.getEnd(), end: wrapNode.getEnd(), text: `, ${tv})` });
+        const start = top.getStart(sf);
+        const end = top.getEnd();
+        edits.push({ start, end: start, text: 'applyTenantEq(' });
+        edits.push({ start: end, end, text: `, ${tv})` });
         needApplyEqImport = true;
-        changes.push(`Scoped ${table} ${op} via inline applyTenantEq() (line ${line}).`);
-        ts.forEachChild(node, visit);
-        return;
+        changes.push(`Scoped ${table} ${op} via inline applyTenantEq (line ${line}).`);
       }
-      // Could not mechanically scope (non-awaited chain, etc.)
-      residual.push({ line, table, snippet: `${op} not assigned to a variable` });
+      ts.forEachChild(node, visit);
+      return;
     }
     ts.forEachChild(node, visit);
   };
@@ -344,13 +375,25 @@ export function reapplyTenantScoping(source: string, filePath = 'repo.ts'): Code
   if (needApplyEqImport && !/applyTenantEq/.test(source.split('\n').filter((l) => l.startsWith('import')).join('\n'))) {
     importsToAdd.push(IMPORT_APPLY_EQ);
   }
+  if (needApplyIdImport && !/applyTenantId/.test(source.split('\n').filter((l) => l.startsWith('import')).join('\n'))) {
+    importsToAdd.push(IMPORT_APPLY_ID);
+  }
   if (importsToAdd.length > 0) {
     const lastImport = [...sf.statements].reverse().find((s) => ts.isImportDeclaration(s));
     const pos = lastImport ? lastImport.getEnd() : 0;
     importEdits.push({ start: pos, end: pos, text: `\n${importsToAdd.join('\n')}` });
   }
 
-  const all = [...edits, ...importEdits].sort((a, b) => b.start - a.start);
+  // Dedupe identical inserts at the same position (e.g. the same write payload
+  // reached via two paths) so a property like `tenant_id` is never added twice.
+  const seenEdits = new Set<string>();
+  const deduped = [...edits, ...importEdits].filter((e) => {
+    const key = `${e.start}:${e.end}:${e.text}`;
+    if (seenEdits.has(key)) return false;
+    seenEdits.add(key);
+    return true;
+  });
+  const all = deduped.sort((a, b) => b.start - a.start);
   let out = source;
   for (const e of all) {
     out = out.slice(0, e.start) + e.text + out.slice(e.end);

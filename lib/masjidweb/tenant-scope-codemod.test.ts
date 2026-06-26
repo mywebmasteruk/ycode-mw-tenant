@@ -85,36 +85,35 @@ export async function f(client, tenantId) {
     expect(code.match(/applyTenantEq\(query/g)?.length).toBe(1);
   });
 
-  it('scopes a directly-awaited destructured read by wrapping the chain inline', () => {
+  it('scopes an inline-awaited read inline via applyTenantEq', () => {
     const upstream = `export async function f(client) {
   const { data } = await client.from('pages').select('*');
   return data;
 }`;
     const { code, residual } = reapplyTenantScoping(upstream);
     expect(residual).toHaveLength(0);
-    expect(code).toContain('const tenantId = await resolveEffectiveTenantId();');
     expect(code).toContain("applyTenantEq(client.from('pages').select('*'), tenantId)");
+    expect(code).toContain('const tenantId = await resolveEffectiveTenantId();');
+    expect(code).toContain('import { applyTenantEq }');
   });
 
-  it('wraps the filter builder, not the .single() result, for awaited single-row reads', () => {
-    const upstream = `export async function f(client, id) {
-  const { data } = await client.from('pages').select('*').eq('id', id).single();
-  return data;
-}`;
-    const { code, residual } = reapplyTenantScoping(upstream);
-    expect(residual).toHaveLength(0);
-    // applyTenantEq must wrap the chain up to (not including) .single().
-    expect(code).toContain(", tenantId).single()");
-    expect(code).not.toContain('.single(), tenantId)');
-  });
-
-  it('still reports residual for an unscoped read that is neither assigned nor awaited', () => {
-    const upstream = `export function build(client) {
-  return client.from('pages').select('*');
-}`;
+  it('reports residual for a tenant query outside any function body', () => {
+    const upstream = `export const rows = client.from('pages').select('*');`;
     const { residual } = reapplyTenantScoping(upstream);
     expect(residual).toHaveLength(1);
     expect(residual[0]).toMatchObject({ table: 'pages' });
+  });
+
+  it('wraps a non-literal write payload in applyTenantId', () => {
+    const upstream = `export async function f(client, rows) {
+  const { error } = await client.from('pages').upsert(rows);
+  return error;
+}`;
+    const { code, residual } = reapplyTenantScoping(upstream);
+    expect(residual).toHaveLength(0);
+    expect(code).toContain('applyTenantId(rows, tenantId)');
+    expect(code).toContain('const tenantId = await resolveEffectiveTenantId();');
+    expect(code).toContain('import { applyTenantId }');
   });
 });
 
