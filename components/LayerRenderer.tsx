@@ -1381,6 +1381,7 @@ const LayerItemImpl: React.FC<{
   const layerData = useCollectionLayerStore((state) => state.layerData[layer.id]);
   const isLoadingLayerData = useCollectionLayerStore((state) => state.loading[layer.id]);
   const fetchLayerData = useCollectionLayerStore((state) => state.fetchLayerData);
+  const setLayerTotal = useCollectionLayerStore((state) => state.setLayerTotal);
   const fieldsByCollectionId = useCollectionsStore((state) => state.fields);
   const itemsByCollectionId = useCollectionsStore((state) => state.items);
   const referencedItemsByCollectionId = useCollectionLayerStore((state) => state.referencedItems);
@@ -1523,14 +1524,16 @@ const LayerItemImpl: React.FC<{
     // `limit`/`offset`. We slice unconditionally for paginated layers, and
     // when static filters are present for non-paginated ones (the API
     // returns the configured limit when there are no static filters, so no
-    // re-slicing is needed there).
+    // re-slicing is needed there). Multi-asset items are always built
+    // client-side (never fetched with limit/offset), so they must be sliced
+    // here too.
     const pagination = collectionVariable?.pagination;
     const isPaginated = !!pagination?.enabled && (pagination.mode === 'pages' || pagination.mode === 'load_more');
 
     if (isPaginated) {
       const itemsPerPage = pagination!.items_per_page || 10;
       items = items.slice(0, itemsPerPage);
-    } else if (hasStaticFilters) {
+    } else if (hasStaticFilters || sourceFieldType === 'multi_asset') {
       const offset = collectionVariable?.offset ?? 0;
       const limit = collectionVariable?.limit;
       if (offset || limit) {
@@ -1658,6 +1661,23 @@ const LayerItemImpl: React.FC<{
     fetchLayerData,
     layer.id,
   ]);
+
+  // Multi-asset layers build virtual items client-side, so fetchLayerData skips
+  // them and layerTotal stays empty — meaning sibling pagination layers ("Total
+  // items", "Page X of Y") can't resolve. Mirror SSR by publishing the asset
+  // count (uncapped; paginationDisplayTotal applies the maxTotal limit) here.
+  const multiAssetTotalCount = useMemo<number | null>(() => {
+    if (sourceFieldType !== 'multi_asset' || !sourceFieldId) return null;
+    const fieldValue = sourceFieldSource === 'page'
+      ? pageCollectionItemData?.[sourceFieldId]
+      : collectionLayerData?.[sourceFieldId];
+    return parseMultiAssetFieldValue(fieldValue).length;
+  }, [sourceFieldType, sourceFieldId, sourceFieldSource, pageCollectionItemData, collectionLayerData]);
+
+  useEffect(() => {
+    if (!isEditMode || multiAssetTotalCount === null) return;
+    setLayerTotal(layer.id, multiAssetTotalCount);
+  }, [isEditMode, multiAssetTotalCount, setLayerTotal, layer.id]);
 
   // For component instances in edit mode, use the component's layers as children
   // For published pages, children are already resolved server-side
