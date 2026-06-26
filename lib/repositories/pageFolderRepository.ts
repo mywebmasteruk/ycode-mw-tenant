@@ -726,15 +726,15 @@ export async function getAllPublishedPageFolders(includeSoftDeleted = false, ten
     throw new Error('Supabase not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   let query = client
     .from('page_folders')
     .select('*')
     .eq('is_published', true);
 
-  if (tenantId) {
-    query = query.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    query = query.eq('tenant_id', effectiveTenantId);
   }
 
   if (!includeSoftDeleted) {

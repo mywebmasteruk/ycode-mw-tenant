@@ -19,7 +19,7 @@ export async function getAllLocales(isPublished: boolean = false, tenantId?: str
     throw new Error('Failed to initialize Supabase client');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
   let query = client
     .from('locales')
     .select('*')
@@ -27,7 +27,7 @@ export async function getAllLocales(isPublished: boolean = false, tenantId?: str
     .is('deleted_at', null)
     .order('is_default', { ascending: false })
     .order('label', { ascending: true });
-  query = applyTenantEq(query, tenantId);
+  query = applyTenantEq(query, effectiveTenantId);
   const { data, error } = await query;
 
   if (error) {

@@ -1,18 +1,16 @@
-import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
-import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
-import { tenantHasCollectionAccess } from '@/lib/masjidweb/tenant-query';
 import { getSupabaseAdmin, getTenantIdFromHeaders } from '@/lib/supabase-server';
 import { getKnexClient } from '@/lib/knex-client';
 import { SUPABASE_IN_FILTER_CHUNK_SIZE, SUPABASE_QUERY_LIMIT, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
 import type { CollectionField, CollectionItem, CollectionItemWithValues } from '@/types';
 import { randomUUID } from 'crypto';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
-import { getCollectionById } from '@/lib/repositories/collectionRepository';
 import { getValuesByFieldId, getValuesByItemIds, getValuesByItemId, getValueRowsForItems } from '@/lib/repositories/collectionItemValueRepository';
 import { generateCollectionItemContentHash } from '@/lib/hash-utils';
 import { castValue } from '../collection-utils';
 import { findStatusFieldId, buildStatusValue } from '@/lib/collection-field-utils';
 import { chunk } from '@/lib/utils';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 /**
  * Collection Item Repository
@@ -55,48 +53,13 @@ export async function getTopItemsPerCollection(
     return [];
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  // Use raw SQL with window function to get top N items per collection
+  const { data, error } = await client.rpc('get_top_items_per_collection', {
+    p_collection_ids: collectionIds,
+    p_is_published: is_published,
+    p_limit: limit,
+  });
 
-<<<<<<< HEAD
-  // RPC does not filter by tenant — use manual path when tenant is resolved.
-  if (!tenantId) {
-    const { data, error } = await client.rpc('get_top_items_per_collection', {
-      p_collection_ids: collectionIds,
-      p_is_published: is_published,
-      p_limit: limit,
-    });
-
-    if (!error && data) {
-      return data || [];
-    }
-  }
-
-  {
-    // Fallback / tenant-scoped path
-    let manualQuery = client
-      .from('collection_items')
-      .select('*')
-      .in('collection_id', collectionIds)
-      .eq('is_published', is_published)
-      .is('deleted_at', null)
-      .order('collection_id', { ascending: true })
-      .order('manual_order', { ascending: true })
-      .order('created_at', { ascending: false })
-      .limit(collectionIds.length * limit);
-||||||| 1e44661
-  if (error) {
-    // Fallback to manual approach if RPC doesn't exist yet
-    let manualQuery = client
-      .from('collection_items')
-      .select('*')
-      .in('collection_id', collectionIds)
-      .eq('is_published', is_published)
-      .is('deleted_at', null)
-      .order('collection_id', { ascending: true })
-      .order('manual_order', { ascending: true })
-      .order('created_at', { ascending: false })
-      .limit(collectionIds.length * limit);
-=======
   if (error) {
     // RPC missing — fetch each collection's top N independently. A single
     // shared query with `.limit(collectionIds.length * limit)` ordered by
@@ -105,6 +68,7 @@ export async function getTopItemsPerCollection(
     // reference-field lookups). Per-collection limits guarantee fair coverage.
     const perCollection = await Promise.all(
       collectionIds.map(async (collectionId) => {
+        const tenantId = await resolveEffectiveTenantId();
         let query = client
           .from('collection_items')
           .select('*')
@@ -114,26 +78,12 @@ export async function getTopItemsPerCollection(
           .order('manual_order', { ascending: true })
           .order('created_at', { ascending: false })
           .limit(limit);
->>>>>>> upstream/main
+        query = applyTenantEq(query, tenantId);
 
-<<<<<<< HEAD
-    manualQuery = applyTenantEq(manualQuery, tenantId);
-
-    // For published queries, only include publishable items
-    if (is_published) {
-      manualQuery = manualQuery.eq('is_publishable', true);
-    }
-||||||| 1e44661
-    // For published queries, only include publishable items
-    if (is_published) {
-      manualQuery = manualQuery.eq('is_publishable', true);
-    }
-=======
         // For published queries, only include publishable items
         if (is_published) {
           query = query.eq('is_publishable', true);
         }
->>>>>>> upstream/main
 
         const { data: rows, error: rowsError } = await query;
         if (rowsError) {
@@ -145,6 +95,8 @@ export async function getTopItemsPerCollection(
 
     return perCollection.flat();
   }
+
+  return data || [];
 }
 
 export interface CreateCollectionItemData {
@@ -171,17 +123,12 @@ export async function getItemsByCollectionId(
   is_published: boolean = false,
   filters?: QueryFilters
 ): Promise<{ items: CollectionItem[], total: number }> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
-
-  if (!(await tenantHasCollectionAccess(collection_id))) {
-    return { items: [], total: 0 };
-  }
-
-  const tenantId = await resolveEffectiveTenantId();
 
   // If itemIds filter is provided, use those directly (for multi-reference fields)
   // If no items are linked, return early
@@ -194,94 +141,9 @@ export async function getItemsByCollectionId(
     ? `%${filters.search.trim()}%`
     : null;
 
-<<<<<<< HEAD
-    // Query collection_item_values for matching values (same published state)
-    let searchValQ = client
-      .from('collection_item_values')
-      .select('item_id')
-      .ilike('value', searchTerm)
-      .eq('is_published', is_published)
-      .is('deleted_at', null);
-||||||| 1e44661
-    // Query collection_item_values for matching values (same published state)
-    const { data: matchingValues, error: searchError } = await client
-      .from('collection_item_values')
-      .select('item_id')
-      .ilike('value', searchTerm)
-      .eq('is_published', is_published)
-      .is('deleted_at', null);
-=======
   // itemIds filter (bounded list, e.g. multi-reference fields).
   const filterIds = filters?.itemIds ?? null;
->>>>>>> upstream/main
 
-<<<<<<< HEAD
-    searchValQ = applyTenantEq(searchValQ, tenantId);
-
-    const { data: matchingValues, error: searchError } = await searchValQ;
-
-    if (searchError) {
-      throw new Error(`Failed to search items: ${searchError.message}`);
-    }
-
-    if (matchingValues) {
-      // Get unique item IDs
-      matchingItemIds = [...new Set(matchingValues.map(v => v.item_id))];
-
-      // If no matches found, return early
-      if (matchingItemIds.length === 0) {
-        return { items: [], total: 0 };
-      }
-    }
-  }
-
-  // Combine itemIds filter with search results (intersection if both present)
-  let filterIds: string[] | null = null;
-  if (filters?.itemIds) {
-    if (matchingItemIds !== null) {
-      // Intersection: only IDs that are in both lists
-      filterIds = filters.itemIds.filter(id => matchingItemIds!.includes(id));
-      if (filterIds.length === 0) {
-        return { items: [], total: 0 };
-      }
-    } else {
-      filterIds = filters.itemIds;
-    }
-  } else if (matchingItemIds !== null) {
-    filterIds = matchingItemIds;
-  }
-||||||| 1e44661
-    if (searchError) {
-      throw new Error(`Failed to search items: ${searchError.message}`);
-    }
-
-    if (matchingValues) {
-      // Get unique item IDs
-      matchingItemIds = [...new Set(matchingValues.map(v => v.item_id))];
-
-      // If no matches found, return early
-      if (matchingItemIds.length === 0) {
-        return { items: [], total: 0 };
-      }
-    }
-  }
-
-  // Combine itemIds filter with search results (intersection if both present)
-  let filterIds: string[] | null = null;
-  if (filters?.itemIds) {
-    if (matchingItemIds !== null) {
-      // Intersection: only IDs that are in both lists
-      filterIds = filters.itemIds.filter(id => matchingItemIds!.includes(id));
-      if (filterIds.length === 0) {
-        return { items: [], total: 0 };
-      }
-    } else {
-      filterIds = filters.itemIds;
-    }
-  } else if (matchingItemIds !== null) {
-    filterIds = matchingItemIds;
-  }
-=======
   // When searching, filter through an embedded inner join on
   // collection_item_values rather than collecting matching item ids and using
   // `.in('id', ...)`. The values table has no collection_id, but the embed is
@@ -290,7 +152,6 @@ export async function getItemsByCollectionId(
   const selectColumns = searchTerm
     ? '*, collection_item_values!inner(item_id)'
     : '*';
->>>>>>> upstream/main
 
   // Build count query
   let countQuery = client
@@ -298,45 +159,8 @@ export async function getItemsByCollectionId(
     .select(selectColumns, { count: 'exact', head: true })
     .eq('collection_id', collection_id)
     .eq('is_published', is_published);
-
-<<<<<<< HEAD
   countQuery = applyTenantEq(countQuery, tenantId);
 
-  if (is_published) {
-    countQuery = countQuery.eq('is_publishable', true);
-  }
-  if (filterIds !== null) {
-    countQuery = countQuery.in('id', filterIds);
-  }
-  if (filters && 'deleted' in filters) {
-    if (filters.deleted === false) {
-      countQuery = countQuery.is('deleted_at', null);
-    } else if (filters.deleted === true) {
-      countQuery = countQuery.not('deleted_at', 'is', null);
-    }
-  } else {
-    countQuery = countQuery.is('deleted_at', null);
-  }
-
-||||||| 1e44661
-  if (is_published) {
-    countQuery = countQuery.eq('is_publishable', true);
-  }
-  if (filterIds !== null) {
-    countQuery = countQuery.in('id', filterIds);
-  }
-  if (filters && 'deleted' in filters) {
-    if (filters.deleted === false) {
-      countQuery = countQuery.is('deleted_at', null);
-    } else if (filters.deleted === true) {
-      countQuery = countQuery.not('deleted_at', 'is', null);
-    }
-  } else {
-    countQuery = countQuery.is('deleted_at', null);
-  }
-
-=======
->>>>>>> upstream/main
   // Build data query
   let query = client
     .from('collection_items')
@@ -345,14 +169,9 @@ export async function getItemsByCollectionId(
     .eq('is_published', is_published)
     .order('manual_order', { ascending: true })
     .order('created_at', { ascending: false });
-
-<<<<<<< HEAD
   query = applyTenantEq(query, tenantId);
 
-||||||| 1e44661
-=======
   // For published queries, only include publishable items
->>>>>>> upstream/main
   if (is_published) {
     countQuery = countQuery.eq('is_publishable', true);
     query = query.eq('is_publishable', true);
@@ -424,24 +243,19 @@ export async function fetchPublishedHashMap(
   const client = await getSupabaseAdmin();
   if (!client) throw new Error('Supabase client not configured');
 
-  const tenantId = await resolveEffectiveTenantId();
-
   let publishedRows: Array<{ id: string; content_hash: string | null }> | null = null;
   try {
     // Chunk the ID list: a single large `.in()` overflows the request URL length
     // limit and returns 400 Bad Request. Fetch chunks in parallel and merge.
     const chunkResults = await Promise.all(
       chunk(itemIds, SUPABASE_IN_FILTER_CHUNK_SIZE).map(async (idsChunk) => {
-        let pubQ = client
+        const tenantId = await resolveEffectiveTenantId();
+        const { data, error } = await applyTenantEq(client
           .from('collection_items')
           .select('id, content_hash')
           .in('id', idsChunk)
           .eq('is_published', true)
-          .is('deleted_at', null);
-
-        pubQ = applyTenantEq(pubQ, tenantId);
-
-        const { data, error } = await pubQ;
+          .is('deleted_at', null), tenantId);
 
         if (error) {
           console.error('Failed to fetch published items for status:', error.message);
@@ -468,19 +282,18 @@ export async function fetchPublishedHashMap(
   const itemsMissingHash = (publishedRows || []).filter(row => row.content_hash == null);
   if (itemsMissingHash.length > 0) {
     const backfillPromises = itemsMissingHash.map(async (row) => {
+      const tenantId = await resolveEffectiveTenantId();
       const pubValues = await getValuesByItemId(row.id, true);
       if (pubValues.length === 0) return;
       const hash = generateCollectionItemContentHash(
         pubValues.map(v => ({ field_id: v.field_id, value: v.value }))
       );
       publishedHashMap.set(row.id, hash);
-      let hashUpd = client
+      await applyTenantEq(client
         .from('collection_items')
         .update({ content_hash: hash })
         .eq('id', row.id)
-        .eq('is_published', true);
-      hashUpd = applyTenantEq(hashUpd, tenantId);
-      await hashUpd;
+        .eq('is_published', true), tenantId);
     });
     await Promise.all(backfillPromises);
   }
@@ -541,6 +354,7 @@ export async function getAllItemsRaw(
   is_published: boolean,
   tenantId?: string
 ): Promise<CollectionItem[]> {
+  const effectiveTenantId = await resolveEffectiveTenantId();
   try {
     const knex = await getKnexClient();
     const resolvedTenantId = tenantId ?? await getTenantIdFromHeaders();
@@ -553,25 +367,22 @@ export async function getAllItemsRaw(
     }
     return await query;
   } catch {
-    const client = await getSupabaseAdmin();
+    const client = await getSupabaseAdmin(tenantId);
     if (!client) {
       throw new Error('Supabase client not configured');
     }
-    const resolvedTenantId = tenantId ?? await resolveEffectiveTenantId();
 
     const allItems: CollectionItem[] = [];
     let offset = 0;
     let hasMore = true;
     while (hasMore) {
-      let query = client
+      const { data, error } = await applyTenantEq(client
         .from('collection_items')
         .select('*')
         .eq('is_published', is_published)
         .is('deleted_at', null)
         .order('id', { ascending: true })
-        .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
-      query = applyTenantEq(query, resolvedTenantId);
-      const { data, error } = await query;
+        .range(offset, offset + SUPABASE_QUERY_LIMIT - 1), effectiveTenantId);
 
       if (error) {
         throw new Error(`Failed to fetch collection items: ${error.message}`);
@@ -596,10 +407,7 @@ export async function getAllItemsByCollectionId(
   is_published: boolean = false,
   includeDeleted: boolean = false
 ): Promise<CollectionItem[]> {
-  if (!(await tenantHasCollectionAccess(collection_id))) {
-    return [];
-  }
-
+  const tenantId = await resolveEffectiveTenantId();
   // Fast path: one direct-DB (Knex) query instead of paginated PostgREST reads.
   try {
     const knex = await getKnexClient();
@@ -628,7 +436,6 @@ export async function getAllItemsByCollectionId(
       throw new Error('Supabase client not configured');
     }
 
-    const effectiveTenantId = await resolveEffectiveTenantId();
     const allItems: CollectionItem[] = [];
     let offset = 0;
     let hasMore = true;
@@ -642,6 +449,7 @@ export async function getAllItemsByCollectionId(
         .order('manual_order', { ascending: true })
         .order('created_at', { ascending: false })
         .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
+      query = applyTenantEq(query, tenantId);
 
       // For published queries, only include publishable items
       if (is_published) {
@@ -653,8 +461,6 @@ export async function getAllItemsByCollectionId(
       } else {
         query = query.is('deleted_at', null);
       }
-
-      query = applyTenantEq(query, effectiveTenantId);
 
       const { data, error } = await query;
 
@@ -681,23 +487,19 @@ export async function getAllItemsByCollectionId(
  * @param isPublished - Get draft (false) or published (true) version. Defaults to false (draft).
  */
 export async function getItemById(id: string, isPublished: boolean = false): Promise<CollectionItem | null> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
-
-  let itemQ = client
+  const { data, error } = await applyTenantEq(client
     .from('collection_items')
     .select('*')
     .eq('id', id)
-    .eq('is_published', isPublished);
-
-  itemQ = applyTenantEq(itemQ, tenantId);
-
-  const { data, error } = await itemQ.single();
+    .eq('is_published', isPublished)
+    .single(), tenantId);
 
   if (error && error.code !== 'PGRST116') {
     throw new Error(`Failed to fetch collection item: ${error.message}`);
@@ -713,6 +515,7 @@ export async function getItemById(id: string, isPublished: boolean = false): Pro
  * @returns Array of items found
  */
 export async function getItemsByIds(ids: string[], isPublished: boolean = false, tenantId?: string): Promise<CollectionItem[]> {
+  const effectiveTenantId = await resolveEffectiveTenantId();
   if (ids.length === 0) {
     return [];
   }
@@ -734,25 +537,20 @@ export async function getItemsByIds(ids: string[], isPublished: boolean = false,
     return await query;
   } catch {
     // Fallback: chunked PostgREST reads
-    const client = await getSupabaseAdmin();
+    const client = await getSupabaseAdmin(tenantId);
     if (!client) {
       throw new Error('Supabase client not configured');
     }
 
-    const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
     const allItems: CollectionItem[] = [];
     for (let i = 0; i < ids.length; i += SUPABASE_WRITE_BATCH_SIZE) {
       const batchIds = ids.slice(i, i + SUPABASE_WRITE_BATCH_SIZE);
-      let idsQ = client
+      const { data, error } = await applyTenantEq(client
         .from('collection_items')
         .select('*')
         .in('id', batchIds)
         .eq('is_published', isPublished)
-        .is('deleted_at', null);
-
-      idsQ = applyTenantEq(idsQ, effectiveTenantId);
-
-      const { data, error } = await idsQ;
+        .is('deleted_at', null), effectiveTenantId);
 
       if (error) {
         throw new Error(`Failed to fetch collection items: ${error.message}`);
@@ -772,6 +570,7 @@ export async function getItemsByIds(ids: string[], isPublished: boolean = false,
  * @param is_published - Get draft (false) or published (true) values. Defaults to false (draft).
  */
 export async function getItemWithValues(id: string, is_published: boolean = false): Promise<CollectionItemWithValues | null> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -782,15 +581,12 @@ export async function getItemWithValues(id: string, is_published: boolean = fals
   const item = await getItemById(id, is_published);
   if (!item) return null;
 
-  const tenantId = await resolveEffectiveTenantId();
-
   // Build query for values with field type info
   let valuesQuery = client
     .from('collection_item_values')
     .select('value, field_id, collection_fields!inner(type)')
     .eq('item_id', id)
     .eq('is_published', is_published);
-
   valuesQuery = applyTenantEq(valuesQuery, tenantId);
 
   // If the item itself is deleted, include deleted values (to show name in UI)
@@ -832,33 +628,24 @@ export async function getItemIdsByFieldValue(
   targetValue: string,
   isPublished: boolean = false
 ): Promise<string[]> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  if (!(await tenantHasCollectionAccess(collectionId))) {
-    return [];
-  }
-
-  const tenantId = await resolveEffectiveTenantId();
-
   // Find item IDs where the field value matches (single reference = exact, multi_reference = contains)
   // For single reference: value = targetValue (exact match)
   // For multi_reference: value is a JSON string like '["uuid1","uuid2"]' containing targetValue
   // We query for both patterns using OR with LIKE for JSON array containment
-  let valInvQ = client
+  const { data, error } = await applyTenantEq(client
     .from('collection_item_values')
     .select('item_id')
     .eq('field_id', fieldId)
     .eq('is_published', isPublished)
     .is('deleted_at', null)
-    .or(`value.eq.${targetValue},value.like.%"${targetValue}"%`);
-
-  valInvQ = applyTenantEq(valInvQ, tenantId);
-
-  const { data, error } = await valInvQ;
+    .or(`value.eq.${targetValue},value.like.%"${targetValue}"%`), tenantId);
 
   if (error) {
     throw new Error(`Failed to query inverse references: ${error.message}`);
@@ -869,17 +656,13 @@ export async function getItemIdsByFieldValue(
   // Get unique item IDs that also belong to the target collection and are not deleted
   const candidateIds = [...new Set(data.map(v => v.item_id))];
 
-  let itemsInvQ = client
+  const { data: validItems, error: itemError } = await applyTenantEq(client
     .from('collection_items')
     .select('id')
     .eq('collection_id', collectionId)
     .eq('is_published', isPublished)
     .is('deleted_at', null)
-    .in('id', candidateIds);
-
-  itemsInvQ = applyTenantEq(itemsInvQ, tenantId);
-
-  const { data: validItems, error: itemError } = await itemsInvQ;
+    .in('id', candidateIds), tenantId);
 
   if (itemError) {
     throw new Error(`Failed to validate inverse reference items: ${itemError.message}`);
@@ -888,62 +671,12 @@ export async function getItemIdsByFieldValue(
   return validItems?.map(i => i.id) || [];
 }
 
-function compareItemsByFieldValue(
-  a: CollectionItemWithValues,
-  b: CollectionItemWithValues,
-  sortFieldId: string,
-  sortOrder: 'asc' | 'desc',
-): number {
-  const aVal = a.values[sortFieldId];
-  const bVal = b.values[sortFieldId];
-  const aEmpty = aVal === undefined || aVal === null || aVal === '';
-  const bEmpty = bVal === undefined || bVal === null || bVal === '';
-
-  if (aEmpty && bEmpty) {
-    return (a.manual_order ?? 0) - (b.manual_order ?? 0);
-  }
-  if (aEmpty) return sortOrder === 'asc' ? 1 : -1;
-  if (bEmpty) return sortOrder === 'asc' ? -1 : 1;
-
-  const cmp = String(aVal).localeCompare(String(bVal), undefined, { numeric: true });
-  if (cmp !== 0) return sortOrder === 'desc' ? -cmp : cmp;
-  return (a.manual_order ?? 0) - (b.manual_order ?? 0);
-}
-
-async function getItemsSortedByFieldSupabaseFallback(
-  collection_id: string,
-  sortFieldId: string,
-  sortOrder: 'asc' | 'desc',
-  is_published: boolean,
-  limit: number,
-  offset: number,
-  search?: string,
-  knownFieldTypes?: Record<string, string>,
-): Promise<{ items: CollectionItemWithValues[]; total: number }> {
-  const filters = search?.trim() ? { search: search.trim() } : undefined;
-  const { items: allItems, total } = await getItemsWithValues(
-    collection_id,
-    is_published,
-    filters,
-    knownFieldTypes,
-  );
-
-  const sorted = [...allItems].sort((a, b) =>
-    compareItemsByFieldValue(a, b, sortFieldId, sortOrder),
-  );
-
-  return { items: sorted.slice(offset, offset + limit), total };
-}
-
 /**
  * Sort + paginate items by a field value at the DB level using a LEFT JOIN.
  * Avoids fetching every item for the collection: only the requested page
  * is materialized with full values. Items with no value for the sort field
  * appear last (ASC) or first (DESC) so the relative ordering matches what
  * a client-side sort would produce.
- *
- * Falls back to Supabase + in-memory sort when the direct PG (Knex) path is
- * unavailable (e.g. pooler circuit breaker), matching getValuesByItemIds.
  *
  * Pass `knownFieldTypes` to skip the extra `collection_fields` lookup when
  * the caller has already loaded the field schema.
@@ -958,102 +691,67 @@ export async function getItemsSortedByField(
   search?: string,
   knownFieldTypes?: Record<string, string>,
 ): Promise<{ items: CollectionItemWithValues[], total: number }> {
-  if (!(await tenantHasCollectionAccess(collection_id))) {
-    return { items: [], total: 0 };
+  const knex = await getKnexClient();
+
+  const safeSortOrder = sortOrder === 'desc' ? 'DESC' : 'ASC';
+  const nullsPosition = safeSortOrder === 'ASC' ? 'NULLS LAST' : 'NULLS FIRST';
+
+  let searchItemIds: string[] | null = null;
+  if (search?.trim()) {
+    const searchTerm = `%${search.trim()}%`;
+    const matchRows = await knex('collection_item_values')
+      .distinct('item_id')
+      .where('is_published', is_published)
+      .whereNull('deleted_at')
+      .andWhereILike('value', searchTerm);
+
+    if (matchRows.length === 0) return { items: [], total: 0 };
+    searchItemIds = matchRows.map((r: { item_id: string }) => r.item_id);
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  let baseQuery = knex('collection_items as ci')
+    .leftJoin('collection_item_values as civ', function () {
+      this.on('civ.item_id', 'ci.id')
+        .andOn('civ.is_published', knex.raw('?', [is_published]))
+        .andOn('civ.field_id', knex.raw('?', [sortFieldId]))
+        .andOn(knex.raw('civ.deleted_at IS NULL'));
+    })
+    .where('ci.collection_id', collection_id)
+    .andWhere('ci.is_published', is_published)
+    .whereNull('ci.deleted_at');
 
-  try {
-    const knex = await getKnexClient();
-
-    const safeSortOrder = sortOrder === 'desc' ? 'DESC' : 'ASC';
-    const nullsPosition = safeSortOrder === 'ASC' ? 'NULLS LAST' : 'NULLS FIRST';
-
-    let searchItemIds: string[] | null = null;
-    if (search?.trim()) {
-      const searchTerm = `%${search.trim()}%`;
-      let searchQuery = knex('collection_item_values')
-        .distinct('item_id')
-        .where('is_published', is_published)
-        .whereNull('deleted_at')
-        .andWhereILike('value', searchTerm);
-
-      if (tenantId) {
-        searchQuery = searchQuery.andWhere('tenant_id', tenantId);
-      }
-
-      const matchRows = await searchQuery;
-
-      if (matchRows.length === 0) return { items: [], total: 0 };
-      searchItemIds = matchRows.map((r: { item_id: string }) => r.item_id);
-    }
-
-    let baseQuery = knex('collection_items as ci')
-      .leftJoin('collection_item_values as civ', function () {
-        this.on('civ.item_id', 'ci.id')
-          .andOn('civ.is_published', knex.raw('?', [is_published]))
-          .andOn('civ.field_id', knex.raw('?', [sortFieldId]))
-          .andOn(knex.raw('civ.deleted_at IS NULL'));
-        if (tenantId) {
-          this.andOn('civ.tenant_id', knex.raw('?', [tenantId]));
-        }
-      })
-      .where('ci.collection_id', collection_id)
-      .andWhere('ci.is_published', is_published)
-      .whereNull('ci.deleted_at');
-
-    if (tenantId) {
-      baseQuery = baseQuery.andWhere('ci.tenant_id', tenantId);
-    }
-    if (is_published) {
-      baseQuery = baseQuery.andWhere('ci.is_publishable', true);
-    }
-    if (searchItemIds) {
-      baseQuery = baseQuery.whereIn('ci.id', searchItemIds);
-    }
-
-    const [countResult, rows] = await Promise.all([
-      baseQuery.clone().count('ci.id as count').first(),
-      baseQuery.clone()
-        .select('ci.*')
-        .orderByRaw(`civ.value ${safeSortOrder} ${nullsPosition}`)
-        .orderBy('ci.manual_order', 'asc')
-        .limit(limit)
-        .offset(offset),
-    ]);
-
-    const total = Number(countResult?.count) || 0;
-
-    if (rows.length === 0) {
-      return { items: [], total };
-    }
-
-    const itemIds = rows.map((r: CollectionItem) => r.id);
-    const valuesByItem = await getValuesByItemIds(itemIds, is_published, knownFieldTypes);
-
-    const items: CollectionItemWithValues[] = rows.map((row: CollectionItem) => ({
-      ...row,
-      values: valuesByItem[row.id] || {},
-    }));
-
-    return { items, total };
-  } catch (error) {
-    console.warn(
-      '[getItemsSortedByField] Knex path failed, using Supabase fallback:',
-      error instanceof Error ? error.message : error,
-    );
-    return getItemsSortedByFieldSupabaseFallback(
-      collection_id,
-      sortFieldId,
-      sortOrder,
-      is_published,
-      limit,
-      offset,
-      search,
-      knownFieldTypes,
-    );
+  if (is_published) {
+    baseQuery = baseQuery.andWhere('ci.is_publishable', true);
   }
+  if (searchItemIds) {
+    baseQuery = baseQuery.whereIn('ci.id', searchItemIds);
+  }
+
+  const [countResult, rows] = await Promise.all([
+    baseQuery.clone().count('ci.id as count').first(),
+    baseQuery.clone()
+      .select('ci.*')
+      .orderByRaw(`civ.value ${safeSortOrder} ${nullsPosition}`)
+      .orderBy('ci.manual_order', 'asc')
+      .limit(limit)
+      .offset(offset),
+  ]);
+
+  const total = Number(countResult?.count) || 0;
+
+  if (rows.length === 0) {
+    return { items: [], total };
+  }
+
+  const itemIds = rows.map((r: CollectionItem) => r.id);
+  const valuesByItem = await getValuesByItemIds(itemIds, is_published, knownFieldTypes);
+
+  const items: CollectionItemWithValues[] = rows.map((row: CollectionItem) => ({
+    ...row,
+    values: valuesByItem[row.id] || {},
+  }));
+
+  return { items, total };
 }
 
 /**
@@ -1207,30 +905,22 @@ export async function getMaxManualOrder(
   collectionId: string,
   isPublished: boolean = false
 ): Promise<number> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  if (!(await tenantHasCollectionAccess(collectionId))) {
-    return -1;
-  }
-
-  const tenantId = await resolveEffectiveTenantId();
-
-  let maxOrdQ = client
+  const { data, error } = await applyTenantEq(client
     .from('collection_items')
     .select('manual_order')
     .eq('collection_id', collectionId)
     .eq('is_published', isPublished)
     .is('deleted_at', null)
     .order('manual_order', { ascending: false })
-    .limit(1);
-
-  maxOrdQ = applyTenantEq(maxOrdQ, tenantId);
-
-  const { data, error } = await maxOrdQ.single();
+    .limit(1)
+    .single(), tenantId);
 
   if (error || !data) return -1;
   return data.manual_order ?? -1;
@@ -1291,6 +981,7 @@ export async function getMaxIdValue(
 export async function createItemsBulk(
   items: Array<CreateCollectionItemData & { id?: string }>
 ): Promise<CollectionItem[]> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -1299,17 +990,8 @@ export async function createItemsBulk(
 
   if (items.length === 0) return [];
 
-  const uniqueCollectionIds = [...new Set(items.map(i => i.collection_id))];
-  for (const cid of uniqueCollectionIds) {
-    const col = await getCollectionById(cid, false, true);
-    if (!col) {
-      throw new Error('Collection not found');
-    }
-  }
-
-  const tenantId = await resolveEffectiveTenantId();
   const now = new Date().toISOString();
-  const itemsToInsert = items.map(item => ({
+  const itemsToInsert = items.map(item => ({ tenant_id: tenantId,
     id: item.id || randomUUID(),
     collection_id: item.collection_id,
     manual_order: item.manual_order ?? 0,
@@ -1318,7 +1000,6 @@ export async function createItemsBulk(
     content_hash: item.content_hash ?? null,
     created_at: now,
     updated_at: now,
-    ...(tenantId ? { tenant_id: tenantId } : {}),
   }));
 
   const { data, error } = await client
@@ -1337,37 +1018,27 @@ export async function createItemsBulk(
  * Create a new item
  */
 export async function createItem(itemData: CreateCollectionItemData): Promise<CollectionItem> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const col = await getCollectionById(itemData.collection_id, false, true);
-  if (!col) {
-    throw new Error('Collection not found');
-  }
-
-  const tenantId = await resolveEffectiveTenantId();
   const id = randomUUID();
   const isPublished = itemData.is_published ?? false;
 
-  const insertRow: Record<string, unknown> = {
-    id,
-    ...itemData,
-    manual_order: itemData.manual_order ?? 0,
-    is_published: isPublished,
-    is_publishable: itemData.is_publishable ?? true,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
-  if (tenantId) {
-    insertRow.tenant_id = tenantId;
-  }
-
   const { data, error } = await client
     .from('collection_items')
-    .insert(insertRow)
+    .insert({ tenant_id: tenantId,
+      id,
+      ...itemData,
+      manual_order: itemData.manual_order ?? 0,
+      is_published: isPublished,
+      is_publishable: itemData.is_publishable ?? true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
     .select()
     .single();
 
@@ -1389,15 +1060,14 @@ export async function updateItem(
   itemData: UpdateCollectionItemData,
   isPublished: boolean = false
 ): Promise<CollectionItem> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
-
-  let updQ = client
+  const { data, error } = await applyTenantEq(client
     .from('collection_items')
     .update({
       ...itemData,
@@ -1405,11 +1075,9 @@ export async function updateItem(
     })
     .eq('id', id)
     .eq('is_published', isPublished)
-    .is('deleted_at', null);
-
-  updQ = applyTenantEq(updQ, tenantId);
-
-  const { data, error } = await updQ.select().single();
+    .is('deleted_at', null)
+    .select()
+    .single(), tenantId);
 
   if (error) {
     throw new Error(`Failed to update collection item: ${error.message}`);
@@ -1427,17 +1095,17 @@ export async function updateItem(
  * @param isPublished - Which version to delete: draft (false) or published (true). Defaults to false (draft).
  */
 export async function deleteItem(id: string, isPublished: boolean = false): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
   const now = new Date().toISOString();
 
   // Soft delete the collection item
-  let itemDel = client
+  const { error: itemError } = await applyTenantEq(client
     .from('collection_items')
     .update({
       deleted_at: now,
@@ -1445,18 +1113,14 @@ export async function deleteItem(id: string, isPublished: boolean = false): Prom
     })
     .eq('id', id)
     .eq('is_published', isPublished)
-    .is('deleted_at', null);
-
-  itemDel = applyTenantEq(itemDel, tenantId);
-
-  const { error: itemError } = await itemDel;
+    .is('deleted_at', null), tenantId);
 
   if (itemError) {
     throw new Error(`Failed to delete collection item: ${itemError.message}`);
   }
 
   // Soft delete all collection_item_values for this item (same published state)
-  let valDel = client
+  const { error: valuesError } = await applyTenantEq(client
     .from('collection_item_values')
     .update({
       deleted_at: now,
@@ -1464,11 +1128,7 @@ export async function deleteItem(id: string, isPublished: boolean = false): Prom
     })
     .eq('item_id', id)
     .eq('is_published', isPublished)
-    .is('deleted_at', null);
-
-  valDel = applyTenantEq(valDel, tenantId);
-
-  const { error: valuesError } = await valDel;
+    .is('deleted_at', null), tenantId);
 
   if (valuesError) {
     throw new Error(`Failed to delete collection item values: ${valuesError.message}`);
@@ -1483,23 +1143,18 @@ export async function deleteItem(id: string, isPublished: boolean = false): Prom
  * @param isPublished - Which version to delete: draft (false) or published (true). Defaults to false (draft).
  */
 export async function hardDeleteItem(id: string, isPublished: boolean = false): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
-
-  let hardDel = client
+  const { error } = await applyTenantEq(client
     .from('collection_items')
     .delete()
     .eq('id', id)
-    .eq('is_published', isPublished);
-
-  hardDel = applyTenantEq(hardDel, tenantId);
-
-  const { error } = await hardDel;
+    .eq('is_published', isPublished), tenantId);
 
   if (error) {
     throw new Error(`Failed to hard delete collection item: ${error.message}`);
@@ -1513,6 +1168,7 @@ export async function hardDeleteItem(id: string, isPublished: boolean = false): 
  * @param isPublished - Whether to duplicate draft (false) or published (true) version. Defaults to false (draft).
  */
 export async function duplicateItem(itemId: string, isPublished: boolean = false): Promise<CollectionItemWithValues> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -1587,26 +1243,19 @@ export async function duplicateItem(itemId: string, isPublished: boolean = false
     newValues[slugField.id] = newSlug;
   }
 
-  const tenantId = await resolveEffectiveTenantId();
-
   // Create the new item with a new UUID
   const newId = randomUUID();
-  const dupInsert: Record<string, unknown> = {
-    id: newId,
-    collection_id: originalItem.collection_id,
-    manual_order: originalItem.manual_order,
-    is_published: isPublished,
-    is_publishable: originalItem.is_publishable,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
-  if (tenantId) {
-    dupInsert.tenant_id = tenantId;
-  }
-
   const { data: newItem, error: itemError } = await client
     .from('collection_items')
-    .insert(dupInsert)
+    .insert({ tenant_id: tenantId,
+      id: newId,
+      collection_id: originalItem.collection_id,
+      manual_order: originalItem.manual_order,
+      is_published: isPublished,
+      is_publishable: originalItem.is_publishable,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
     .select()
     .single();
 
@@ -1620,7 +1269,7 @@ export async function duplicateItem(itemId: string, isPublished: boolean = false
   // Create new values for the duplicated item
   const valuesToInsert = Object.entries(newValues)
     .filter(([fieldId]) => validFieldIds.has(fieldId)) // Only include fields that exist
-    .map(([fieldId, value]) => ({
+    .map(([fieldId, value]) => ({ tenant_id: tenantId,
       id: randomUUID(),
       item_id: newItem.id,
       field_id: fieldId,
@@ -1628,7 +1277,6 @@ export async function duplicateItem(itemId: string, isPublished: boolean = false
       is_published: isPublished,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
-      ...(tenantId ? { tenant_id: tenantId } : {}),
     }));
 
   if (valuesToInsert.length > 0) {
@@ -1661,6 +1309,7 @@ export async function searchItems(
   is_published: boolean = false,
   query: string
 ): Promise<{ items: CollectionItemWithValues[], total: number }> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -1677,18 +1326,12 @@ export async function searchItems(
   // Search in item values
   const searchTerm = `%${query.toLowerCase()}%`;
 
-  const tenantId = await resolveEffectiveTenantId();
-
-  let searchQ = client
+  const { data: matchingValues, error } = await applyTenantEq(client
     .from('collection_item_values')
     .select('item_id')
     .ilike('value', searchTerm)
     .eq('is_published', is_published)
-    .is('deleted_at', null);
-
-  searchQ = applyTenantEq(searchQ, tenantId);
-
-  const { data: matchingValues, error } = await searchQ;
+    .is('deleted_at', null), tenantId);
 
   if (error) {
     throw new Error(`Failed to search items: ${error.message}`);
@@ -1714,6 +1357,7 @@ export async function searchItems(
  * @param id - Item UUID
  */
 export async function publishItem(id: string): Promise<CollectionItem> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -1726,27 +1370,18 @@ export async function publishItem(id: string): Promise<CollectionItem> {
     throw new Error('Draft item not found');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
-  const draftTid =
-    tenantId ?? (draft as { tenant_id?: string | null }).tenant_id ?? undefined;
-
-  const pubUpsert: Record<string, unknown> = {
-    id: draft.id, // Same UUID
-    collection_id: draft.collection_id,
-    manual_order: draft.manual_order,
-    is_publishable: draft.is_publishable,
-    is_published: true,
-    created_at: draft.created_at,
-    updated_at: new Date().toISOString(),
-  };
-  if (draftTid) {
-    pubUpsert.tenant_id = draftTid;
-  }
-
   // Upsert published version (composite key handles insert/update automatically)
   const { data, error } = await client
     .from('collection_items')
-    .upsert(pubUpsert, {
+    .upsert({ tenant_id: tenantId,
+      id: draft.id, // Same UUID
+      collection_id: draft.collection_id,
+      manual_order: draft.manual_order,
+      is_publishable: draft.is_publishable,
+      is_published: true,
+      created_at: draft.created_at,
+      updated_at: new Date().toISOString(),
+    }, {
       onConflict: 'id,is_published', // Composite primary key
     }).select()
     .single();
@@ -1764,23 +1399,18 @@ export async function publishItem(id: string): Promise<CollectionItem> {
  * Checks both metadata (manual_order) and value changes.
  */
 export async function getTotalPublishableItemsCount(): Promise<number> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
-
-  let colListQ = client
+  const { data: collections, error: collectionsError } = await applyTenantEq(client
     .from('collections')
     .select('id')
     .eq('is_published', false)
-    .is('deleted_at', null);
-
-  colListQ = applyTenantEq(colListQ, tenantId);
-
-  const { data: collections, error: collectionsError } = await colListQ;
+    .is('deleted_at', null), tenantId);
 
   if (collectionsError) {
     throw new Error(`Failed to fetch collections: ${collectionsError.message}`);
@@ -1794,6 +1424,7 @@ export async function getTotalPublishableItemsCount(): Promise<number> {
 
   // Paginate both queries to avoid PostgREST's default 1000-row limit
   const fetchAllItems = async (isPublished: boolean): Promise<Array<{ id: string; manual_order: number }>> => {
+    const tenantId = await resolveEffectiveTenantId();
     const rows: Array<{ id: string; manual_order: number }> = [];
     let offset = 0;
 
@@ -1805,7 +1436,6 @@ export async function getTotalPublishableItemsCount(): Promise<number> {
         .eq('is_published', isPublished)
         .order('id', { ascending: true })
         .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
-
       query = applyTenantEq(query, tenantId);
 
       if (!isPublished) {
@@ -1924,32 +1554,23 @@ async function countItemsWithValueChanges(itemIds: string[]): Promise<number> {
  * Also sets is_publishable = false on the draft row.
  */
 export async function unpublishSingleItem(itemId: string): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
   if (!client) throw new Error('Supabase client not configured');
 
-  const tenantId = await resolveEffectiveTenantId();
-
   // Delete published row (CASCADE deletes published values)
-  let delPub = client
+  await applyTenantEq(client
     .from('collection_items')
     .delete()
     .eq('id', itemId)
-    .eq('is_published', true);
-
-  delPub = applyTenantEq(delPub, tenantId);
-
-  await delPub;
+    .eq('is_published', true), tenantId);
 
   // Set draft as not publishable
-  let updDraft = client
+  await applyTenantEq(client
     .from('collection_items')
     .update({ is_publishable: false, updated_at: new Date().toISOString() })
     .eq('id', itemId)
-    .eq('is_published', false);
-
-  updDraft = applyTenantEq(updDraft, tenantId);
-
-  await updDraft;
+    .eq('is_published', false), tenantId);
 }
 
 /**
@@ -1958,47 +1579,35 @@ export async function unpublishSingleItem(itemId: string): Promise<void> {
  * @returns true if a published version was removed (caller should clear cache)
  */
 export async function stageSingleItem(itemId: string): Promise<boolean> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
   if (!client) throw new Error('Supabase client not configured');
 
-  const tenantId = await resolveEffectiveTenantId();
-
   // Check if a published version exists
-  let pubSel = client
+  const { data: published } = await applyTenantEq(client
     .from('collection_items')
     .select('id')
     .eq('id', itemId)
-    .eq('is_published', true);
-
-  pubSel = applyTenantEq(pubSel, tenantId);
-
-  const { data: published } = await pubSel.maybeSingle();
+    .eq('is_published', true)
+    .maybeSingle(), tenantId);
 
   const hadPublished = !!published;
 
   // Remove published version if it exists (CASCADE deletes published values)
   if (hadPublished) {
-    let delPub = client
+    await applyTenantEq(client
       .from('collection_items')
       .delete()
       .eq('id', itemId)
-      .eq('is_published', true);
-
-    delPub = applyTenantEq(delPub, tenantId);
-
-    await delPub;
+      .eq('is_published', true), tenantId);
   }
 
   // Set draft as publishable
-  let stageUpd = client
+  await applyTenantEq(client
     .from('collection_items')
     .update({ is_publishable: true, updated_at: new Date().toISOString() })
     .eq('id', itemId)
-    .eq('is_published', false);
-
-  stageUpd = applyTenantEq(stageUpd, tenantId);
-
-  await stageUpd;
+    .eq('is_published', false), tenantId);
 
   return hadPublished;
 }
@@ -2008,88 +1617,72 @@ export async function stageSingleItem(itemId: string): Promise<boolean> {
  * and copies draft values to published. Sets is_publishable = true.
  */
 export async function publishSingleItem(itemId: string): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
   if (!client) throw new Error('Supabase client not configured');
 
-  const draftItem = await getItemById(itemId, false);
-  if (!draftItem || draftItem.deleted_at) {
+  // Get draft item
+  const { data: draftItem, error: draftErr } = await applyTenantEq(client
+    .from('collection_items')
+    .select('*')
+    .eq('id', itemId)
+    .eq('is_published', false)
+    .is('deleted_at', null)
+    .single(), tenantId);
+
+  if (draftErr || !draftItem) {
     throw new Error('Draft item not found');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
   const now = new Date().toISOString();
 
   // Ensure draft is marked publishable
   if (!draftItem.is_publishable) {
-    let pubDraft = client
+    await applyTenantEq(client
       .from('collection_items')
       .update({ is_publishable: true, updated_at: now })
       .eq('id', itemId)
-      .eq('is_published', false);
-
-    pubDraft = applyTenantEq(pubDraft, tenantId);
-
-    await pubDraft;
+      .eq('is_published', false), tenantId);
   }
 
-  // Ensure published fields exist (values FK requires them), including hidden tenancy keys.
-  const draftFields = await getFieldsByCollectionId(
-    draftItem.collection_id,
-    false,
-    { includeSystemFields: true },
-  );
+  // Ensure published fields exist (values FK requires them)
+  const draftFields = await getFieldsByCollectionId(draftItem.collection_id, false);
   if (draftFields.length > 0) {
-    const fieldsToUpsert = draftFields.map(f => {
-      const rowTid =
-        tenantId ?? (f as { tenant_id?: string | null }).tenant_id ?? undefined;
-      const row: Record<string, unknown> = {
-        id: f.id,
-        name: f.name,
-        key: f.key,
-        type: f.type,
-        default: f.default,
-        fillable: f.fillable,
-        order: f.order,
-        collection_id: f.collection_id,
-        reference_collection_id: f.reference_collection_id,
-        hidden: f.hidden,
-        is_computed: f.is_computed,
-        data: f.data,
-        is_published: true,
-        created_at: f.created_at,
-        updated_at: now,
-      };
-      if (rowTid) {
-        row.tenant_id = rowTid;
-      }
-      return row;
-    });
+    const fieldsToUpsert = draftFields.map(f => ({ tenant_id: tenantId,
+      id: f.id,
+      name: f.name,
+      key: f.key,
+      type: f.type,
+      default: f.default,
+      fillable: f.fillable,
+      order: f.order,
+      collection_id: f.collection_id,
+      reference_collection_id: f.reference_collection_id,
+      hidden: f.hidden,
+      is_computed: f.is_computed,
+      data: f.data,
+      is_published: true,
+      created_at: f.created_at,
+      updated_at: now,
+    }));
     await client
       .from('collection_fields')
       .upsert(fieldsToUpsert, { onConflict: 'id,is_published' });
   }
 
-  const itemTid =
-    tenantId ?? (draftItem as { tenant_id?: string | null }).tenant_id ?? undefined;
-
-  const itemUpsert: Record<string, unknown> = {
-    id: draftItem.id,
-    collection_id: draftItem.collection_id,
-    manual_order: draftItem.manual_order,
-    is_publishable: true,
-    is_published: true,
-    content_hash: draftItem.content_hash,
-    created_at: draftItem.created_at,
-    updated_at: now,
-  };
-  if (itemTid) {
-    itemUpsert.tenant_id = itemTid;
-  }
-
   // Upsert published item row
   await client
     .from('collection_items')
-    .upsert(itemUpsert, { onConflict: 'id,is_published' });
+    .upsert({ tenant_id: tenantId,
+      id: draftItem.id,
+      collection_id: draftItem.collection_id,
+      manual_order: draftItem.manual_order,
+      is_publishable: true,
+      is_published: true,
+      content_hash: draftItem.content_hash,
+      created_at: draftItem.created_at,
+      updated_at: now,
+    }, { onConflict: 'id,is_published' });
 
   // Copy draft values to published via existing publishValues utility
   const { publishValues } = await import('@/lib/repositories/collectionItemValueRepository');

@@ -762,13 +762,14 @@ async function findComponentsEmbeddingCollections(
   client: NonNullable<Awaited<ReturnType<typeof getSupabaseAdmin>>>,
   collectionIds: string[],
 ): Promise<string[]> {
+  const tenantId = await resolveEffectiveTenantId();
   if (collectionIds.length === 0) return [];
 
-  const { data: allComponents } = await client
+  const { data: allComponents } = await applyTenantEq(client
     .from('components')
     .select('id, layers')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (!allComponents || allComponents.length === 0) return [];
 
@@ -929,6 +930,7 @@ export async function findAffectedPages(
 export async function findCollectionsEmbeddingComponents(
   componentIds: string[],
 ): Promise<string[]> {
+  const tenantId = await resolveEffectiveTenantId();
   if (componentIds.length === 0) return [];
 
   const client = await getSupabaseAdmin();
@@ -940,12 +942,12 @@ export async function findCollectionsEmbeddingComponents(
   // published field id matches `collection_item_values.field_id` on published
   // values, and the field carries its own `collection_id` — no item lookup
   // needed to map a match back to a collection.
-  const { data: richTextFields } = await client
+  const { data: richTextFields } = await applyTenantEq(client
     .from('collection_fields')
     .select('id, collection_id')
     .eq('type', 'rich_text')
     .eq('is_published', true)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (!richTextFields || richTextFields.length === 0) return [];
 
@@ -964,12 +966,12 @@ export async function findCollectionsEmbeddingComponents(
   // Scan published rich-text values only. The cheap `richTextComponent` marker
   // check skips values that hold no embedded component before the id match.
   for (const idChunk of chunk(fieldIds, 500)) {
-    const { data: values } = await client
+    const { data: values } = await applyTenantEq(client
       .from('collection_item_values')
       .select('field_id, value')
       .eq('is_published', true)
       .is('deleted_at', null)
-      .in('field_id', idChunk);
+      .in('field_id', idChunk), tenantId);
 
     for (const row of values ?? []) {
       if (!row.value) continue;
@@ -1027,19 +1029,20 @@ export async function getEmbeddedComponentIdsForCollections(
   collectionIds: string[],
   isPublished: boolean = false,
 ): Promise<Map<string, Set<string>>> {
+  const tenantId = await resolveEffectiveTenantId();
   const result = new Map<string, Set<string>>();
   if (collectionIds.length === 0) return result;
 
   const client = await getSupabaseAdmin();
   if (!client) return result;
 
-  const { data: richTextFields } = await client
+  const { data: richTextFields } = await applyTenantEq(client
     .from('collection_fields')
     .select('id, collection_id')
     .eq('type', 'rich_text')
     .eq('is_published', isPublished)
     .is('deleted_at', null)
-    .in('collection_id', collectionIds);
+    .in('collection_id', collectionIds), tenantId);
 
   if (!richTextFields || richTextFields.length === 0) return result;
 
@@ -1052,12 +1055,12 @@ export async function getEmbeddedComponentIdsForCollections(
   const { chunk } = await import('@/lib/utils');
 
   for (const idChunk of chunk(fieldIds, 500)) {
-    const { data: values } = await client
+    const { data: values } = await applyTenantEq(client
       .from('collection_item_values')
       .select('field_id, value')
       .eq('is_published', isPublished)
       .is('deleted_at', null)
-      .in('field_id', idChunk);
+      .in('field_id', idChunk), tenantId);
 
     for (const row of values ?? []) {
       if (!row.value) continue;

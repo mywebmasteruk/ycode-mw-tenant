@@ -913,23 +913,6 @@ export async function duplicatePage(pageId: string): Promise<Page> {
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '');
 
-<<<<<<< HEAD
-  query = applyTenantEq(query, tenantId);
-
-  // Handle null parent folder properly
-  if (originalPage.page_folder_id === null) {
-    query = query.is('page_folder_id', null);
-  } else {
-    query = query.eq('page_folder_id', originalPage.page_folder_id);
-  }
-||||||| 1e44661
-  // Handle null parent folder properly
-  if (originalPage.page_folder_id === null) {
-    query = query.is('page_folder_id', null);
-  } else {
-    query = query.eq('page_folder_id', originalPage.page_folder_id);
-  }
-=======
     // Get all existing slugs in the same folder to find a unique one
     let query = client
       .from('pages')
@@ -937,7 +920,7 @@ export async function duplicatePage(pageId: string): Promise<Page> {
       .eq('is_published', false)
       .is('error_page', null)
       .is('deleted_at', null);
->>>>>>> upstream/main
+    query = applyTenantEq(query, tenantId);
 
     // Handle null parent folder properly
     if (originalPage.page_folder_id === null) {
@@ -1042,6 +1025,7 @@ export async function backfillMissingPageHashes(): Promise<{
   pagesUpdated: number;
   layersUpdated: number;
 }> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
   if (!client) return { pagesUpdated: 0, layersUpdated: 0 };
 
@@ -1055,7 +1039,7 @@ export async function backfillMissingPageHashes(): Promise<{
     .is('deleted_at', null);
 
   if (pagesToBackfill && pagesToBackfill.length > 0) {
-    const upsertRows = pagesToBackfill.map((page) => ({
+    const upsertRows = pagesToBackfill.map((page) => ({ tenant_id: tenantId,
       ...page,
       content_hash: generatePageMetadataHash({
         name: page.name,

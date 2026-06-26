@@ -14,15 +14,9 @@
 import { withTransaction } from '../database/transaction';
 import { getSupabaseAdmin, getTenantIdFromHeaders } from '@/lib/supabase-server';
 import { getKnexClient } from '@/lib/knex-client';
-<<<<<<< HEAD
-import { SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
+import { SUPABASE_IN_FILTER_CHUNK_SIZE, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
-||||||| 1e44661
-import { SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
-=======
-import { SUPABASE_IN_FILTER_CHUNK_SIZE, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
->>>>>>> upstream/main
 import { getCollectionById, hardDeleteCollection } from '@/lib/repositories/collectionRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
 import { getItemsByCollectionId, getAllItemsByCollectionId, getItemsByIds } from '@/lib/repositories/collectionItemRepository';
@@ -524,59 +518,43 @@ async function publishSelectedItems(
   const publishableItems = draftItems.filter(item => item.is_publishable);
   const nonPublishableItems = draftItems.filter(item => !item.is_publishable);
 
-<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
 
-  // Remove published versions of non-publishable items
-||||||| 1e44661
-  // Remove published versions of non-publishable items
-=======
   // Remove published versions of non-publishable items. Snapshot their published
   // slugs first so the publish route can invalidate the now-dead URLs — without
   // this the CDN keeps serving the unpublished page as a 200 (cache never
   // expires under revalidate: false).
   const unpublishedItemSlugs: string[] = [];
->>>>>>> upstream/main
   if (nonPublishableItems.length > 0) {
     const nonPublishableIds = nonPublishableItems.map(item => item.id);
-<<<<<<< HEAD
-    let delQuery = client
-      .from('collection_items')
-      .delete()
-      .in('id', nonPublishableIds)
-      .eq('is_published', true);
-    delQuery = applyTenantEq(delQuery, tenantId);
-    await delQuery;
-||||||| 1e44661
-    await client
-      .from('collection_items')
-      .delete()
-      .in('id', nonPublishableIds)
-      .eq('is_published', true);
-=======
 
     try {
       const slugField = prefetched
         ? prefetched.draftFields.find(f => f.key === 'slug') ?? null
-        : (await client
-          .from('collection_fields')
-          .select('id')
-          .eq('collection_id', collectionId)
-          .eq('key', 'slug')
-          .is('deleted_at', null)
-          .limit(1)
-          .single()).data;
+        : (await applyTenantEq(
+          client
+            .from('collection_fields')
+            .select('id')
+            .eq('collection_id', collectionId)
+            .eq('key', 'slug')
+            .is('deleted_at', null)
+            .limit(1),
+          tenantId,
+        ).single()).data;
 
       if (slugField) {
         for (let i = 0; i < nonPublishableIds.length; i += 500) {
           const batch = nonPublishableIds.slice(i, i + 500);
-          const { data } = await client
-            .from('collection_item_values')
-            .select('value')
-            .eq('field_id', slugField.id)
-            .eq('is_published', true)
-            .is('deleted_at', null)
-            .in('item_id', batch);
+          const { data } = await applyTenantEq(
+            client
+              .from('collection_item_values')
+              .select('value')
+              .eq('field_id', slugField.id)
+              .eq('is_published', true)
+              .is('deleted_at', null)
+              .in('item_id', batch),
+            tenantId,
+          );
           if (data) unpublishedItemSlugs.push(...data.map(v => v.value as string).filter(Boolean));
         }
       }
@@ -586,13 +564,15 @@ async function publishSelectedItems(
 
     for (let i = 0; i < nonPublishableIds.length; i += SUPABASE_IN_FILTER_CHUNK_SIZE) {
       const idsChunk = nonPublishableIds.slice(i, i + SUPABASE_IN_FILTER_CHUNK_SIZE);
-      await client
-        .from('collection_items')
-        .delete()
-        .in('id', idsChunk)
-        .eq('is_published', true);
+      await applyTenantEq(
+        client
+          .from('collection_items')
+          .delete()
+          .in('id', idsChunk)
+          .eq('is_published', true),
+        tenantId,
+      );
     }
->>>>>>> upstream/main
   }
 
   if (publishableItems.length === 0) {
@@ -1288,33 +1268,21 @@ export async function groupItemsByCollection(
     return new Map();
   }
 
-<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
-  let groupQuery = client
-    .from('collection_items')
-    .select('id, collection_id')
-    .eq('is_published', false)
-    .in('id', itemIds);
-  groupQuery = applyTenantEq(groupQuery, tenantId);
-  const { data: items, error } = await groupQuery;
-||||||| 1e44661
-  const { data: items, error } = await client
-    .from('collection_items')
-    .select('id, collection_id')
-    .eq('is_published', false)
-    .in('id', itemIds);
-=======
+
   // Chunk the id list so large `.in()` filters don't overflow the request URL
   // length limit (which returns 400 Bad Request).
   const items: Array<{ id: string; collection_id: string }> = [];
   for (let i = 0; i < itemIds.length; i += SUPABASE_IN_FILTER_CHUNK_SIZE) {
     const idsChunk = itemIds.slice(i, i + SUPABASE_IN_FILTER_CHUNK_SIZE);
-    const { data, error } = await client
-      .from('collection_items')
-      .select('id, collection_id')
-      .eq('is_published', false)
-      .in('id', idsChunk);
->>>>>>> upstream/main
+    const { data, error } = await applyTenantEq(
+      client
+        .from('collection_items')
+        .select('id, collection_id')
+        .eq('is_published', false)
+        .in('id', idsChunk),
+      tenantId,
+    );
 
     if (error) {
       throw new Error(`Failed to fetch collection items: ${error.message}`);
