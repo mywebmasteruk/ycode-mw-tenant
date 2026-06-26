@@ -111,6 +111,30 @@ function existingTenantVar(body: ts.Block): string | null {
   return found;
 }
 
+/** True if `name` is already a parameter or declared variable of this function —
+ *  so the codemod must not insert a colliding `const <name>`. */
+function nameTakenInFunction(body: ts.Block, name: string): boolean {
+  const fn = body.parent;
+  if (
+    fn &&
+    (ts.isFunctionDeclaration(fn) ||
+      ts.isFunctionExpression(fn) ||
+      ts.isArrowFunction(fn) ||
+      ts.isMethodDeclaration(fn))
+  ) {
+    for (const p of fn.parameters) {
+      if (ts.isIdentifier(p.name) && p.name.text === name) return true;
+    }
+  }
+  let taken = false;
+  const visit = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === name) taken = true;
+    if (!taken) ts.forEachChild(n, visit);
+  };
+  visit(body);
+  return taken;
+}
+
 /** The `<x> = client.from(...)…` / `let <x> = …` variable this chain is assigned to. */
 function assignedVar(top: ts.Node): { name: string; isConst: boolean; decl: ts.VariableDeclaration | null } | null {
   const p = top.parent;
@@ -220,17 +244,24 @@ export function reapplyTenantScoping(source: string, filePath = 'repo.ts'): Code
     if (existing) return existing;
     const cached = tenantVarByBody.get(body);
     if (cached) return cached;
+    // Avoid colliding with an existing `tenantId` parameter/variable (e.g. repo
+    // functions declared `(…, tenantId?: string)`) — pick a free name.
+    const name = !nameTakenInFunction(body, 'tenantId')
+      ? 'tenantId'
+      : !nameTakenInFunction(body, 'effectiveTenantId')
+        ? 'effectiveTenantId'
+        : '__effectiveTenantId';
     // Insert at the start of the function body.
     const insertPos = body.getStart(sf) + 1; // after `{`
     const indent = lineIndent(source, body.statements[0]?.getStart(sf) ?? insertPos);
     edits.push({
       start: insertPos,
       end: insertPos,
-      text: `\n${indent}const tenantId = await resolveEffectiveTenantId();`,
+      text: `\n${indent}const ${name} = await resolveEffectiveTenantId();`,
     });
     needTenantIdImport = true;
-    tenantVarByBody.set(body, 'tenantId');
-    return 'tenantId';
+    tenantVarByBody.set(body, name);
+    return name;
   };
 
   const visit = (node: ts.Node): void => {
@@ -353,7 +384,16 @@ export function reapplyTenantScoping(source: string, filePath = 'repo.ts'): Code
     importEdits.push({ start: pos, end: pos, text: `\n${importsToAdd.join('\n')}` });
   }
 
-  const all = [...edits, ...importEdits].sort((a, b) => b.start - a.start);
+  // Dedupe identical inserts at the same position (e.g. the same write payload
+  // reached via two paths) so a property like `tenant_id` is never added twice.
+  const seenEdits = new Set<string>();
+  const deduped = [...edits, ...importEdits].filter((e) => {
+    const key = `${e.start}:${e.end}:${e.text}`;
+    if (seenEdits.has(key)) return false;
+    seenEdits.add(key);
+    return true;
+  });
+  const all = deduped.sort((a, b) => b.start - a.start);
   let out = source;
   for (const e of all) {
     out = out.slice(0, e.start) + e.text + out.slice(e.end);
