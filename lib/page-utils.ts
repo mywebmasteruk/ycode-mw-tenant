@@ -312,6 +312,64 @@ export function buildLocalizedDynamicPageUrl(
 }
 
 /**
+ * Slug context for a dynamic (CMS-driven) page, used to resolve the translated
+ * item slug per locale.
+ */
+export interface LocalizedDynamicSlug {
+  /** Collection item ID (translation `source_id`). */
+  itemId: string;
+  /** Translation `content_key` for the slug field (e.g. `field:key:slug`). */
+  contentKey: string;
+  /** Default-locale slug value, used as the fallback. */
+  defaultValue: string;
+}
+
+/**
+ * Build relative localized URLs for a page across every locale, keyed by locale ID.
+ * Reuses translated folder/page slugs and, for dynamic pages, the translated CMS
+ * item slug. Powers the locale selector so switching language preserves the
+ * correct translated path.
+ *
+ * @param translationsByLocale - Per-locale translation maps keyed by translatable key
+ * @param dynamicSlug - Slug context for dynamic pages (omit for static pages)
+ *
+ * @example
+ * buildLocalizedPageUrls(page, folders, locales, translationsByLocale, dynamicSlug)
+ * // { 'locale-en': '/solutions/structured-websites', 'locale-fr': '/fr/solutions/sites-structures' }
+ */
+export function buildLocalizedPageUrls(
+  page: Page,
+  allFolders: PageFolder[],
+  locales: Locale[],
+  translationsByLocale: Record<string, Record<string, Translation> | undefined>,
+  dynamicSlug?: LocalizedDynamicSlug | null
+): Record<string, string> {
+  const urls: Record<string, string> = {};
+
+  for (const locale of locales) {
+    const isDefaultLocale = locale.is_default;
+    const localeArg = isDefaultLocale ? null : locale;
+    const translations = isDefaultLocale ? undefined : translationsByLocale[locale.id];
+
+    if (dynamicSlug) {
+      const translatedSlug = isDefaultLocale
+        ? dynamicSlug.defaultValue
+        : translations?.[getTranslatableKey({
+          source_type: 'cms',
+          source_id: dynamicSlug.itemId,
+          content_key: dynamicSlug.contentKey,
+        })]?.content_value || dynamicSlug.defaultValue;
+
+      urls[locale.id] = buildLocalizedDynamicPageUrl(page, allFolders, translatedSlug, localeArg, translations);
+    } else {
+      urls[locale.id] = buildLocalizedSlugPath(page, allFolders, 'page', localeArg, translations);
+    }
+  }
+
+  return urls;
+}
+
+/**
  * Detect locale code from URL path
  * Checks if the first segment of the path is a valid locale code from the provided list
  *

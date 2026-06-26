@@ -15,11 +15,17 @@ import {
   invalidatePages,
   getRoutePathsForDeletedCollectionItems,
 } from '@/lib/services/cacheService';
+<<<<<<< HEAD
 import {
   resolveEffectiveTenantId,
   runWithEffectiveTenantId,
 } from '@/lib/masjidweb/effective-tenant-id';
 import { findAffectedPages } from '@/lib/repositories/pageLayersRepository';
+||||||| 1e44661
+import { findAffectedPages } from '@/lib/repositories/pageLayersRepository';
+=======
+import { findAffectedPages, findCollectionsEmbeddingComponents, getEmbeddedComponentIdsForCollections } from '@/lib/repositories/pageLayersRepository';
+>>>>>>> upstream/main
 import { dispatchSitePublishedEvent } from '@/lib/services/webhookService';
 import { getAllDraftPages, hardDeleteSoftDeletedPages, backfillMissingPageHashes, getSoftDeletedPageIds } from '@/lib/repositories/pageRepository';
 import { publishComponents, getUnpublishedComponents, hardDeleteSoftDeletedComponents } from '@/lib/repositories/componentRepository';
@@ -31,6 +37,7 @@ import { publishAssets, getUnpublishedAssets, hardDeleteSoftDeletedAssets } from
 import { publishAssetFolders, getUnpublishedAssetFolders, hardDeleteSoftDeletedAssetFolders } from '@/lib/repositories/assetFolderRepository';
 import { publishFonts } from '@/lib/repositories/fontRepository';
 import { getColorVariablesHash } from '@/lib/repositories/colorVariableRepository';
+import { publishGlobalVariables, hardDeleteSoftDeletedGlobalVariables } from '@/lib/repositories/globalVariableRepository';
 import { getSettingByKey, setSetting } from '@/lib/repositories/settingsRepository';
 import type { Setting, PublishStats, PublishTableStats } from '@/types';
 
@@ -38,6 +45,11 @@ import type { Setting, PublishStats, PublishTableStats } from '@/types';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 /** Full publish (pages + CMS + CSS + cache) exceeds default Netlify/Next limits without this. */
+export const maxDuration = 300;
+
+// Publishing a large site (pages, collections, CSS regen, cache invalidation)
+// can exceed a platform's default serverless timeout. Raise to the max so big
+// sites don't time out mid-publish.
 export const maxDuration = 300;
 
 /** Group rows (fields, items, …) by their parent collection_id. */
@@ -78,6 +90,7 @@ interface PublishResult {
     assetsDeleted: number;
     locales: number;
     translations: number;
+    globalVariables: number;
     css: boolean;
   };
   published_at_setting: Setting;
@@ -107,6 +120,7 @@ function createEmptyStats(): PublishStats {
       assets: emptyTableStats(),
       locales: emptyTableStats(),
       translations: emptyTableStats(),
+      global_variables: emptyTableStats(),
       css: emptyTableStats(),
     },
   };
@@ -134,6 +148,116 @@ export async function POST(request: NextRequest) {
     const startTime = performance.now();
     const stats = createEmptyStats();
 
+<<<<<<< HEAD
+||||||| 1e44661
+    const {
+      publishAll = false,
+      folderIds,
+      pageIds,
+      collectionIds,
+      collectionItemIds,
+      componentIds,
+      layerStyleIds,
+      publishLocales = true,
+    } = body;
+
+    const publishedAt = new Date().toISOString();
+
+    const result: PublishResult = {
+      changes: {
+        folders: 0,
+        pages: 0,
+        collectionItems: 0,
+        components: 0,
+        layerStyles: 0,
+        assetFolders: 0,
+        assetFoldersDeleted: 0,
+        assets: 0,
+        assetsDeleted: 0,
+        locales: 0,
+        translations: 0,
+        css: false,
+      },
+      published_at_setting: {
+        key: 'published_at',
+        value: publishedAt,
+      } as Setting,
+      stats,
+    };
+
+    // Determine if we're publishing all or specific items
+    const isPublishingAll = publishAll && !folderIds && !pageIds && !collectionIds && !collectionItemIds && !componentIds && !layerStyleIds;
+
+    // Track which resources actually changed for selective invalidation
+    const publishedPageIds: string[] = [];
+    const publishedCollectionIds: string[] = [];
+    const changedComponentIds: string[] = [];
+    const changedLayerStyleIds: string[] = [];
+    const deletedCollectionItemSlugs: Map<string, string[]> = new Map();
+    const renamedPageOldRoutes: string[] = [];
+    const unpublishedPageRoutes: string[] = [];
+    let localisationResult: PublishLocalisationResult | null = null;
+
+    // Backfill any missing content_hash values before publish so change
+    // detection and the upsert-only-when-changed paths see consistent hashes
+    // on both draft and published rows (legacy migrations and templates
+    // insert rows without computing hashes).
+=======
+    const {
+      publishAll = false,
+      folderIds,
+      pageIds,
+      collectionIds,
+      collectionItemIds,
+      componentIds,
+      layerStyleIds,
+      publishLocales = true,
+    } = body;
+
+    const publishedAt = new Date().toISOString();
+
+    const result: PublishResult = {
+      changes: {
+        folders: 0,
+        pages: 0,
+        collectionItems: 0,
+        components: 0,
+        layerStyles: 0,
+        assetFolders: 0,
+        assetFoldersDeleted: 0,
+        assets: 0,
+        assetsDeleted: 0,
+        locales: 0,
+        translations: 0,
+        globalVariables: 0,
+        css: false,
+      },
+      published_at_setting: {
+        key: 'published_at',
+        value: publishedAt,
+      } as Setting,
+      stats,
+    };
+
+    // Determine if we're publishing all or specific items
+    const isPublishingAll = publishAll && !folderIds && !pageIds && !collectionIds && !collectionItemIds && !componentIds && !layerStyleIds;
+
+    // Track which resources actually changed for selective invalidation
+    const publishedPageIds: string[] = [];
+    const publishedCollectionIds: string[] = [];
+    const changedComponentIds: string[] = [];
+    const changedLayerStyleIds: string[] = [];
+    let globalsChanged = false;
+    const deletedCollectionItemSlugs: Map<string, string[]> = new Map();
+    const renamedPageOldRoutes: string[] = [];
+    const unpublishedPageRoutes: string[] = [];
+    let localisationResult: PublishLocalisationResult | null = null;
+
+    // Backfill any missing content_hash values before publish so change
+    // detection and the upsert-only-when-changed paths see consistent hashes
+    // on both draft and published rows (legacy migrations and templates
+    // insert rows without computing hashes).
+>>>>>>> upstream/main
     try {
       const body: PublishRequest = await request.json().catch(() => ({}));
 
@@ -359,6 +483,7 @@ export async function POST(request: NextRequest) {
             const staleSlugsCombined = [
               ...(p?.deletedItemSlugs || []),
               ...(p?.renamedItemOldSlugs || []),
+              ...(p?.unpublishedItemSlugs || []),
             ];
             if (staleSlugsCombined.length > 0) {
               const existing = deletedCollectionItemSlugs.get(collection.id) || [];
@@ -378,6 +503,7 @@ export async function POST(request: NextRequest) {
           result.changes.collectionItems = totalItems;
         }
 
+<<<<<<< HEAD
         stats.tables.collections.durationMs = collectionsMs;
         stats.tables.collections.added = totalCollections;
         stats.tables.collection_fields.durationMs = fieldsMs;
@@ -386,6 +512,138 @@ export async function POST(request: NextRequest) {
         stats.tables.collection_items.added = totalItems;
         stats.tables.collection_item_values.durationMs = valuesMs;
         stats.tables.collection_item_values.added = totalValues;
+||||||| 1e44661
+        // Bulk pre-fetch published collections, all draft/published fields, and all
+        // draft/published items in a handful of direct-DB reads, then group by
+        // collection. This replaces the per-collection metadata/field/item
+        // round-trips that dominated publish time.
+        const publishedCollections = await getCollectionsRaw(true);
+        const publishedCollectionById = new Map(publishedCollections.map(c => [c.id, c]));
+        const draftFieldsByCollection = groupByCollectionId(await getAllFields(false));
+        const publishedFieldsByCollection = groupByCollectionId(await getAllFields(true));
+        const draftItemsByCollection = groupByCollectionId(await getAllItemsRaw(false));
+        const publishedItemsByCollection = groupByCollectionId(await getAllItemsRaw(true));
+        // One global probe instead of two detection queries per collection: only
+        // the collections in this set have soft-deleted draft items/fields to clean.
+        const collectionsNeedingCleanup = await getCollectionsNeedingDeletionCleanup();
+
+        for (const collection of allCollections) {
+          const draftItems = draftItemsByCollection.get(collection.id) ?? [];
+          const publishResult = await publishCollectionWithItems({
+            collectionId: collection.id,
+            itemIds: draftItems.map(item => item.id),
+            skipItemValidation: true,
+            skipDeletionCleanup: !collectionsNeedingCleanup.has(collection.id),
+            prefetched: {
+              draftCollection: collection,
+              publishedCollection: publishedCollectionById.get(collection.id) ?? null,
+              draftFields: draftFieldsByCollection.get(collection.id) ?? [],
+              publishedFields: publishedFieldsByCollection.get(collection.id) ?? [],
+              draftItems,
+              publishedItems: publishedItemsByCollection.get(collection.id) ?? [],
+            },
+          });
+          if (!publishResult.success) {
+            console.error(`[Publish] collection ${collection.id} (${collection.name}) FAILED (${draftItems.length} items):`, publishResult.errors);
+          }
+          const p = publishResult.published;
+          const changedItems = p?.itemsCount || 0;
+          const changedValues = p?.valuesCount || 0;
+          const changedFields = p?.fieldsCount || 0;
+          const changedDeleted = p?.deletedItemsCount || 0;
+          const changedCollection = p?.collection ? 1 : 0;
+          const changed = changedItems + changedValues + changedFields + changedDeleted + changedCollection;
+          if (changed > 0) {
+            console.log(`[Publish] collection ${collection.id} changed: items=${changedItems} values=${changedValues} fields=${changedFields} deleted=${changedDeleted} meta=${changedCollection}`);
+            publishedCollectionIds.push(collection.id);
+          }
+          const staleSlugsCombined = [
+            ...(p?.deletedItemSlugs || []),
+            ...(p?.renamedItemOldSlugs || []),
+          ];
+          if (staleSlugsCombined.length > 0) {
+            const existing = deletedCollectionItemSlugs.get(collection.id) || [];
+            deletedCollectionItemSlugs.set(collection.id, [...existing, ...staleSlugsCombined]);
+          }
+          totalItems += changedItems;
+          totalValues += changedValues;
+          totalFields += changedFields;
+          if (p?.collection) totalCollections++;
+          if (publishResult.timing) {
+            collectionsMs += publishResult.timing.collections.durationMs;
+            fieldsMs += publishResult.timing.fields.durationMs;
+            itemsMs += publishResult.timing.items.durationMs;
+            valuesMs += publishResult.timing.values.durationMs;
+          }
+        }
+        result.changes.collectionItems = totalItems;
+=======
+        // Bulk pre-fetch published collections, all draft/published fields, and all
+        // draft/published items in a handful of direct-DB reads, then group by
+        // collection. This replaces the per-collection metadata/field/item
+        // round-trips that dominated publish time.
+        const publishedCollections = await getCollectionsRaw(true);
+        const publishedCollectionById = new Map(publishedCollections.map(c => [c.id, c]));
+        const draftFieldsByCollection = groupByCollectionId(await getAllFields(false));
+        const publishedFieldsByCollection = groupByCollectionId(await getAllFields(true));
+        const draftItemsByCollection = groupByCollectionId(await getAllItemsRaw(false));
+        const publishedItemsByCollection = groupByCollectionId(await getAllItemsRaw(true));
+        // One global probe instead of two detection queries per collection: only
+        // the collections in this set have soft-deleted draft items/fields to clean.
+        const collectionsNeedingCleanup = await getCollectionsNeedingDeletionCleanup();
+
+        for (const collection of allCollections) {
+          const draftItems = draftItemsByCollection.get(collection.id) ?? [];
+          const publishResult = await publishCollectionWithItems({
+            collectionId: collection.id,
+            itemIds: draftItems.map(item => item.id),
+            skipItemValidation: true,
+            skipDeletionCleanup: !collectionsNeedingCleanup.has(collection.id),
+            prefetched: {
+              draftCollection: collection,
+              publishedCollection: publishedCollectionById.get(collection.id) ?? null,
+              draftFields: draftFieldsByCollection.get(collection.id) ?? [],
+              publishedFields: publishedFieldsByCollection.get(collection.id) ?? [],
+              draftItems,
+              publishedItems: publishedItemsByCollection.get(collection.id) ?? [],
+            },
+          });
+          if (!publishResult.success) {
+            console.error(`[Publish] collection ${collection.id} (${collection.name}) FAILED (${draftItems.length} items):`, publishResult.errors);
+          }
+          const p = publishResult.published;
+          const changedItems = p?.itemsCount || 0;
+          const changedValues = p?.valuesCount || 0;
+          const changedFields = p?.fieldsCount || 0;
+          const changedDeleted = p?.deletedItemsCount || 0;
+          const changedCollection = p?.collection ? 1 : 0;
+          const changed = changedItems + changedValues + changedFields + changedDeleted + changedCollection;
+          if (changed > 0) {
+            console.log(`[Publish] collection ${collection.id} changed: items=${changedItems} values=${changedValues} fields=${changedFields} deleted=${changedDeleted} meta=${changedCollection}`);
+            publishedCollectionIds.push(collection.id);
+          }
+          const staleSlugsCombined = [
+            ...(p?.deletedItemSlugs || []),
+            ...(p?.renamedItemOldSlugs || []),
+            ...(p?.unpublishedItemSlugs || []),
+          ];
+          if (staleSlugsCombined.length > 0) {
+            const existing = deletedCollectionItemSlugs.get(collection.id) || [];
+            deletedCollectionItemSlugs.set(collection.id, [...existing, ...staleSlugsCombined]);
+          }
+          totalItems += changedItems;
+          totalValues += changedValues;
+          totalFields += changedFields;
+          if (p?.collection) totalCollections++;
+          if (publishResult.timing) {
+            collectionsMs += publishResult.timing.collections.durationMs;
+            fieldsMs += publishResult.timing.fields.durationMs;
+            itemsMs += publishResult.timing.items.durationMs;
+            valuesMs += publishResult.timing.values.durationMs;
+          }
+        }
+        result.changes.collectionItems = totalItems;
+>>>>>>> upstream/main
       }
 
       // Publish components
@@ -432,6 +690,7 @@ export async function POST(request: NextRequest) {
         stats.tables.layer_styles.durationMs = Math.round(performance.now() - stepStart);
       }
 
+<<<<<<< HEAD
       // Propagate updated style values into the denormalized layer.classes on
       // every draft page/component that references the changed styles. The
       // builder only syncs pages currently loaded in memory, so pages and
@@ -439,16 +698,604 @@ export async function POST(request: NextRequest) {
       // this step they publish with the OLD class names and render with the
       // old style even though the layer_styles row was just updated.
       if (changedLayerStyleIds.length > 0) {
+||||||| 1e44661
+      try {
+        await hardDeleteSoftDeletedPages();
+      } catch {
+        // Non-fatal
+      }
+
+      try {
+        await hardDeleteSoftDeletedComponents();
+      } catch {
+        // Non-fatal
+      }
+
+      try {
+        await hardDeleteSoftDeletedLayerStyles();
+      } catch {
+        // Non-fatal
+      }
+
+      try {
+        await cleanupDeletedCollections();
+      } catch {
+        // Non-fatal
+      }
+
+      // Asset folders
+      {
+        const stepStart = performance.now();
+=======
+      try {
+        await hardDeleteSoftDeletedPages();
+      } catch {
+        // Non-fatal
+      }
+
+      try {
+        await hardDeleteSoftDeletedComponents();
+      } catch {
+        // Non-fatal
+      }
+
+      try {
+        await hardDeleteSoftDeletedLayerStyles();
+      } catch {
+        // Non-fatal
+      }
+
+      try {
+        await cleanupDeletedCollections();
+      } catch {
+        // Non-fatal
+      }
+
+      try {
+        await hardDeleteSoftDeletedGlobalVariables();
+      } catch {
+        // Non-fatal
+      }
+
+      // Asset folders
+      {
+        const stepStart = performance.now();
+>>>>>>> upstream/main
         try {
           const { syncLayerStyleChangesToDrafts } = await import('@/lib/repositories/layerStyleRepository');
           const sync = await syncLayerStyleChangesToDrafts(changedLayerStyleIds);
 
+<<<<<<< HEAD
           if (sync.affectedComponentIds.length > 0) {
             // Re-publish components whose draft layers just got rewritten so
             // the published versions carry the fresh classes too.
             const repubResult = await publishComponents(sync.affectedComponentIds);
             for (const id of repubResult.changedComponentIds) {
               if (!changedComponentIds.includes(id)) changedComponentIds.push(id);
+||||||| 1e44661
+        try {
+          const unpublishedFolders = await getUnpublishedAssetFolders();
+          if (unpublishedFolders.length > 0) {
+            const allFolderIds = unpublishedFolders.map((f: any) => f.id);
+            const foldersResult = await publishAssetFolders(allFolderIds);
+            result.changes.assetFolders = foldersResult.count;
+            stats.tables.asset_folders.added = foldersResult.count;
+          }
+        } catch {
+          // Silently handle - non-fatal
+        }
+        stats.tables.asset_folders.durationMs = Math.round(performance.now() - stepStart);
+      }
+
+      // Assets
+      {
+        const stepStart = performance.now();
+        try {
+          const deleteResult = await hardDeleteSoftDeletedAssets();
+          result.changes.assetsDeleted = deleteResult.count;
+          stats.tables.assets.deleted = deleteResult.count;
+        } catch {
+          // Silently handle - non-fatal
+        }
+
+        try {
+          const unpublishedAssets = await getUnpublishedAssets();
+          if (unpublishedAssets.length > 0) {
+            const allAssetIds = unpublishedAssets.map((a: any) => a.id);
+            const assetsResult = await publishAssets(allAssetIds);
+            result.changes.assets = assetsResult.count;
+            stats.tables.assets.added = assetsResult.count;
+          }
+        } catch {
+          // Silently handle - non-fatal
+        }
+        stats.tables.assets.durationMs = Math.round(performance.now() - stepStart);
+      }
+
+      // Fonts
+      {
+        try {
+          await publishFonts();
+        } catch {
+          // Non-fatal — fonts are best-effort during publish
+        }
+      }
+
+      // Locales and translations
+      if (publishLocales) {
+        try {
+          localisationResult = await publishLocalisation();
+          result.changes.locales = localisationResult.locales;
+          result.changes.translations = localisationResult.translations;
+          stats.tables.locales.added = localisationResult.locales;
+          stats.tables.locales.durationMs = localisationResult.timing.localesDurationMs;
+          stats.tables.translations.added = localisationResult.translations;
+          stats.tables.translations.durationMs = localisationResult.timing.translationsDurationMs;
+        } catch {
+          // Silently handle - non-fatal
+        }
+      }
+    }
+
+    // Copy draft CSS to published CSS
+    {
+      const stepStart = performance.now();
+      try {
+        result.changes.css = await publishCSS();
+        stats.tables.css.added = result.changes.css ? 1 : 0;
+      } catch {
+        // Don't fail the entire publish if CSS fails
+      }
+      stats.tables.css.durationMs = Math.round(performance.now() - stepStart);
+    }
+
+    // Selective cache invalidation: only invalidate pages that actually changed.
+    //
+    // Global triggers (full invalidation):
+    // - Color variables: no draft/published model, so we snapshot-hash all
+    //   color variables and compare against the last published hash.
+    //   A change means every page's rendered CSS custom properties differ.
+    //
+    // Per-resource selective invalidation:
+    // - Pages: direct content_hash comparison (pages + page_layers tables)
+    // - Components: find pages referencing changed componentIds in JSONB
+    // - Layer styles: find pages referencing changed layerStyleIds in JSONB
+    // - Collections: find pages referencing changed collectionIds in JSONB
+    try {
+      // Detect color variable changes by comparing current hash to last-published hash
+      let globalChanged = false;
+      let globalChangedReason = '';
+      try {
+        const currentColorHash = await getColorVariablesHash();
+        const lastColorHash = await getSettingByKey('color_variables_published_hash');
+        if (currentColorHash !== lastColorHash) {
+          globalChanged = true;
+          globalChangedReason = `color hash mismatch: ${lastColorHash?.slice(0, 8) ?? 'null'} → ${currentColorHash.slice(0, 8)}`;
+          await setSetting('color_variables_published_hash', currentColorHash);
+        }
+      } catch (err) {
+        globalChanged = true;
+        globalChangedReason = `color hash check failed: ${err instanceof Error ? err.message : 'unknown'}`;
+      }
+
+      // Locales/translations live in a separate table — their changes don't
+      // affect page/component content_hash, so selective page invalidation
+      // misses them. We compute exact locale-prefixed URL invalidation
+      // below from `localisationResult.changedTranslations` /
+      // `changedLocales`, after the main selective invalidation runs.
+
+      // Find pages indirectly affected by changed components, styles, collections
+      // Single scan of draft page_layers instead of one scan per resource type
+      const activeCollectionIds = publishedCollectionIds;
+
+      let indirectlyAffectedPageIds: string[] = [];
+      let cssAffectedPageIds: string[] = [];
+      try {
+        const affected = await findAffectedPages(changedComponentIds, changedLayerStyleIds, activeCollectionIds);
+        indirectlyAffectedPageIds = [...new Set([
+          ...affected.componentPageIds,
+          ...affected.stylePageIds,
+          ...affected.collectionPageIds,
+        ])];
+        // Pages needing CSS catch-up (component/style refs only, not collections)
+        cssAffectedPageIds = [...new Set([
+          ...affected.componentPageIds,
+          ...affected.stylePageIds,
+        ])];
+
+        if (affected.componentPageIds.length > 0) {
+          console.log(`[Cache] component-affected pages: ${affected.componentPageIds.length} (from ${changedComponentIds.length} changed component(s))`);
+        }
+        if (affected.stylePageIds.length > 0) {
+          console.log(`[Cache] style-affected pages: ${affected.stylePageIds.length} (from ${changedLayerStyleIds.length} changed style(s))`);
+        }
+        if (affected.collectionPageIds.length > 0) {
+          console.log(`[Cache] collection-affected pages: ${affected.collectionPageIds.length}`);
+        }
+      } catch {
+        // Safety: if dependency scan fails, degrade to full invalidation
+        globalChanged = true;
+      }
+
+      // CSS catch-up: regenerate CSS for pages affected by changed
+      // components/styles. The builder only regenerates CSS for pages open
+      // in memory — pages not loaded keep stale generated_css/content_hash.
+      // This ensures batchPublishPageLayers detects the real hash change.
+      //
+      // Runs regardless of globalChanged: this is a data-publish step (it
+      // pushes style-sync-rewritten draft layers to the published version),
+      // not a cache operation. Skipping it when a global resource changed
+      // would leave those pages' published layers stale.
+      if (cssAffectedPageIds.length > 0) {
+        try {
+          const { generateCSSForPages } = await import('@/lib/server/cssGenerator');
+          await generateCSSForPages(cssAffectedPageIds);
+
+          // Re-publish layers for these pages so published version has fresh CSS.
+          // force=true: the draft layers' JSONB still references the changed
+          // component/style by ID, so content_hash is unchanged even though
+          // the resolved/rendered output differs. Without force, downstream
+          // consumers (static export, GitHub writer) see stale data.
+          const { batchPublishPageLayers } = await import('@/lib/repositories/pageLayersRepository');
+          const relayerResult = await batchPublishPageLayers(cssAffectedPageIds, { force: true });
+          if (relayerResult.changedPageIds.length > 0) {
+            publishedPageIds.push(...relayerResult.changedPageIds);
+            console.log(`[Cache] CSS catch-up: republished ${relayerResult.changedPageIds.length} page layer(s)`);
+          }
+        } catch {
+          // Non-fatal: CSS catch-up failure doesn't block publish
+        }
+      }
+
+      // publishedPageIds can contain the same page twice (once from the
+      // initial publishPages step, once from the CSS catch-up republish).
+      // Log the unique count so the number isn't misleading.
+      const uniqueDirectChangedCount = new Set(publishedPageIds).size;
+      console.log(`[Cache] directly changed pages: ${uniqueDirectChangedCount}, indirectly affected: ${indirectlyAffectedPageIds.length}, globalChanged: ${globalChanged}${globalChangedReason ? ` (${globalChangedReason})` : ''}`);
+
+      const invalidationResult = await selectiveInvalidation(
+        publishedPageIds,
+        globalChanged,
+        indirectlyAffectedPageIds,
+      );
+
+      // Capture the live routes we'll warm later. For selective invalidation
+      // we warm exactly the routes that were invalidated. For full
+      // invalidation we enumerate every published route — affects every
+      // page anyway, and visitors shouldn't pay the cold-cache cost just
+      // because a color variable changed. Capped inside warmRoutes.
+      // Deleted/renamed routes are skipped intentionally — their URLs no
+      // longer resolve.
+      let liveRoutesToWarm = invalidationResult.strategy === 'selective'
+        ? [...invalidationResult.invalidatedRoutes]
+        : await getAllPublishedRoutes();
+
+      // Locale & translation invalidation: compute exact locale-prefixed
+      // URLs affected by translation/locale changes and layer them onto the
+      // selective set. NEW routes (current live URLs) get warmed; OLD
+      // routes (orphaned slug/locale renames) are invalidated only.
+      // Skipped under full invalidation — already covered by clearAllCache.
+      if (localisationResult && invalidationResult.strategy === 'selective') {
+        try {
+          const localeInv = await invalidateForLocalisationChanges(localisationResult);
+          if (localeInv.needsFullInvalidation) {
+            await clearAllCache();
+            liveRoutesToWarm = await getAllPublishedRoutes();
+            console.log(
+              `[Cache] localisation: escalated to full invalidation${localeInv.reason ? ` (${localeInv.reason})` : ''}`,
+            );
+          } else {
+            if (localeInv.newRoutes.length > 0) {
+              liveRoutesToWarm.push(...localeInv.newRoutes);
+              invalidationResult.invalidatedRoutes.push(...localeInv.newRoutes);
+            }
+            if (localeInv.oldRoutes.length > 0) {
+              invalidationResult.invalidatedRoutes.push(...localeInv.oldRoutes);
+            }
+            if (localeInv.newRoutes.length > 0 || localeInv.oldRoutes.length > 0) {
+              console.log(
+                `[Cache] localisation: invalidated ${localeInv.newRoutes.length} live + ${localeInv.oldRoutes.length} orphaned locale route(s) ` +
+                `(${localisationResult.changedTranslations.length} translation change(s), ${localisationResult.changedLocales.length} locale change(s))`,
+              );
+=======
+        try {
+          const unpublishedFolders = await getUnpublishedAssetFolders();
+          if (unpublishedFolders.length > 0) {
+            const allFolderIds = unpublishedFolders.map((f: any) => f.id);
+            const foldersResult = await publishAssetFolders(allFolderIds);
+            result.changes.assetFolders = foldersResult.count;
+            stats.tables.asset_folders.added = foldersResult.count;
+          }
+        } catch {
+          // Silently handle - non-fatal
+        }
+        stats.tables.asset_folders.durationMs = Math.round(performance.now() - stepStart);
+      }
+
+      // Assets
+      {
+        const stepStart = performance.now();
+        try {
+          const deleteResult = await hardDeleteSoftDeletedAssets();
+          result.changes.assetsDeleted = deleteResult.count;
+          stats.tables.assets.deleted = deleteResult.count;
+        } catch {
+          // Silently handle - non-fatal
+        }
+
+        try {
+          const unpublishedAssets = await getUnpublishedAssets();
+          if (unpublishedAssets.length > 0) {
+            const allAssetIds = unpublishedAssets.map((a: any) => a.id);
+            const assetsResult = await publishAssets(allAssetIds);
+            result.changes.assets = assetsResult.count;
+            stats.tables.assets.added = assetsResult.count;
+          }
+        } catch {
+          // Silently handle - non-fatal
+        }
+        stats.tables.assets.durationMs = Math.round(performance.now() - stepStart);
+      }
+
+      // Fonts
+      {
+        try {
+          await publishFonts();
+        } catch {
+          // Non-fatal — fonts are best-effort during publish
+        }
+      }
+
+      // Global variables (site-wide singletons — any change can affect any
+      // page, so a non-zero change count forces full cache invalidation below).
+      {
+        const stepStart = performance.now();
+        try {
+          const globalsResult = await publishGlobalVariables();
+          result.changes.globalVariables = globalsResult.count;
+          stats.tables.global_variables.added = globalsResult.count;
+          if (globalsResult.count > 0) {
+            globalsChanged = true;
+          }
+        } catch {
+          // Non-fatal
+        }
+        stats.tables.global_variables.durationMs = Math.round(performance.now() - stepStart);
+      }
+
+      // Locales and translations
+      if (publishLocales) {
+        try {
+          localisationResult = await publishLocalisation();
+          result.changes.locales = localisationResult.locales;
+          result.changes.translations = localisationResult.translations;
+          stats.tables.locales.added = localisationResult.locales;
+          stats.tables.locales.durationMs = localisationResult.timing.localesDurationMs;
+          stats.tables.translations.added = localisationResult.translations;
+          stats.tables.translations.durationMs = localisationResult.timing.translationsDurationMs;
+        } catch {
+          // Silently handle - non-fatal
+        }
+      }
+    }
+
+    // Copy draft CSS to published CSS
+    {
+      const stepStart = performance.now();
+      try {
+        result.changes.css = await publishCSS();
+        stats.tables.css.added = result.changes.css ? 1 : 0;
+      } catch {
+        // Don't fail the entire publish if CSS fails
+      }
+      stats.tables.css.durationMs = Math.round(performance.now() - stepStart);
+    }
+
+    // Selective cache invalidation: only invalidate pages that actually changed.
+    //
+    // Global triggers (full invalidation):
+    // - Color variables: no draft/published model, so we snapshot-hash all
+    //   color variables and compare against the last published hash.
+    //   A change means every page's rendered CSS custom properties differ.
+    //
+    // Per-resource selective invalidation:
+    // - Pages: direct content_hash comparison (pages + page_layers tables)
+    // - Components: find pages referencing changed componentIds in JSONB
+    // - Layer styles: find pages referencing changed layerStyleIds in JSONB
+    // - Collections: find pages referencing changed collectionIds in JSONB
+    try {
+      // Detect color variable changes by comparing current hash to last-published hash
+      let globalChanged = false;
+      let globalChangedReason = '';
+      try {
+        const currentColorHash = await getColorVariablesHash();
+        const lastColorHash = await getSettingByKey('color_variables_published_hash');
+        if (currentColorHash !== lastColorHash) {
+          globalChanged = true;
+          globalChangedReason = `color hash mismatch: ${lastColorHash?.slice(0, 8) ?? 'null'} → ${currentColorHash.slice(0, 8)}`;
+          await setSetting('color_variables_published_hash', currentColorHash);
+        }
+      } catch (err) {
+        globalChanged = true;
+        globalChangedReason = `color hash check failed: ${err instanceof Error ? err.message : 'unknown'}`;
+      }
+
+      // Global variables can be injected into any page, so any published
+      // change requires invalidating every cached route.
+      if (globalsChanged) {
+        globalChanged = true;
+        globalChangedReason = globalChangedReason
+          ? `${globalChangedReason}; global variables changed`
+          : 'global variables changed';
+      }
+
+      // Locales/translations live in a separate table — their changes don't
+      // affect page/component content_hash, so selective page invalidation
+      // misses them. We compute exact locale-prefixed URL invalidation
+      // below from `localisationResult.changedTranslations` /
+      // `changedLocales`, after the main selective invalidation runs.
+
+      // Find pages indirectly affected by changed components, styles, collections
+      // Single scan of draft page_layers instead of one scan per resource type
+      //
+      // Components embedded inside a CMS Rich Text *field* live in
+      // collection_item_values, not page_layers, so the page_layers scan can't
+      // see them. Map changed components → collections whose published rich-text
+      // values embed them, and fold those collections into the collection scan
+      // so the CMS pages rendering those items get invalidated.
+      let componentEmbeddingCollectionIds: string[] = [];
+      if (changedComponentIds.length > 0) {
+        try {
+          componentEmbeddingCollectionIds = await findCollectionsEmbeddingComponents(changedComponentIds);
+          if (componentEmbeddingCollectionIds.length > 0) {
+            console.log(`[Cache] components embedded in ${componentEmbeddingCollectionIds.length} collection(s) via CMS rich-text fields`);
+          }
+        } catch (err) {
+          // Non-fatal: degrade to full invalidation so stale CMS pages still refresh
+          console.warn('[Cache] CMS rich-text component scan failed, escalating:', err instanceof Error ? err.message : err);
+          globalChanged = true;
+        }
+      }
+      const activeCollectionIds = [...new Set([...publishedCollectionIds, ...componentEmbeddingCollectionIds])];
+
+      let indirectlyAffectedPageIds: string[] = [];
+      let cssAffectedPageIds: string[] = [];
+      try {
+        const affected = await findAffectedPages(changedComponentIds, changedLayerStyleIds, activeCollectionIds);
+        indirectlyAffectedPageIds = [...new Set([
+          ...affected.componentPageIds,
+          ...affected.stylePageIds,
+          ...affected.collectionPageIds,
+        ])];
+        // Pages needing CSS catch-up (component/style refs only, not collections)
+        cssAffectedPageIds = [...new Set([
+          ...affected.componentPageIds,
+          ...affected.stylePageIds,
+        ])];
+
+        if (affected.componentPageIds.length > 0) {
+          console.log(`[Cache] component-affected pages: ${affected.componentPageIds.length} (from ${changedComponentIds.length} changed component(s))`);
+        }
+        if (affected.stylePageIds.length > 0) {
+          console.log(`[Cache] style-affected pages: ${affected.stylePageIds.length} (from ${changedLayerStyleIds.length} changed style(s))`);
+        }
+        if (affected.collectionPageIds.length > 0) {
+          console.log(`[Cache] collection-affected pages: ${affected.collectionPageIds.length}`);
+        }
+      } catch {
+        // Safety: if dependency scan fails, degrade to full invalidation
+        globalChanged = true;
+      }
+
+      // Dynamic CMS pages render components embedded in rich-text field VALUES
+      // (stored in collection_item_values, NOT page_layers). Those pages never
+      // land in cssAffectedPageIds via the page_layers scan above, so their
+      // per-page CSS would stay stale on a component or CMS-value change. Find
+      // the collections that actually embed components — whether the changed
+      // component is embedded, or a published collection's values embed any
+      // component — and fold their dynamic pages into the CSS regen set so
+      // generateCSSForPages recompiles them (it seeds the embedded components).
+      try {
+        const cssCandidateCollectionIds = [...new Set([...publishedCollectionIds, ...componentEmbeddingCollectionIds])];
+        if (cssCandidateCollectionIds.length > 0) {
+          const embeddedByCollection = await getEmbeddedComponentIdsForCollections(cssCandidateCollectionIds);
+          const collectionsWithEmbeds = Array.from(embeddedByCollection.keys());
+          if (collectionsWithEmbeds.length > 0) {
+            const cmsAffected = await findAffectedPages([], [], collectionsWithEmbeds);
+            if (cmsAffected.collectionPageIds.length > 0) {
+              cssAffectedPageIds = [...new Set([...cssAffectedPageIds, ...cmsAffected.collectionPageIds])];
+              console.log(`[Cache] CMS rich-text-embedded components: regenerating CSS for ${cmsAffected.collectionPageIds.length} dynamic page(s)`);
+            }
+          }
+        }
+      } catch (err) {
+        // Non-fatal: degrade to full invalidation so stale CMS pages still refresh
+        console.warn('[Cache] CMS-embedded-component CSS scan failed, escalating:', err instanceof Error ? err.message : err);
+        globalChanged = true;
+      }
+
+      // CSS catch-up: regenerate CSS for pages affected by changed
+      // components/styles. The builder only regenerates CSS for pages open
+      // in memory — pages not loaded keep stale generated_css/content_hash.
+      // This ensures batchPublishPageLayers detects the real hash change.
+      //
+      // Runs regardless of globalChanged: this is a data-publish step (it
+      // pushes style-sync-rewritten draft layers to the published version),
+      // not a cache operation. Skipping it when a global resource changed
+      // would leave those pages' published layers stale.
+      if (cssAffectedPageIds.length > 0) {
+        try {
+          const { generateCSSForPages } = await import('@/lib/server/cssGenerator');
+          await generateCSSForPages(cssAffectedPageIds);
+
+          // Re-publish layers for these pages so published version has fresh CSS.
+          // force=true: the draft layers' JSONB still references the changed
+          // component/style by ID, so content_hash is unchanged even though
+          // the resolved/rendered output differs. Without force, downstream
+          // consumers (static export, GitHub writer) see stale data.
+          const { batchPublishPageLayers } = await import('@/lib/repositories/pageLayersRepository');
+          const relayerResult = await batchPublishPageLayers(cssAffectedPageIds, { force: true });
+          if (relayerResult.changedPageIds.length > 0) {
+            publishedPageIds.push(...relayerResult.changedPageIds);
+            console.log(`[Cache] CSS catch-up: republished ${relayerResult.changedPageIds.length} page layer(s)`);
+          }
+        } catch {
+          // Non-fatal: CSS catch-up failure doesn't block publish
+        }
+      }
+
+      // publishedPageIds can contain the same page twice (once from the
+      // initial publishPages step, once from the CSS catch-up republish).
+      // Log the unique count so the number isn't misleading.
+      const uniqueDirectChangedCount = new Set(publishedPageIds).size;
+      console.log(`[Cache] directly changed pages: ${uniqueDirectChangedCount}, indirectly affected: ${indirectlyAffectedPageIds.length}, globalChanged: ${globalChanged}${globalChangedReason ? ` (${globalChangedReason})` : ''}`);
+
+      const invalidationResult = await selectiveInvalidation(
+        publishedPageIds,
+        globalChanged,
+        indirectlyAffectedPageIds,
+      );
+
+      // Capture the live routes we'll warm later. For selective invalidation
+      // we warm exactly the routes that were invalidated. For full
+      // invalidation we enumerate every published route — affects every
+      // page anyway, and visitors shouldn't pay the cold-cache cost just
+      // because a color variable changed. warmRoutes batches and self-chains
+      // through the whole list up to its overall cap.
+      // Deleted/renamed routes are skipped intentionally — their URLs no
+      // longer resolve.
+      let liveRoutesToWarm = invalidationResult.strategy === 'selective'
+        ? [...invalidationResult.invalidatedRoutes]
+        : await getAllPublishedRoutes();
+
+      // Locale & translation invalidation: compute exact locale-prefixed
+      // URLs affected by translation/locale changes and layer them onto the
+      // selective set. NEW routes (current live URLs) get warmed; OLD
+      // routes (orphaned slug/locale renames) are invalidated only.
+      // Skipped under full invalidation — already covered by clearAllCache.
+      if (localisationResult && invalidationResult.strategy === 'selective') {
+        try {
+          const localeInv = await invalidateForLocalisationChanges(localisationResult);
+          if (localeInv.needsFullInvalidation) {
+            await clearAllCache();
+            liveRoutesToWarm = await getAllPublishedRoutes();
+            console.log(
+              `[Cache] localisation: escalated to full invalidation${localeInv.reason ? ` (${localeInv.reason})` : ''}`,
+            );
+          } else {
+            if (localeInv.newRoutes.length > 0) {
+              liveRoutesToWarm.push(...localeInv.newRoutes);
+              invalidationResult.invalidatedRoutes.push(...localeInv.newRoutes);
+            }
+            if (localeInv.oldRoutes.length > 0) {
+              invalidationResult.invalidatedRoutes.push(...localeInv.oldRoutes);
+            }
+            if (localeInv.newRoutes.length > 0 || localeInv.oldRoutes.length > 0) {
+              console.log(
+                `[Cache] localisation: invalidated ${localeInv.newRoutes.length} live + ${localeInv.oldRoutes.length} orphaned locale route(s) ` +
+                `(${localisationResult.changedTranslations.length} translation change(s), ${localisationResult.changedLocales.length} locale change(s))`,
+              );
+>>>>>>> upstream/main
             }
             console.log(`[Publish] style sync: re-published ${repubResult.changedComponentIds.length} component(s)`);
           }
@@ -871,8 +1718,63 @@ export async function POST(request: NextRequest) {
     }
   };
 
+<<<<<<< HEAD
   if (headerTenantId) {
     return runWithEffectiveTenantId(headerTenantId, runPublish);
+||||||| 1e44661
+    // Calculate total duration
+    stats.totalDurationMs = Math.round(performance.now() - startTime);
+
+    const totalPublished =
+      result.changes.folders +
+      result.changes.pages +
+      result.changes.collectionItems +
+      result.changes.components +
+      result.changes.layerStyles +
+      result.changes.assetFolders +
+      result.changes.assets +
+      result.changes.locales +
+      result.changes.translations;
+
+    return noCache({
+      data: result,
+      message: `Published a total of ${totalPublished} item(s) successfully`,
+    });
+  } catch (error) {
+    stats.totalDurationMs = Math.round(performance.now() - startTime);
+
+    return noCache(
+      { error: error instanceof Error ? error.message : 'Failed to publish' },
+      500
+    );
+=======
+    // Calculate total duration
+    stats.totalDurationMs = Math.round(performance.now() - startTime);
+
+    const totalPublished =
+      result.changes.folders +
+      result.changes.pages +
+      result.changes.collectionItems +
+      result.changes.components +
+      result.changes.layerStyles +
+      result.changes.assetFolders +
+      result.changes.assets +
+      result.changes.locales +
+      result.changes.translations +
+      result.changes.globalVariables;
+
+    return noCache({
+      data: result,
+      message: `Published a total of ${totalPublished} item(s) successfully`,
+    });
+  } catch (error) {
+    stats.totalDurationMs = Math.round(performance.now() - startTime);
+
+    return noCache(
+      { error: error instanceof Error ? error.message : 'Failed to publish' },
+      500
+    );
+>>>>>>> upstream/main
   }
   return runPublish();
 }

@@ -8,11 +8,16 @@ import type { Knex } from 'knex';
  */
 
 export async function up(knex: Knex): Promise<void> {
-  // Drop existing table if it exists (to handle schema changes during development)
+  // SAFETY: this up() MUST be idempotent and non-destructive. Template apply
+  // (runPendingMigrationsForTemplate) re-runs migration up()s directly,
+  // bypassing knex's applied-migrations tracking, to bring old template data
+  // up to the current schema. An earlier version of this migration dropped and
+  // recreated the table here, which destroyed every production app_settings
+  // row (all integration configs) when a pre-Feb-2026 template was applied.
+  // If the table already exists, this migration has nothing to do.
   const hasTable = await knex.schema.hasTable('app_settings');
   if (hasTable) {
-    await knex.schema.raw('DROP POLICY IF EXISTS "Authenticated users can manage app_settings" ON app_settings');
-    await knex.schema.dropTable('app_settings');
+    return;
   }
 
   // Create app_settings table

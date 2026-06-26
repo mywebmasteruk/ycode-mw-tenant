@@ -57,9 +57,10 @@ export async function getAllTranslationRows<T = Translation>(
  */
 export async function getTranslationsByLocale(
   localeId: string,
-  isPublished: boolean = false
+  isPublished: boolean = false,
+  tenantId?: string
 ): Promise<Translation[]> {
-  const client = await getSupabaseAdmin();
+  const client = await getSupabaseAdmin(tenantId);
 
   if (!client) {
     throw new Error('Supabase not configured');
@@ -82,6 +83,170 @@ export async function getTranslationsByLocale(
       throw new Error(`Failed to fetch translations: ${error.message}`);
     }
 
+    if (!data || data.length === 0) break;
+    results.push(...(data as Translation[]));
+    if (data.length < PAGE_SIZE) break;
+  }
+
+  return results;
+}
+
+/**
+ * Content keys that influence URL generation (page/folder/CMS slugs). Kept in
+ * the per-locale "scaffold" so routing, hreflang and locale-switcher URLs work
+ * without loading the full (CMS-content-heavy) translation catalogue.
+ */
+const SLUG_CONTENT_KEYS = ['slug', 'field:key:slug'];
+
+/** Source types whose translations are small and always needed per render. */
+const NON_CMS_SOURCE_TYPES = ['page', 'folder', 'component'];
+
+/** Supabase caps `.in()` lists; chunk large id arrays to stay under it. */
+const IN_CHUNK_SIZE = 300;
+
+function chunkIds(ids: string[], size: number): string[][] {
+  const out: string[][] = [];
+  for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
+  return out;
+}
+
+/**
+ * Load the per-locale translation "scaffold": every non-CMS translation
+ * (page / folder / component) plus only the CMS *slug* rows.
+ *
+ * This is everything needed for routing, page/component rendering, SEO and
+ * URL generation — but excludes the bulk CMS *content* translations (text /
+ * rich text), which dominate large catalogues and are loaded on demand per
+ * rendered item via {@link getCmsTranslationsForItems}.
+ */
+export async function getLocaleScaffoldTranslations(
+  localeId: string,
+  isPublished: boolean,
+  tenantId?: string,
+): Promise<Translation[]> {
+  const client = await getSupabaseAdmin(tenantId);
+
+  if (!client) {
+    throw new Error('Supabase not configured');
+  }
+
+  const PAGE_SIZE = 1000;
+  const results: Translation[] = [];
+
+  const pageThrough = async (
+    build: (from: number, to: number) => PromiseLike<{ data: Translation[] | null; error: { message: string } | null }>,
+  ) => {
+    for (let from = 0; ; from += PAGE_SIZE) {
+      const { data, error } = await build(from, from + PAGE_SIZE - 1);
+      if (error) throw new Error(`Failed to fetch translations: ${error.message}`);
+      if (!data || data.length === 0) break;
+      results.push(...(data as Translation[]));
+      if (data.length < PAGE_SIZE) break;
+    }
+  };
+
+  // Non-CMS rows (page / folder / component).
+  await pageThrough((from, to) =>
+    client
+      .from('translations')
+      .select('*')
+      .eq('locale_id', localeId)
+      .eq('is_published', isPublished)
+      .is('deleted_at', null)
+      .in('source_type', NON_CMS_SOURCE_TYPES)
+      .order('created_at', { ascending: true })
+      .range(from, to) as unknown as PromiseLike<{ data: Translation[] | null; error: { message: string } | null }>,
+  );
+
+  // CMS slug rows (needed to match/build localized dynamic-page URLs).
+  await pageThrough((from, to) =>
+    client
+      .from('translations')
+      .select('*')
+      .eq('locale_id', localeId)
+      .eq('is_published', isPublished)
+      .is('deleted_at', null)
+      .eq('source_type', 'cms')
+      .in('content_key', SLUG_CONTENT_KEYS)
+      .order('created_at', { ascending: true })
+      .range(from, to) as unknown as PromiseLike<{ data: Translation[] | null; error: { message: string } | null }>,
+  );
+
+  return results;
+}
+
+/**
+ * Load CMS *content* translations for a specific set of collection items in a
+ * locale. Used to augment the scaffold on demand for exactly the items a given
+ * render path materialises, instead of loading the whole locale catalogue.
+ */
+export async function getCmsTranslationsForItems(
+  localeId: string,
+  isPublished: boolean,
+  itemIds: string[],
+  tenantId?: string,
+): Promise<Translation[]> {
+  if (itemIds.length === 0) return [];
+
+  const client = await getSupabaseAdmin(tenantId);
+  if (!client) {
+    throw new Error('Supabase not configured');
+  }
+
+  const results: Translation[] = [];
+
+  for (const chunk of chunkIds(itemIds, IN_CHUNK_SIZE)) {
+    const { data, error } = await client
+      .from('translations')
+      .select('*')
+      .eq('locale_id', localeId)
+      .eq('is_published', isPublished)
+      .is('deleted_at', null)
+      .eq('source_type', 'cms')
+      .in('source_id', chunk);
+
+    if (error) {
+      throw new Error(`Failed to fetch CMS translations: ${error.message}`);
+    }
+    if (data) results.push(...(data as Translation[]));
+  }
+
+  return results;
+}
+
+/**
+ * Load only slug translations (page / folder / CMS) for a locale. Used by URL
+ * builders (hreflang, sitemap, locale switcher) that never read CMS content —
+ * avoids pulling the full catalogue just to construct localized URLs.
+ */
+export async function getSlugTranslationsByLocale(
+  localeId: string,
+  isPublished: boolean,
+  tenantId?: string,
+): Promise<Translation[]> {
+  const client = await getSupabaseAdmin(tenantId);
+
+  if (!client) {
+    throw new Error('Supabase not configured');
+  }
+
+  const PAGE_SIZE = 1000;
+  const results: Translation[] = [];
+
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await client
+      .from('translations')
+      .select('*')
+      .eq('locale_id', localeId)
+      .eq('is_published', isPublished)
+      .is('deleted_at', null)
+      .in('content_key', SLUG_CONTENT_KEYS)
+      .order('created_at', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1);
+
+    if (error) {
+      throw new Error(`Failed to fetch slug translations: ${error.message}`);
+    }
     if (!data || data.length === 0) break;
     results.push(...(data as Translation[]));
     if (data.length < PAGE_SIZE) break;

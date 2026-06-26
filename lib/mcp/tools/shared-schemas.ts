@@ -102,6 +102,7 @@ export const designSchema = z.object({
     overflow: z.string().optional().describe('visible | hidden | scroll | auto'),
     aspectRatio: z.string().nullable().optional(),
     objectFit: z.string().nullable().optional(),
+    objectPosition: z.string().nullable().optional().describe('top | bottom | left | right | center | left-top | right-top | left-bottom | right-bottom'),
     gridColumnSpan: z.string().nullable().optional().describe('Grid column span, e.g. "2" or "span 3"'),
     gridRowSpan: z.string().nullable().optional().describe('Grid row span, e.g. "2" or "span 3"'),
   }).optional(),

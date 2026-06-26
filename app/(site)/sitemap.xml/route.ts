@@ -10,7 +10,7 @@ import { credentials } from '@/lib/credentials';
 import { getAllPages } from '@/lib/repositories/pageRepository';
 import { getAllPublishedPageFolders } from '@/lib/repositories/pageFolderRepository';
 import { getAllLocales } from '@/lib/repositories/localeRepository';
-import { getTranslationsByLocale } from '@/lib/repositories/translationRepository';
+import { getSlugTranslationsByLocale } from '@/lib/repositories/translationRepository';
 import { getSettingsByKeys } from '@/lib/repositories/settingsRepository';
 import { getItemsByCollectionId } from '@/lib/repositories/collectionItemRepository';
 import { getValuesByItemIds } from '@/lib/repositories/collectionItemValueRepository';
@@ -75,7 +75,7 @@ export async function GET() {
     if (locales.length > 1) {
       for (const locale of locales) {
         if (!locale.is_default) {
-          const translations = await getTranslationsByLocale(locale.id, true); // Get published translations
+          const translations = await getSlugTranslationsByLocale(locale.id, true); // Slug rows only — sitemap builds URLs
           const translationsMap: Record<string, Translation> = {};
           for (const t of translations) {
             // Create key: source_type:source_id:content_key

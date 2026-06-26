@@ -13,6 +13,7 @@ import Icon from '@/components/ui/icon';
 import { Input } from '@/components/ui/input';
 import { InputGroup, InputGroupAddon, InputGroupInput } from '@/components/ui/input-group';
 import { Label } from '@/components/ui/label';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import SettingsPanel from './SettingsPanel';
@@ -28,6 +29,27 @@ interface SizingControlsProps {
   layer: Layer | null;
   onLayerUpdate: (layerId: string, updates: Partial<Layer>) => void;
 }
+
+// Round only the outer corner of each grid corner cell so the 3x3 grid reads as one rounded block
+const OBJECT_POSITION_CORNERS: Record<string, string> = {
+  'left-top': 'rounded-tl-lg',
+  'right-top': 'rounded-tr-lg',
+  'left-bottom': 'rounded-bl-lg',
+  'right-bottom': 'rounded-br-lg',
+};
+
+// 3x3 focal point grid: cell position maps to the image alignment value
+const OBJECT_POSITIONS: { value: string; label: string; icon: React.ComponentProps<typeof Icon>['name'] }[] = [
+  { value: 'left-top', label: 'Top left', icon: 'arrow-left-up' },
+  { value: 'top', label: 'Top center', icon: 'arrow-up' },
+  { value: 'right-top', label: 'Top right', icon: 'arrow-right-up' },
+  { value: 'left', label: 'Center left', icon: 'arrow-left' },
+  { value: 'center', label: 'Center', icon: 'circle' },
+  { value: 'right', label: 'Center right', icon: 'arrow-right' },
+  { value: 'left-bottom', label: 'Bottom left', icon: 'arrow-left-down' },
+  { value: 'bottom', label: 'Bottom center', icon: 'arrow-down' },
+  { value: 'right-bottom', label: 'Bottom right', icon: 'arrow-right-down' },
+];
 
 const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: SizingControlsProps) {
   const activeBreakpoint = useEditorStore((s) => s.activeBreakpoint);
@@ -51,6 +73,7 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
   const overflow = getDesignProperty('sizing', 'overflow') || 'visible';
   const aspectRatio = getDesignProperty('sizing', 'aspectRatio') || '';
   const objectFit = getDesignProperty('sizing', 'objectFit') || '';
+  const objectPosition = getDesignProperty('sizing', 'objectPosition') || '';
   const gridColumnSpan = getDesignProperty('sizing', 'gridColumnSpan') || '';
   const gridRowSpan = getDesignProperty('sizing', 'gridRowSpan') || '';
 
@@ -292,6 +315,11 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
   // Handle object-fit change
   const handleObjectFitChange = (value: string) => {
     updateDesignProperty('sizing', 'objectFit', value || null);
+  };
+
+  // Handle object-position change (center is the browser default, so clear it)
+  const handleObjectPositionChange = (value: string) => {
+    updateDesignProperty('sizing', 'objectPosition', value === 'center' ? null : value);
   };
 
   // Handle grid column span change
@@ -625,11 +653,11 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
       </div>
 
       {(['image', 'video'].includes(layer?.name || '')) && (
-        <div className="grid grid-cols-3 items-start">
-          <Label variant="muted" className="h-8">Object fit</Label>
-          <div className="col-span-2 flex flex-col gap-2">
+        <div className="grid grid-cols-3 items-center">
+          <Label variant="muted">Object fit</Label>
+          <div className="col-span-2 flex items-center gap-1">
             <Select value={objectFit} onValueChange={handleObjectFitChange}>
-              <SelectTrigger>
+              <SelectTrigger className="flex-1">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -642,6 +670,39 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
                 </SelectGroup>
               </SelectContent>
             </Select>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="input"
+                  size="icon-sm"
+                  className="rounded-lg"
+                  aria-label="Object position"
+                  title="Object position"
+                >
+                  <Icon name={(OBJECT_POSITIONS.find((p) => p.value === (objectPosition || 'center'))?.icon) || 'circle'} />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent className="w-auto p-2 my-0.5" align="end">
+                <div className="grid grid-cols-3 gap-1">
+                  {OBJECT_POSITIONS.map((position) => {
+                    const isActive = (objectPosition || 'center') === position.value;
+                    return (
+                      <Button
+                        key={position.value}
+                        variant={isActive ? 'secondary' : 'outline'}
+                        size="icon-sm"
+                        className={`rounded-none ${OBJECT_POSITION_CORNERS[position.value] || ''}`}
+                        aria-label={position.label}
+                        title={position.label}
+                        onClick={() => handleObjectPositionChange(position.value)}
+                      >
+                        <Icon name={position.icon} className={isActive ? 'text-foreground' : 'opacity-40'} />
+                      </Button>
+                    );
+                  })}
+                </div>
+              </PopoverContent>
+            </Popover>
           </div>
         </div>
       )}

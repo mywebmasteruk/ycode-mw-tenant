@@ -4,7 +4,7 @@ import type { DesignProperties, Layer } from '@/types';
 import { getAllStyles, createStyle, updateStyle, deleteStyle } from '@/lib/repositories/layerStyleRepository';
 import { getCachedDraft, saveCachedLayers } from '@/lib/mcp/page-layers';
 import { findLayerById, updateLayerById, designToClassString } from '@/lib/mcp/utils';
-import { applyStyleToLayer } from '@/lib/layer-style-utils';
+import { applyStyleToLayer, setLayerStyleStack } from '@/lib/layer-style-utils';
 import { designSchema } from './shared-schemas';
 
 export function registerStyleTools(server: McpServer) {
@@ -39,7 +39,7 @@ export function registerStyleTools(server: McpServer) {
 
   server.tool(
     'apply_style',
-    'Apply a reusable layer style to a layer.',
+    'Apply a single reusable layer style to a layer, replacing any existing style stack. To stack multiple styles (combo classes) or control their priority order, use set_layer_styles instead.',
     {
       page_id: z.string().describe('The page ID'),
       layer_id: z.string().describe('The layer ID to apply the style to'),
@@ -67,6 +67,59 @@ export function registerStyleTools(server: McpServer) {
       await saveCachedLayers(page_id, updated);
 
       return { content: [{ type: 'text' as const, text: `Applied style "${style_id}" to "${layer.customName || layer.name}"` }] };
+    },
+  );
+
+  server.tool(
+    'set_layer_styles',
+    `Set the ordered stack of reusable styles applied to a layer (combo classes).
+
+Styles are listed low -> high priority — later styles win on conflicting properties,
+exactly like Webflow combo classes. This REPLACES the layer's current style stack and
+re-flattens the resulting classes. Use this (instead of apply_style) whenever a layer
+needs more than one style.
+
+- Apply a single style:        style_ids: ["<card>"]
+- Stack base + modifier:       style_ids: ["<button>", "<button-primary>"]
+- Reorder priority:            reorder the array (last wins)
+- Detach all styles (keep the current look as local classes): style_ids: []`,
+    {
+      page_id: z.string().describe('The page ID'),
+      layer_id: z.string().describe('The layer ID'),
+      style_ids: z.array(z.string())
+        .describe('Ordered style IDs, low -> high priority (last wins on conflicts). Pass an empty array to detach all styles while keeping the current look.'),
+    },
+    async ({ page_id, layer_id, style_ids }) => {
+      const pageLayers = await getCachedDraft(page_id);
+      if (!pageLayers) {
+        return { content: [{ type: 'text' as const, text: `Error: Page "${page_id}" has no layers.` }], isError: true };
+      }
+
+      const layers = pageLayers.layers as Layer[];
+      const layer = findLayerById(layers, layer_id);
+      if (!layer) {
+        return { content: [{ type: 'text' as const, text: `Error: Layer "${layer_id}" not found.` }], isError: true };
+      }
+
+      const stylesById = new Map((await getAllStyles()).map((s) => [s.id, s]));
+      const missing = style_ids.filter((id) => !stylesById.has(id));
+      if (missing.length > 0) {
+        return { content: [{ type: 'text' as const, text: `Error: Style(s) not found: ${missing.join(', ')}` }], isError: true };
+      }
+
+      const updated = updateLayerById(layers, layer_id, (l) => setLayerStyleStack(l, style_ids, stylesById));
+      await saveCachedLayers(page_id, updated);
+
+      const target = findLayerById(updated, layer_id);
+      const label = style_ids.length === 0
+        ? `Detached all styles from "${layer.customName || layer.name}"`
+        : `Applied style stack [${style_ids.join(', ')}] to "${layer.customName || layer.name}"`;
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ message: label, layer_id, style_ids, classes: target?.classes }),
+        }],
+      };
     },
   );
 

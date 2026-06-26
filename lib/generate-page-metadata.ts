@@ -16,12 +16,12 @@ import { getSettingsByKeys } from '@/lib/repositories/settingsRepository';
 import { getAssetById } from '@/lib/repositories/assetRepository';
 import { getAllLocales } from '@/lib/repositories/localeRepository';
 import { getAllPublishedPageFolders } from '@/lib/repositories/pageFolderRepository';
-import { getTranslationsByLocale } from '@/lib/repositories/translationRepository';
+import { getSlugTranslationsByLocale } from '@/lib/repositories/translationRepository';
 import { buildSvgDataUrl, getAssetProxyUrl } from '@/lib/asset-utils';
 import { generateColorVariablesCss } from '@/lib/repositories/colorVariableRepository';
 import { buildPageHreflangAlternates } from '@/lib/hreflang-utils';
 import { getTranslatableKey } from '@/lib/locale-runtime';
-import { getSiteBaseUrl } from '@/lib/url-utils';
+import { buildAbsolutePageUrl, getSiteBaseUrl } from '@/lib/url-utils';
 
 /** Languages map shape Next.js expects under `metadata.alternates.languages`. */
 type MetadataLanguages = NonNullable<NonNullable<Metadata['alternates']>['languages']>;
@@ -194,7 +194,8 @@ const fetchHreflangDataset = cache(async (): Promise<HreflangDataset> => {
   if (locales.length > 1) {
     for (const locale of locales) {
       if (locale.is_default) continue;
-      const translations = await getTranslationsByLocale(locale.id, true);
+      // hreflang alternates only need slug rows to build localized URLs.
+      const translations = await getSlugTranslationsByLocale(locale.id, true);
       const map: Record<string, Translation> = {};
       for (const t of translations) {
         map[getTranslatableKey(t)] = t;
@@ -315,14 +316,9 @@ export async function generatePageMetadata(
 
     // Add canonical URL
     if (seoSettings.globalCanonicalUrl && pagePath !== undefined) {
-      const canonicalBase = seoSettings.globalCanonicalUrl.replace(/\/$/, '');
-      const canonicalUrl = pagePath === '/' || pagePath === ''
-        ? canonicalBase
-        : `${canonicalBase}${pagePath.startsWith('/') ? pagePath : '/' + pagePath}`;
-
       metadata.alternates = {
         ...metadata.alternates,
-        canonical: canonicalUrl,
+        canonical: buildAbsolutePageUrl(seoSettings.globalCanonicalUrl, pagePath),
       };
     }
 
@@ -361,33 +357,49 @@ export async function generatePageMetadata(
     }
   }
 
+  // URL of the current page for og:url. Prefer an absolute URL built from the
+  // resolved base (canonical / primary domain / Vercel env) so it's correct on
+  // Vercel and cloud even when the route doesn't set `metadataBase`. Falls back
+  // to the relative path locally (no base configured), which Next.js resolves
+  // against `metadataBase` when available.
+  const pageUrl = pagePath === undefined
+    ? undefined
+    : siteBaseUrl
+      ? buildAbsolutePageUrl(siteBaseUrl, pagePath)
+      : pagePath;
+
   // Add Open Graph and Twitter Card metadata (not for error pages)
-  if (seo?.image && !isErrorPage) {
+  if (!isErrorPage) {
     // Resolve image URL (handles both Asset ID string and FieldVariable)
-    let imageUrl = await resolveImageUrl(seo.image, collectionItem);
+    let imageUrl = seo?.image ? await resolveImageUrl(seo.image, collectionItem) : null;
 
     // Make relative URLs absolute — social crawlers require absolute og:image URLs
     if (imageUrl && imageUrl.startsWith('/') && siteBaseUrl) {
       imageUrl = `${siteBaseUrl}${imageUrl}`;
     }
 
-    if (imageUrl) {
+    if (imageUrl || pageUrl !== undefined) {
       metadata.openGraph = {
         title,
         description,
-        images: [
-          {
-            url: imageUrl,
-            width: 1200,
-            height: 630,
-          },
-        ],
+        ...(pageUrl !== undefined ? { url: pageUrl } : {}),
+        ...(imageUrl
+          ? {
+            images: [
+              {
+                url: imageUrl,
+                width: 1200,
+                height: 630,
+              },
+            ],
+          }
+          : {}),
       };
       metadata.twitter = {
-        card: 'summary_large_image',
+        card: imageUrl ? 'summary_large_image' : 'summary',
         title,
         description,
-        images: [imageUrl],
+        ...(imageUrl ? { images: [imageUrl] } : {}),
       };
     }
   }

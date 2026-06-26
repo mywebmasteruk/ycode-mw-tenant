@@ -72,6 +72,7 @@ export interface SizingDesign {
   overflow?: string;
   aspectRatio?: string | null;
   objectFit?: string | null;
+  objectPosition?: string | null;
   gridColumnSpan?: string | null;
   gridRowSpan?: string | null;
 }
@@ -485,6 +486,9 @@ export interface Layer {
   _originalLayerId?: string;
   // SSR-only property for pagination metadata (when pagination is enabled)
   _paginationMeta?: CollectionPaginationMeta;
+  // SSR-only property: live pagination numbers stashed on the count/info text
+  // layers so renderers can resolve `pagination` inline variables at display time
+  _paginationNumbers?: PaginationNumbers;
   // SSR-only property for dynamic inline styles from CMS color field bindings
   _dynamicStyles?: Record<string, string>;
   // SSR-only property: when a conditionalVisibility rule references a date
@@ -508,6 +512,10 @@ export interface Layer {
     sortByInputLayerId?: string;
     sortOrderInputLayerId?: string;
     limit?: number;
+    // Hard cap on the total (from `collection.limit` with pagination enabled).
+    // Mirrors `CollectionPaginationMeta.maxTotal` so client-side filtering shows
+    // the same clamped count/`hasMore` as SSR instead of the raw filtered total.
+    maxTotal?: number;
     paginationMode?: 'pages' | 'load_more';
     layerTemplate: Layer[];
     collectionLayerClasses?: string[];
@@ -1173,6 +1181,63 @@ export interface CollectionItemWithValues extends CollectionItem {
   publish_status?: 'new' | 'updated' | 'deleted'; // Status badge for publish modal
 }
 
+// Global Variables (site-wide typed singletons)
+//
+// A global combines a field-like schema (name + type) and its value in one
+// row. Its type is a subset of CollectionFieldType so it can ride the same
+// FieldVariable binding/resolution/formatting rails as collection fields.
+export type GlobalVariableType = Extract<
+  CollectionFieldType,
+  'text' | 'rich_text' | 'number' | 'date' | 'color' | 'image' | 'link'
+>;
+
+export const GLOBAL_VARIABLE_TYPES: readonly GlobalVariableType[] = [
+  'text',
+  'rich_text',
+  'number',
+  'date',
+  'color',
+  'image',
+  'link',
+] as const;
+
+/** Runtime guard for an allowed global variable type (used by API validation). */
+export function isValidGlobalVariableType(type: unknown): type is GlobalVariableType {
+  return typeof type === 'string' && (GLOBAL_VARIABLE_TYPES as readonly string[]).includes(type);
+}
+
+export interface GlobalVariable {
+  id: string; // UUID
+  name: string;
+  key: string | null; // Stable slug used for resolution/imports
+  type: GlobalVariableType;
+  value: string | null; // Stored as text, cast based on type (same as collection values)
+  data: CollectionFieldData; // Type-specific config (format, options)
+  order: number;
+  is_published: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+export interface CreateGlobalVariableData {
+  name: string;
+  key?: string | null;
+  type: GlobalVariableType;
+  value?: string | null;
+  data?: CollectionFieldData;
+  order?: number;
+}
+
+export interface UpdateGlobalVariableData {
+  name?: string;
+  key?: string | null;
+  type?: GlobalVariableType;
+  value?: string | null;
+  data?: CollectionFieldData;
+  order?: number;
+}
+
 // Collection Import Types
 export type CollectionImportStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
@@ -1211,7 +1276,7 @@ export interface ColorVariable {
 
 export interface VariableType {
   id?: string; // Reference to ComponentVariable.id (for component variable linking)
-  type: 'field' | 'asset' | 'video'  | 'dynamic_rich_text' | 'dynamic_text'| 'static_text';
+  type: 'field' | 'asset' | 'video'  | 'dynamic_rich_text' | 'dynamic_text'| 'static_text' | 'pagination';
   data: object;
 }
 
@@ -1223,10 +1288,19 @@ export interface FieldVariable extends VariableType {
     field_type: CollectionFieldType | null;
     relationships: string[];
     format?: string;
-    /** Source of the field data: 'page' for page collection, 'collection' for collection layer */
-    source?: 'page' | 'collection';
+    /**
+     * Source of the field data: 'page' for page collection, 'collection' for
+     * collection layer, 'global' for a site-wide global variable.
+     */
+    source?: 'page' | 'collection' | 'global';
     /** ID of the collection layer this field belongs to (for nested collections) */
     collection_layer_id?: string;
+    /**
+     * ID of the global variable this binding points to (only when source is
+     * 'global'). When set, field_id mirrors this value so the existing
+     * resolution helpers can key on it uniformly.
+     */
+    global_id?: string;
     /** Pre-resolved raw value from injectCollectionData (survives stripSSROnlyData) */
     _resolvedValue?: string;
   };
@@ -1273,7 +1347,26 @@ export interface StaticTextVariable extends VariableType {
   };
 }
 
-export type InlineVariable = FieldVariable;
+// Pagination Variable, an inline variable that resolves to a live pagination
+// number (items shown/total, current/total pages) at render time. Lets the
+// pagination count/info texts ("Showing 6 of 20", "Page 1 of 3") be edited and
+// translated while keeping the numbers dynamic.
+export interface PaginationVariable extends VariableType {
+  type: 'pagination';
+  data: {
+    key: 'shown' | 'total' | 'current' | 'pages';
+  };
+}
+
+export type InlineVariable = FieldVariable | PaginationVariable;
+
+/** Live pagination numbers used to resolve `pagination` inline variables. */
+export interface PaginationNumbers {
+  shown: number;
+  total: number;
+  current: number;
+  pages: number;
+}
 
 // Image settings value for component variables
 export interface ImageSettingsValue {
@@ -1428,6 +1521,16 @@ export interface VisibilityCondition {
   // For self source: when true, the current dynamic page item ID is injected
   // into the comparison set alongside any statically picked IDs in `value`.
   includesCurrentPageItem?: boolean;
+  // How the compare value is sourced. Defaults to 'static' (uses `value`).
+  // 'current_page' binds the compare value to the current dynamic page item:
+  //   - reference/multi_reference fields compare against the page item's own ID
+  //     (the "Current Category/Tag" pattern)
+  //   - scalar fields compare against the value of `currentPageFieldId` on the
+  //     current page item
+  valueMode?: 'static' | 'current_page';
+  // For scalar fields with valueMode 'current_page': the field on the current
+  // dynamic page item whose value is used as the compare value.
+  currentPageFieldId?: string;
   // For linking filter value to an input layer inside a Filter
   inputLayerId?: string;
   inputLayerId2?: string; // For second bound (e.g. 'is_between')
@@ -1708,6 +1811,7 @@ export interface PublishStats {
     assets: PublishTableStats;
     locales: PublishTableStats;
     translations: PublishTableStats;
+    global_variables: PublishTableStats;
     css: PublishTableStats;
   };
 }

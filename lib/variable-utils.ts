@@ -13,6 +13,7 @@ import { resolveInlineVariablesFromData } from '@/lib/inline-variables';
 import { buildFieldVariablePath, resolveFieldFromSources } from '@/lib/cms-variables-utils';
 import { DEFAULT_ASSETS } from '@/lib/asset-constants';
 import { buildSvgDataUrl } from '@/lib/asset-utils';
+import { parseCollectionLinkValue } from '@/lib/link-utils';
 import { stringToTiptapContent } from '@/lib/text-format-utils';
 
 /** Canonical empty componentOverrides structure — use when setting/resetting overrides */
@@ -270,6 +271,19 @@ export function getVariableStringValue(
 }
 
 /**
+ * Unwrap a resolved field value to a media URL/asset id. Link/url fields store a
+ * serialized CollectionLinkValue; when bound as an image/video source we need the
+ * underlying URL (or asset id) rather than the JSON blob. Non-link values pass through.
+ */
+function unwrapLinkFieldUrl(resolvedValue: string): string {
+  const linkValue = parseCollectionLinkValue(resolvedValue);
+  if (!linkValue) return resolvedValue;
+  if (linkValue.type === 'url') return linkValue.url || '';
+  if (linkValue.type === 'asset') return linkValue.asset?.id || '';
+  return '';
+}
+
+/**
  * Get image URL from image src variable
  * - AssetVariable -> gets asset URL from store
  * - FieldVariable -> resolves field value using source-aware resolution (page or collection)
@@ -326,11 +340,19 @@ export function getImageUrlFromVariable(
       collectionItemData,
       pageCollectionItemData
     );
-    if (!resolvedValue) return undefined;
+    // Empty/null CMS value - fall back to the default placeholder image.
+    if (!resolvedValue) return useDefault ? DEFAULT_ASSETS.IMAGE : undefined;
+
+    // A link/url field bound as an image source stores a serialized
+    // CollectionLinkValue, not a bare URL — unwrap it to the underlying URL.
+    const unwrapped = unwrapLinkFieldUrl(resolvedValue);
+
+    // Link field with no usable URL/asset - fall back to the default image.
+    if (!unwrapped) return useDefault ? DEFAULT_ASSETS.IMAGE : undefined;
 
     // The field value may be an asset ID - look up the asset to get the URL
     if (getAsset) {
-      const asset = getAsset(resolvedValue);
+      const asset = getAsset(unwrapped);
       if (asset?.public_url) {
         return asset.public_url;
       }
@@ -341,7 +363,7 @@ export function getImageUrlFromVariable(
 
     // If getAsset is not available or asset not found, return the raw value
     // (might be a URL in text fields)
-    return resolvedValue;
+    return unwrapped;
   }
 
   if (isDynamicTextVariable(src)) {
@@ -409,11 +431,19 @@ export function getVideoUrlFromVariable(
       collectionItemData,
       pageCollectionItemData
     );
-    if (!resolvedValue) return undefined;
+    // Empty/null CMS value - fall back to the default placeholder if enabled.
+    if (!resolvedValue) return useDefault ? DEFAULT_ASSETS.VIDEO : undefined;
+
+    // A link/url field bound as a video source stores a serialized
+    // CollectionLinkValue — unwrap it to the underlying URL/asset id.
+    const unwrapped = unwrapLinkFieldUrl(resolvedValue);
+
+    // Link field with no usable URL/asset - fall back to the default if enabled.
+    if (!unwrapped) return useDefault ? DEFAULT_ASSETS.VIDEO : undefined;
 
     // The field value may be an asset ID - look up the asset to get the URL
     if (getAsset) {
-      const asset = getAsset(resolvedValue);
+      const asset = getAsset(unwrapped);
       if (asset?.public_url) {
         return asset.public_url;
       }
@@ -421,7 +451,7 @@ export function getVideoUrlFromVariable(
 
     // If getAsset is not available or asset not found, return the raw value
     // (might be a URL in text fields)
-    return resolvedValue;
+    return unwrapped;
   }
 
   if (isDynamicTextVariable(src)) {
