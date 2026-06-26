@@ -304,7 +304,30 @@ export function reapplyTenantScoping(source: string, filePath = 'repo.ts'): Code
           return;
         }
       }
-      // Could not mechanically scope (inline await, non-assigned chain, etc.)
+      // No intermediate variable. If the chain is directly awaited
+      // (`const { data } = await client.from(…)…`, optionally `.single()`),
+      // wrap the filter builder in applyTenantEq() so destructured-await reads
+      // are scoped deterministically — no LLM fallback needed.
+      if (top.parent && ts.isAwaitExpression(top.parent)) {
+        // Strip a trailing `.single()` / `.maybeSingle()` so we wrap the filter
+        // builder, not its single-row result (which has no `.eq`).
+        let wrapNode: ts.Node = top;
+        if (
+          ts.isCallExpression(top) &&
+          ts.isPropertyAccessExpression(top.expression) &&
+          (top.expression.name.text === 'single' || top.expression.name.text === 'maybeSingle')
+        ) {
+          wrapNode = top.expression.expression;
+        }
+        const tv = ensureTenantVar(body);
+        edits.push({ start: wrapNode.getStart(sf), end: wrapNode.getStart(sf), text: 'applyTenantEq(' });
+        edits.push({ start: wrapNode.getEnd(), end: wrapNode.getEnd(), text: `, ${tv})` });
+        needApplyEqImport = true;
+        changes.push(`Scoped ${table} ${op} via inline applyTenantEq() (line ${line}).`);
+        ts.forEachChild(node, visit);
+        return;
+      }
+      // Could not mechanically scope (non-awaited chain, etc.)
       residual.push({ line, table, snippet: `${op} not assigned to a variable` });
     }
     ts.forEachChild(node, visit);
