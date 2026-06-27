@@ -18,6 +18,9 @@ import type {
   CreateGlobalVariableData,
   UpdateGlobalVariableData,
 } from '@/types';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
+import { applyTenantId } from '@/lib/masjidweb/apply-tenant-id';
 
 /** Deterministic signature of the publishable fields, for change detection. */
 function globalSignature(v: GlobalVariable): string {
@@ -44,19 +47,20 @@ function globalSignature(v: GlobalVariable): string {
 export const getAllGlobalVariables = cache(async (
   isPublished: boolean = false
 ): Promise<GlobalVariable[]> => {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
   }
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('global_variables')
     .select('*')
     .eq('is_published', isPublished)
     .is('deleted_at', null)
     .order('order', { ascending: true })
-    .order('created_at', { ascending: true });
+    .order('created_at', { ascending: true }), tenantId);
 
   if (error) {
     throw new Error(`Failed to fetch global variables: ${error.message}`);
@@ -69,19 +73,20 @@ export async function getGlobalVariableById(
   id: string,
   isPublished: boolean = false
 ): Promise<GlobalVariable | null> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
   }
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('global_variables')
     .select('*')
     .eq('id', id)
     .eq('is_published', isPublished)
     .is('deleted_at', null)
-    .single();
+    .single(), tenantId);
 
   if (error) {
     if (error.code === 'PGRST116') {
@@ -96,6 +101,7 @@ export async function getGlobalVariableById(
 export async function createGlobalVariable(
   variableData: CreateGlobalVariableData
 ): Promise<GlobalVariable> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -105,19 +111,19 @@ export async function createGlobalVariable(
   // Append at end unless an explicit order was provided
   let order = variableData.order;
   if (order === undefined) {
-    const { data: maxRow } = await client
+    const { data: maxRow } = await applyTenantEq(client
       .from('global_variables')
       .select('order')
       .eq('is_published', false)
       .order('order', { ascending: false })
       .limit(1)
-      .single();
+      .single(), tenantId);
     order = (maxRow?.order ?? -1) + 1;
   }
 
   const { data, error } = await client
     .from('global_variables')
-    .insert({
+    .insert({ tenant_id: tenantId,
       name: variableData.name,
       key: variableData.key ?? null,
       type: variableData.type,
@@ -140,19 +146,20 @@ export async function updateGlobalVariable(
   id: string,
   updates: UpdateGlobalVariableData
 ): Promise<GlobalVariable> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
   }
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('global_variables')
     .update({ ...updates, updated_at: new Date().toISOString() })
     .eq('id', id)
     .eq('is_published', false) // Update draft only
     .select()
-    .single();
+    .single(), tenantId);
 
   if (error) {
     throw new Error(`Failed to update global variable: ${error.message}`);
@@ -168,17 +175,18 @@ export async function updateGlobalVariable(
  * lets change detection surface the pending deletion in the publish modal.
  */
 export async function softDeleteGlobalVariable(id: string): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
   }
 
-  const { error } = await client
+  const { error } = await applyTenantEq(client
     .from('global_variables')
     .update({ deleted_at: new Date().toISOString() })
     .eq('id', id)
-    .eq('is_published', false);
+    .eq('is_published', false), tenantId);
 
   if (error) {
     throw new Error(`Failed to delete global variable: ${error.message}`);
@@ -191,16 +199,17 @@ export async function softDeleteGlobalVariable(id: string): Promise<void> {
  * deletion). Used to surface "unpublished changes" and drive the publish step.
  */
 export async function getUnpublishedGlobalVariables(): Promise<GlobalVariable[]> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
   }
 
-  const { data: drafts, error } = await client
+  const { data: drafts, error } = await applyTenantEq(client
     .from('global_variables')
     .select('*')
-    .eq('is_published', false);
+    .eq('is_published', false), tenantId);
 
   if (error) {
     throw new Error(`Failed to fetch draft global variables: ${error.message}`);
@@ -210,11 +219,11 @@ export async function getUnpublishedGlobalVariables(): Promise<GlobalVariable[]>
     return [];
   }
 
-  const { data: published } = await client
+  const { data: published } = await applyTenantEq(client
     .from('global_variables')
     .select('*')
     .in('id', drafts.map((d) => d.id))
-    .eq('is_published', true);
+    .eq('is_published', true), tenantId);
 
   const publishedById = new Map<string, GlobalVariable>(
     (published || []).map((p) => [p.id, p])
@@ -254,16 +263,17 @@ export async function getUnpublishedGlobalVariablesCount(): Promise<number> {
  * affected (upserts + deletions).
  */
 export async function publishGlobalVariables(): Promise<{ count: number; changedIds: string[] }> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
   }
 
-  const { data: drafts, error } = await client
+  const { data: drafts, error } = await applyTenantEq(client
     .from('global_variables')
     .select('*')
-    .eq('is_published', false);
+    .eq('is_published', false), tenantId);
 
   if (error) {
     throw new Error(`Failed to fetch draft global variables: ${error.message}`);
@@ -273,11 +283,11 @@ export async function publishGlobalVariables(): Promise<{ count: number; changed
     return { count: 0, changedIds: [] };
   }
 
-  const { data: published } = await client
+  const { data: published } = await applyTenantEq(client
     .from('global_variables')
     .select('*')
     .in('id', drafts.map((d) => d.id))
-    .eq('is_published', true);
+    .eq('is_published', true), tenantId);
 
   const publishedById = new Map<string, GlobalVariable>(
     (published || []).map((p) => [p.id, p])
@@ -315,7 +325,7 @@ export async function publishGlobalVariables(): Promise<{ count: number; changed
   if (toUpsert.length > 0) {
     const { error: upsertError } = await client
       .from('global_variables')
-      .upsert(toUpsert, { onConflict: 'id,is_published' });
+      .upsert(applyTenantId(toUpsert, tenantId), { onConflict: 'id,is_published' });
 
     if (upsertError) {
       throw new Error(`Failed to publish global variables: ${upsertError.message}`);
@@ -323,11 +333,11 @@ export async function publishGlobalVariables(): Promise<{ count: number; changed
   }
 
   if (deletedIds.length > 0) {
-    const { error: deleteError } = await client
+    const { error: deleteError } = await applyTenantEq(client
       .from('global_variables')
       .delete()
       .in('id', deletedIds)
-      .eq('is_published', true);
+      .eq('is_published', true), tenantId);
 
     if (deleteError) {
       throw new Error(`Failed to remove published global variables: ${deleteError.message}`);
@@ -343,17 +353,18 @@ export async function publishGlobalVariables(): Promise<{ count: number; changed
  * counterparts). Called after publish to reclaim rows.
  */
 export async function hardDeleteSoftDeletedGlobalVariables(): Promise<{ count: number }> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
   }
 
-  const { data: deletedDrafts, error } = await client
+  const { data: deletedDrafts, error } = await applyTenantEq(client
     .from('global_variables')
     .select('id')
     .eq('is_published', false)
-    .not('deleted_at', 'is', null);
+    .not('deleted_at', 'is', null), tenantId);
 
   if (error) {
     throw new Error(`Failed to fetch deleted draft global variables: ${error.message}`);
@@ -365,10 +376,10 @@ export async function hardDeleteSoftDeletedGlobalVariables(): Promise<{ count: n
 
   const ids = deletedDrafts.map((d) => d.id);
 
-  const { error: deleteError } = await client
+  const { error: deleteError } = await applyTenantEq(client
     .from('global_variables')
     .delete()
-    .in('id', ids);
+    .in('id', ids), tenantId);
 
   if (deleteError) {
     throw new Error(`Failed to hard delete global variables: ${deleteError.message}`);

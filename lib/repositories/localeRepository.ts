@@ -14,7 +14,7 @@ import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
  * Get all locales (draft by default)
  */
 export async function getAllLocales(isPublished: boolean = false, tenantId?: string): Promise<Locale[]> {
-  const client = await getSupabaseAdmin(tenantId);
+  const client = await getSupabaseAdmin();
   if (!client) {
     throw new Error('Failed to initialize Supabase client');
   }

@@ -720,7 +720,7 @@ export async function getAllDraftPageFolders(includeSoftDeleted = false): Promis
  * @returns Array of published page folders
  */
 export async function getAllPublishedPageFolders(includeSoftDeleted = false, tenantId?: string): Promise<PageFolder[]> {
-  const client = await getSupabaseAdmin(tenantId);
+  const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');

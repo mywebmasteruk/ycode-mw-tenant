@@ -367,7 +367,7 @@ export async function getAllItemsRaw(
     }
     return await query;
   } catch {
-    const client = await getSupabaseAdmin(tenantId);
+    const client = await getSupabaseAdmin();
     if (!client) {
       throw new Error('Supabase client not configured');
     }
@@ -537,7 +537,7 @@ export async function getItemsByIds(ids: string[], isPublished: boolean = false,
     return await query;
   } catch {
     // Fallback: chunked PostgREST reads
-    const client = await getSupabaseAdmin(tenantId);
+    const client = await getSupabaseAdmin();
     if (!client) {
       throw new Error('Supabase client not configured');
     }

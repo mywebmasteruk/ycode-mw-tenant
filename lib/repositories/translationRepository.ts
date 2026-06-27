@@ -41,7 +41,7 @@ export async function getAllTranslationRows<T = Translation>(
     }
     return await query as T[];
   } catch {
-    const client = await getSupabaseAdmin(tenantId);
+    const client = await getSupabaseAdmin();
     if (!client) return [];
     const select = columns.includes('*') ? '*' : columns.join(', ');
     return await fetchAllRows<T>((from, to) =>
@@ -60,7 +60,7 @@ export async function getTranslationsByLocale(
   isPublished: boolean = false,
   tenantId?: string
 ): Promise<Translation[]> {
-  const client = await getSupabaseAdmin(tenantId);
+  const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
@@ -124,7 +124,7 @@ export async function getLocaleScaffoldTranslations(
   isPublished: boolean,
   tenantId?: string,
 ): Promise<Translation[]> {
-  const client = await getSupabaseAdmin(tenantId);
+  const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
@@ -188,7 +188,7 @@ export async function getCmsTranslationsForItems(
 ): Promise<Translation[]> {
   if (itemIds.length === 0) return [];
 
-  const client = await getSupabaseAdmin(tenantId);
+  const client = await getSupabaseAdmin();
   if (!client) {
     throw new Error('Supabase not configured');
   }
@@ -224,7 +224,7 @@ export async function getSlugTranslationsByLocale(
   isPublished: boolean,
   tenantId?: string,
 ): Promise<Translation[]> {
-  const client = await getSupabaseAdmin(tenantId);
+  const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
