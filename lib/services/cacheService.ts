@@ -1,6 +1,6 @@
 import { revalidateTag, revalidatePath } from 'next/cache';
 import { invalidateByTag } from '@vercel/functions';
-import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSupabaseAdmin, getSupabaseConfig } from '@/lib/supabase-server';
 import { buildSlugPath, normalizeSlugSegment } from '@/lib/page-utils';
 import type { Page, PageFolder } from '@/types';
 import type {
@@ -16,18 +16,39 @@ import {
 } from '@/lib/masjidweb/tenant-cache-tags';
 
 /**
- * Maximum number of routes to warm in a single invalidation event.
- *
- * Warming is a best-effort optimisation, not a correctness requirement —
- * the long tail of routes will self-warm on their first real visit. The
- * cap protects against runaway cost when a dynamic page expands to
- * hundreds of CMS items, and against Vercel function timeout limits.
+ * Number of routes warmed per function invocation. All routes in a batch are
+ * fetched in parallel, so the batch wall-time is roughly one URL's render
+ * time. Sized to comfortably finish inside the warm endpoint's maxDuration
+ * (with 50 parallel 15s-timeout fetches fitting in a 60s budget).
  */
-const MAX_ROUTES_TO_WARM = 50;
+const WARM_BATCH_SIZE = 50;
+
+/**
+ * Overall safety cap on how many routes a single invalidation event will warm
+ * across the whole self-chaining batch sequence. Warming is a best-effort
+ * optimisation, not a correctness requirement — anything beyond this self-warms
+ * on first real visit. The cap bounds runaway cost when a dynamic page expands
+ * to thousands of CMS items. Configurable via CACHE_WARM_MAX_TOTAL.
+ */
+const MAX_ROUTES_TO_WARM_TOTAL = (() => {
+  const raw = Number(process.env.CACHE_WARM_MAX_TOTAL);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 2000;
+})();
 
 type SupabaseAdmin = NonNullable<Awaited<ReturnType<typeof getSupabaseAdmin>>>;
 
 const SUPABASE_IN_LIMIT = 500;
+
+/**
+ * Vercel's bulk cache-tag purge API accepts at most 16 tags per call
+ * (https://vercel.com/docs/caching/cdn-cache/purge). Passing a larger array
+ * gets rejected, so every tag beyond the cap would silently keep serving
+ * stale content. Dynamic (CMS) pages make this trivial to hit: a single
+ * dynamic page expands to one route per published item, so a component/style
+ * change touching a dynamic template can produce dozens of routes in one
+ * selective-invalidation pass. We chunk to stay under the cap.
+ */
+const MAX_TAGS_PER_INVALIDATION = 16;
 
 /** Split an array into chunks safe for Supabase `.in()` queries. */
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -36,6 +57,19 @@ function chunk<T>(arr: T[], size: number): T[][] {
     chunks.push(arr.slice(i, i + size));
   }
   return chunks;
+}
+
+/**
+ * Purge a set of cache tags via Vercel's CDN purge API, chunked to respect the
+ * 16-tags-per-call limit. Batches are settled independently so one failed batch
+ * doesn't abort the rest; the first error is rethrown for the caller to handle.
+ */
+export async function purgeTagsOnVercel(tags: string[]): Promise<void> {
+  if (tags.length === 0) return;
+  const batches = chunk(tags, MAX_TAGS_PER_INVALIDATION);
+  const results = await Promise.allSettled(batches.map((batch) => invalidateByTag(batch)));
+  const failure = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+  if (failure) throw failure.reason;
 }
 
 /**
@@ -261,7 +295,10 @@ export async function invalidatePages(routePaths: string[]): Promise<boolean> {
     // MASJIDWEB_SEAM_END
     
     if (process.env.VERCEL === '1') {
-      await invalidateByTag(tags);
+      // Chunked to respect Vercel's 16-tags-per-purge cap — without this,
+      // routes beyond the first 16 (common when a dynamic CMS page expands to
+      // many item URLs) would never be invalidated and keep serving stale HTML.
+      await purgeTagsOnVercel(tags);
     } else {
       for (const tag of tags) {
         revalidateTag(tag, { expire: 0 });
@@ -482,7 +519,9 @@ async function resolveDynamicPageRoutes(
           currentFolderId = folder.page_folder_id;
         }
         slugParts.push(...folderSegments);
-        slugParts.push(itemSlug);
+        // Use the item's translated slug for this locale (the actual localized
+        // URL); fall back to the default slug when no translation exists.
+        slugParts.push(lt[`cms:${sv.item_id}:field:key:slug`] || itemSlug);
 
         const localePath = slugParts.map(normalizeSlugSegment).filter(Boolean).join('/');
         if (localePath) routes.push(localePath);
@@ -514,13 +553,53 @@ export async function getRoutePathsForDeletedCollectionItems(
     { data: dynamicPages },
     { data: folders },
     { data: locales },
+    { data: translations },
   ] = await Promise.all([
     client.from('pages').select('*').eq('is_published', true).eq('is_dynamic', true).is('deleted_at', null),
     client.from('page_folders').select('*').eq('is_published', true).is('deleted_at', null),
     client.from('locales').select('*').is('deleted_at', null),
+    client.from('translations')
+      .select('locale_id, source_type, source_id, content_key, content_value')
+      .eq('is_published', true).is('deleted_at', null)
+      .in('content_key', ['slug', 'field:key:slug']),
   ]);
 
   if (!dynamicPages || !folders) return [];
+
+  // Build translations lookup: locale_id → "type:source:key" → value
+  const translationsMap: Record<string, Record<string, string>> = {};
+  for (const t of translations || []) {
+    if (!translationsMap[t.locale_id]) translationsMap[t.locale_id] = {};
+    translationsMap[t.locale_id][`${t.source_type}:${t.source_id}:${t.content_key}`] = t.content_value;
+  }
+
+  // Translated slugs are keyed by item id, but callers only pass default slug
+  // values. Map each old slug back to its item id (draft rows survive unpublish,
+  // so they still resolve) to look up per-locale translated slugs.
+  const slugToItemIdByCollection = new Map<string, Map<string, string>>();
+  for (const [collectionId, slugs] of deletedSlugs) {
+    if (!slugs || slugs.length === 0) continue;
+    const { data: slugField } = await client
+      .from('collection_fields')
+      .select('id')
+      .eq('collection_id', collectionId)
+      .eq('key', 'slug')
+      .is('deleted_at', null)
+      .limit(1)
+      .single();
+    if (!slugField) continue;
+    const { data: values } = await client
+      .from('collection_item_values')
+      .select('item_id, value')
+      .eq('field_id', slugField.id)
+      .is('deleted_at', null)
+      .in('value', slugs);
+    const map = new Map<string, string>();
+    for (const v of values || []) {
+      if (typeof v.value === 'string') map.set(v.value, v.item_id);
+    }
+    slugToItemIdByCollection.set(collectionId, map);
+  }
 
   for (const page of dynamicPages as Page[]) {
     const collectionId = (page.settings as any)?.cms?.collection_id;
@@ -529,27 +608,32 @@ export async function getRoutePathsForDeletedCollectionItems(
     const slugs = deletedSlugs.get(collectionId);
     if (!slugs || slugs.length === 0) continue;
 
+    const slugToItemId = slugToItemIdByCollection.get(collectionId) || new Map<string, string>();
     const basePath = buildSlugPath(page, folders as PageFolder[], 'page', '').slice(1).replace(/\/$/, '');
 
     for (const itemSlug of slugs) {
       const fullPath = basePath ? `${basePath}/${itemSlug}` : itemSlug;
       routes.push(fullPath);
 
-      // Locale-prefixed paths
+      const itemId = slugToItemId.get(itemSlug);
+
+      // Locale-prefixed paths with translated folder + item slugs
       if (locales) {
         for (const locale of locales) {
           if (locale.is_default) continue;
+          const lt = translationsMap[locale.id] || {};
           const slugParts: string[] = [locale.code];
           let currentFolderId = page.page_folder_id;
           const folderSegments: string[] = [];
           while (currentFolderId) {
             const folder = (folders as PageFolder[]).find(f => f.id === currentFolderId);
             if (!folder) break;
-            folderSegments.unshift(folder.slug);
+            folderSegments.unshift(lt[`folder:${folder.id}:slug`] || folder.slug);
             currentFolderId = folder.page_folder_id;
           }
           slugParts.push(...folderSegments);
-          slugParts.push(itemSlug);
+          const translatedSlug = itemId ? lt[`cms:${itemId}:field:key:slug`] : undefined;
+          slugParts.push(translatedSlug || itemSlug);
           const localePath = slugParts.map(normalizeSlugSegment).filter(Boolean).join('/');
           if (localePath) routes.push(localePath);
         }
@@ -703,20 +787,196 @@ export async function getAllPublishedRoutes(): Promise<string[]> {
   return getRoutePathsForPages(pages.map((p) => p.id));
 }
 
+/** Build the absolute origin (`https://host`) from forwarded request headers. */
+function resolveBaseUrl(request: Request): string | null {
+  const host = request.headers.get('x-forwarded-host') ?? request.headers.get('host');
+  if (!host) return null;
+  const proto = request.headers.get('x-forwarded-proto') ?? 'https';
+  return `${proto}://${host}`;
+}
+
+/**
+ * Keep only safe, same-origin relative routes. Guards the chain endpoint (which
+ * takes routes from a request body) against absolute URLs or protocol-relative
+ * paths that would point warming fetches off-origin.
+ */
+function sanitiseWarmRoutes(routes: unknown): string[] {
+  if (!Array.isArray(routes)) return [];
+  return routes.filter(
+    (r): r is string =>
+      typeof r === 'string' &&
+      r.length > 0 &&
+      !r.includes('://') &&
+      !r.startsWith('/') &&
+      !r.startsWith('\\'),
+  );
+}
+
+/** Fetch a batch of routes in parallel, swallowing per-route failures. */
+async function warmBatch(routes: string[], baseUrl: string): Promise<void> {
+  await Promise.allSettled(
+    routes.map((route) =>
+      fetch(`${baseUrl}/${route}`, {
+        signal: AbortSignal.timeout(15000),
+      }).catch(() => null),
+    ),
+  );
+}
+
+// ── Internal chain authentication ────────────────────────────────────────
+// The warm endpoint issues GETs to same-origin paths, so it must not be an
+// open amplification endpoint. Rather than make self-hosters configure a
+// dedicated secret, we sign each chain hop with an HMAC keyed on the Supabase
+// service-role key — a credential every deployment already has, that is
+// server-only and never sent to the browser. The raw key is never
+// transmitted; only the per-payload signature travels over the wire.
+
+const WARM_SIGNATURE_HEADER = 'x-warm-signature';
+
+/** The HMAC key for chain auth: the service-role key the app already requires. */
+async function getChainSigningKey(): Promise<string | null> {
+  try {
+    const creds = await getSupabaseConfig();
+    return creds?.serviceRoleKey ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** HMAC-SHA256 of `message` keyed by `key`, hex-encoded. Web Crypto = runtime-agnostic. */
+async function hmacHex(message: string, key: string): Promise<string> {
+  const enc = new TextEncoder();
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(key),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const sig = await crypto.subtle.sign('HMAC', cryptoKey, enc.encode(message));
+  return Array.from(new Uint8Array(sig))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/** Length-safe constant-time-ish comparison of two hex strings. */
+function safeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/**
+ * Verify a warm-chain request actually came from this deployment by checking
+ * the HMAC signature against the raw request body. Exported for the endpoint.
+ */
+export async function verifyWarmChainSignature(
+  rawBody: string,
+  signature: string | null,
+): Promise<boolean> {
+  if (!signature) return false;
+  const key = await getChainSigningKey();
+  if (!key) return false;
+  return safeEqual(await hmacHex(rawBody, key), signature);
+}
+
+/**
+ * Fire-and-forget trigger for the next link in the warming chain. Hits the
+ * dedicated warm endpoint, which warms a fresh batch in its own function
+ * invocation (sidestepping the triggering function's lifetime limit) and
+ * chains onward until the route list is drained or the overall cap is hit.
+ *
+ * Signs the payload with the service-role-derived HMAC; if no signing key is
+ * available the chain simply stops and remaining routes self-warm on first
+ * visit. No user-configured secret required.
+ */
+async function scheduleWarmChain(
+  baseUrl: string,
+  routes: string[],
+  alreadyWarmed: number,
+): Promise<void> {
+  if (routes.length === 0) return;
+  const key = await getChainSigningKey();
+  if (!key) return;
+
+  const body = JSON.stringify({ routes, warmed: alreadyWarmed });
+  const signature = await hmacHex(body, key);
+  await fetch(`${baseUrl}/ycode/api/cache/warm`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', [WARM_SIGNATURE_HEADER]: signature },
+    body,
+    // The endpoint returns as soon as it has scheduled its own background
+    // work, so this resolves fast — the timeout only guards a stuck connect.
+    signal: AbortSignal.timeout(10000),
+  }).catch(() => null);
+}
+
+/**
+ * Warm a batch of routes in the background, then chain to a fresh invocation
+ * for the next batch until every route is warmed or MAX_ROUTES_TO_WARM_TOTAL
+ * is reached. Shared by the initial `warmRoutes` call and the self-chaining
+ * `/ycode/api/cache/warm` endpoint.
+ *
+ * @param alreadyWarmed routes warmed by earlier links in this chain, used to
+ *   enforce the cumulative overall cap.
+ * @returns how many routes this link scheduled, and how many remain queued for
+ *   the next link.
+ */
+export async function warmRouteChain(
+  routes: string[],
+  alreadyWarmed: number,
+  request: Request,
+): Promise<{ scheduled: number; remaining: number }> {
+  if (process.env.VERCEL !== '1') return { scheduled: 0, remaining: 0 };
+
+  const safeRoutes = sanitiseWarmRoutes(routes);
+  if (safeRoutes.length === 0) return { scheduled: 0, remaining: 0 };
+
+  const baseUrl = resolveBaseUrl(request);
+  if (!baseUrl) return { scheduled: 0, remaining: 0 };
+
+  // Enforce the overall cap using the cumulative counter carried through the
+  // chain, so a long route list can't exceed the budget across invocations.
+  const budget = Math.max(0, MAX_ROUTES_TO_WARM_TOTAL - alreadyWarmed);
+  if (budget === 0) return { scheduled: 0, remaining: safeRoutes.length };
+
+  const allowed = safeRoutes.slice(0, budget);
+  const batch = allowed.slice(0, WARM_BATCH_SIZE);
+  const remaining = allowed.slice(WARM_BATCH_SIZE);
+
+  try {
+    const { waitUntil } = await import('@vercel/functions');
+    waitUntil(
+      (async () => {
+        await warmBatch(batch, baseUrl);
+        if (remaining.length > 0) {
+          await scheduleWarmChain(baseUrl, remaining, alreadyWarmed + batch.length);
+        }
+      })(),
+    );
+    return { scheduled: batch.length, remaining: remaining.length };
+  } catch {
+    return { scheduled: 0, remaining: safeRoutes.length };
+  }
+}
+
 /**
  * Background-warm a set of routes by issuing GET requests to them, so the
  * next real visitor sees x-vercel-cache: HIT instead of STALE/MISS.
  *
  * Uses Vercel's waitUntil so warming runs AFTER the response is sent: zero
- * added latency on the triggering request. Capped at MAX_ROUTES_TO_WARM
- * to bound cost and stay within Vercel function lifetime limits — long
- * tail of routes self-warms on first real visit.
+ * added latency on the triggering request. Warms the first batch here and
+ * self-chains through `/ycode/api/cache/warm` for the rest, draining the
+ * whole list up to MAX_ROUTES_TO_WARM_TOTAL — anything beyond that self-warms
+ * on first real visit.
  *
  * Vercel-only: warming via internal fetch only makes sense when there's a
  * CDN in front of the function. No-ops elsewhere.
  *
  * @returns null if not on Vercel, no host header, no routes, or warming
- *   failed to schedule. Otherwise reports how many were warmed vs total.
+ *   failed to schedule. Otherwise reports how many will be warmed (across the
+ *   whole chain) vs the total requested.
  */
 export async function warmRoutes(
   routes: string[],
@@ -724,28 +984,14 @@ export async function warmRoutes(
 ): Promise<{ warmed: number; total: number } | null> {
   if (process.env.VERCEL !== '1' || routes.length === 0) return null;
 
-  const host = request.headers.get('x-forwarded-host') ?? request.headers.get('host');
-  if (!host) return null;
+  const total = routes.length;
+  const result = await warmRouteChain(routes, 0, request);
+  if (result.scheduled === 0 && result.remaining === 0) return null;
 
-  const proto = request.headers.get('x-forwarded-proto') ?? 'https';
-  const baseUrl = `${proto}://${host}`;
-  const toWarm = routes.slice(0, MAX_ROUTES_TO_WARM);
-
-  try {
-    const { waitUntil } = await import('@vercel/functions');
-    waitUntil(
-      Promise.allSettled(
-        toWarm.map((route) =>
-          fetch(`${baseUrl}/${route}`, {
-            signal: AbortSignal.timeout(15000),
-          }).catch(() => null),
-        ),
-      ),
-    );
-    return { warmed: toWarm.length, total: routes.length };
-  } catch {
-    return null;
-  }
+  // scheduled = this batch; remaining = what the chain will drain next. The
+  // chain is capped at MAX_ROUTES_TO_WARM_TOTAL, so report the capped total.
+  const willWarm = Math.min(total, MAX_ROUTES_TO_WARM_TOTAL);
+  return { warmed: willWarm, total };
 }
 
 // ══════════════════════════════════════════════════════════════════════════

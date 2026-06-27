@@ -39,7 +39,7 @@ import {
   convertContentToValue,
   getVariableLabel,
 } from '@/lib/cms-variables-utils';
-import type { FieldVariable } from '@/types';
+import type { FieldVariable, InlineVariable } from '@/types';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import Icon from '@/components/ui/icon';
@@ -54,6 +54,9 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
@@ -66,6 +69,7 @@ import {
 import { CollectionFieldSelector, type FieldSourceType } from './CollectionFieldSelector';
 import { flattenFieldGroups, filterFieldGroupsByType, RICH_TEXT_ONLY_FIELD_TYPES, type FieldGroup } from '@/lib/collection-field-utils';
 import { buildFieldVariableData } from '@/lib/variable-format-utils';
+import { getPaginationLayerKind, PAGINATION_VARIABLE_LABELS, type PaginationVariableKey } from '@/lib/pagination-text-utils';
 import { createDynamicVariableNodeView } from '@/lib/dynamic-variable-view';
 import { RichTextComponent } from '@/lib/tiptap-extensions/rich-text-component';
 import { RichTextLink, getLinkSettingsFromMark } from '@/lib/tiptap-extensions/rich-text-link';
@@ -124,7 +128,7 @@ interface RichTextEditorProps {
 }
 
 export interface RichTextEditorHandle {
-  addFieldVariable: (variableData: FieldVariable) => void;
+  addFieldVariable: (variableData: InlineVariable) => void;
 }
 
 export type { FieldVariable } from '@/types';
@@ -462,7 +466,17 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
     () => filterFieldGroupsByType(fieldGroups, allowedFieldTypes),
     [fieldGroups, allowedFieldTypes]
   );
-  const canShowVariables = textFieldGroups.length > 0;
+
+  // Pagination count/info layers expose dynamic number variables (Shown/Total or
+  // Current page/Total pages) so they can be placed and translated within the text.
+  const paginationVariableKeys = useMemo<PaginationVariableKey[]>(() => {
+    const kind = getPaginationLayerKind(layer?.id);
+    if (kind === 'count') return ['shown', 'total'];
+    if (kind === 'info') return ['current', 'pages'];
+    return [];
+  }, [layer?.id]);
+
+  const canShowVariables = textFieldGroups.length > 0 || paginationVariableKeys.length > 0;
 
   const extensions = useMemo(() => {
     const baseExtensions = [
@@ -639,7 +653,11 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
     editor.setEditable(!disabled);
   }, [editor, disabled]);
 
-  // Sync CMS context into editor storage so node views can access it
+  // Sync CMS context into editor storage so node views can access it, then
+  // force every dynamic-variable badge to re-render. Badges resolve their label
+  // from this live context, so a renamed/deleted field or global is reflected
+  // instantly without rebuilding the document (which doesn't reliably re-render
+  // the React-rooted atom node views).
   useEffect(() => {
     if (!editor) return;
     const storage = editor.storage as Record<string, any>;
@@ -647,6 +665,8 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
       ...storage.richTextComponent,
       editorContext: { fieldGroups, allFields, collections, isInsideCollectionLayer },
     };
+    const dvStorage = storage.dynamicVariable as { renderers?: Set<() => void> } | undefined;
+    dvStorage?.renderers?.forEach((render) => render());
   }, [editor, fieldGroups, allFields, collections, isInsideCollectionLayer]);
 
   // Sync HTML embed dialog opener into editor storage so the node view can trigger it
@@ -805,7 +825,7 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
   }, [editor, withFormatting, imagePopoverOpen]);
 
   // Internal function to add a field variable
-  const addFieldVariableInternal = useCallback((variableData: FieldVariable) => {
+  const addFieldVariableInternal = useCallback((variableData: InlineVariable) => {
     if (!editor) return;
 
     // Save current cursor position
@@ -919,11 +939,46 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
     setIsDropdownOpen(false);
   };
 
+  const handlePaginationSelect = (key: PaginationVariableKey) => {
+    addFieldVariableInternal({ type: 'pagination', data: { key } });
+    setIsDropdownOpen(false);
+  };
+
+  // Shared dropdown body: pagination variables (when applicable) above CMS fields.
+  const variablesDropdownInner = (
+    <>
+      {paginationVariableKeys.length > 0 && (
+        <>
+          <DropdownMenuLabel className="text-xs text-foreground/80">Pagination</DropdownMenuLabel>
+          {paginationVariableKeys.map((key) => (
+            <DropdownMenuItem
+              key={key}
+              className="gap-2"
+              onClick={() => handlePaginationSelect(key)}
+            >
+              <Icon name="hash" className="size-3 text-muted-foreground shrink-0" />
+              <span className="truncate">{PAGINATION_VARIABLE_LABELS[key]}</span>
+            </DropdownMenuItem>
+          ))}
+          {textFieldGroups.length > 0 && <DropdownMenuSeparator />}
+        </>
+      )}
+      {textFieldGroups.length > 0 && (
+        <CollectionFieldSelector
+          fieldGroups={textFieldGroups}
+          allFields={allFields || {}}
+          collections={collections || []}
+          onSelect={handleFieldSelect}
+        />
+      )}
+    </>
+  );
+
   return (
     <div className={cn('flex-1 rich-text-editor relative', isFullVariant && 'flex flex-col gap-2', fullHeight && 'min-h-0')}>
       {/* Formatting toolbar - Full variant (CMS style like original TiptapEditor) */}
       {withFormatting && showFormattingToolbar && isFullVariant && (
-        <div className="flex items-center gap-2 sticky top-8 bg-background z-10 py-2 -my-2">
+        <div className="flex flex-wrap items-center gap-2 sticky top-8 bg-background z-10 py-2 -my-2">
           <Select
             value={
               editor.isActive('heading', { level: 1 }) ? 'h1' :
@@ -1121,12 +1176,7 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
                     align="start"
                     sideOffset={4}
                   >
-                    <CollectionFieldSelector
-                      fieldGroups={textFieldGroups}
-                      allFields={allFields || {}}
-                      collections={collections || []}
-                      onSelect={handleFieldSelect}
-                    />
+                    {variablesDropdownInner}
                   </DropdownMenuContent>
                 )}
               </DropdownMenu>
@@ -1432,12 +1482,7 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
                 align="start"
                 sideOffset={4}
               >
-                <CollectionFieldSelector
-                  fieldGroups={textFieldGroups}
-                  allFields={allFields || {}}
-                  collections={collections || []}
-                  onSelect={handleFieldSelect}
-                />
+                {variablesDropdownInner}
               </DropdownMenuContent>
             )}
           </DropdownMenu>
@@ -1685,12 +1730,7 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
                 align="end"
                 sideOffset={4}
               >
-                <CollectionFieldSelector
-                  fieldGroups={textFieldGroups}
-                  allFields={allFields || {}}
-                  collections={collections || []}
-                  onSelect={handleFieldSelect}
-                />
+                {variablesDropdownInner}
               </DropdownMenuContent>
             )}
           </DropdownMenu>

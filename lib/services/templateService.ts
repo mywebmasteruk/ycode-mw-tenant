@@ -2,6 +2,7 @@ import { getKnexClient, closeKnexClient, testKnexConnection } from '../knex-clie
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { STORAGE_BUCKET, STORAGE_FOLDERS } from '@/lib/asset-constants';
 import { migrations } from '../migrations-loader';
+import { guardKnexForMigrationReplay } from '@/lib/migration-replay-guard';
 import { YCODE_EXTERNAL_API_URL } from '@/lib/config';
 
 /**
@@ -315,9 +316,12 @@ async function runPendingMigrationsForTemplate(
     return;
   }
 
+  // Destructive DDL is blocked: these up()s replay against live data.
+  const guardedKnex = guardKnexForMigrationReplay(knex);
+
   for (const migration of pendingMigrations) {
     try {
-      await migration.up(knex);
+      await migration.up(guardedKnex);
     } catch (error) {
       // Log the error but continue - migrations should be idempotent
       // Schema changes (ADD COLUMN IF NOT EXISTS) will no-op

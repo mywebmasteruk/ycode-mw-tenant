@@ -15,15 +15,19 @@
 
 import React, { useEffect, useCallback, useMemo, useRef, Suspense } from 'react';
 import dynamic from 'next/dynamic';
-import type { Layer, Locale, FormSettings, Component, DesignColorVariable, PasswordProtectionContext } from '@/types';
-import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextContentLayer, getCollectionVariable, filterDisabledSliderLayers } from '@/lib/layer-utils';
+import type { Layer, Locale, FormSettings, Component, DesignColorVariable, PasswordProtectionContext, DynamicTextVariable, DynamicRichTextVariable } from '@/types';
+import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextContentLayer, getCollectionVariable, filterDisabledSliderLayers, applyCustomAttributes } from '@/lib/layer-utils';
 import { getMapIframeProps, DEFAULT_MAP_SETTINGS, resolveMarkerColor } from '@/lib/map-utils';
+import { HTML_TO_REACT_ATTRS } from '@/lib/parse-head-html';
 import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
 import { getDynamicTextContent, getImageUrlFromVariable, getVideoUrlFromVariable, getIframeUrlFromVariable, isFieldVariable, isAssetVariable, isStaticTextVariable, isDynamicTextVariable, getStaticTextContent, getAssetId, resolveDesignStyles } from '@/lib/variable-utils';
 import { getTranslatedAssetId, getTranslatedText } from '@/lib/locale-runtime';
-import { isValidLinkSettings, generateLinkHref, resolveLinkAttrs, isLinkAtCollectionBoundary, type LinkResolutionContext } from '@/lib/link-utils';
-import { DEFAULT_ASSETS, buildImageSizes, generateImageSrcset, getOptimizedImageUrl, parseImageDimension } from '@/lib/asset-utils';
+import { isValidLinkSettings, generateLinkHref, resolveLinkAttrs, isLinkAtCollectionBoundary, isLinkToCurrentPage, type LinkResolutionContext } from '@/lib/link-utils';
+import { DEFAULT_ASSETS, buildImageSizes, generateImageSrcset, getOptimizedImageUrl, getSvgAspectRatioStyle, parseImageDimension } from '@/lib/asset-utils';
 import { resolveInlineVariablesFromData } from '@/lib/inline-variables';
+import { getPaginationLayerKind, paginationTextVariableToTemplate, resolvePaginationTextVariable } from '@/lib/pagination-text-utils';
+import { mergeGlobalsIntoFieldData, type GlobalFieldMeta } from '@/lib/collection-field-utils';
+import { extractPlainTextFromTiptap } from '@/lib/tiptap-utils';
 import { renderRichText, hasBlockElementsWithInlineVariables, getTextStyleClasses, flattenTiptapParagraphs, type RichTextLinkContext, type RenderComponentBlockFn } from '@/lib/text-format-utils';
 import { combineBgValues, mergeStaticBgVars } from '@/lib/tailwind-class-mapper';
 import { clsx } from 'clsx';
@@ -96,6 +100,8 @@ interface LayerRendererPublicProps {
   currentLocale?: Locale | null;
   availableLocales?: Locale[];
   localeSelectorFormat?: 'locale' | 'code';
+  /** Pre-computed relative URLs per locale ID (translated slugs) for the locale selector. */
+  localizedPageUrls?: Record<string, string>;
   isInsideForm?: boolean;
   isInsideLink?: boolean;
   parentFormSettings?: FormSettings;
@@ -110,6 +116,10 @@ interface LayerRendererPublicProps {
   ancestorComponentIds?: Set<string>;
   isSlideChild?: boolean;
   serverSettings?: Record<string, unknown>;
+  /** Site-wide global variables (id -> value), merged into field resolution. */
+  globalsData?: Record<string, string>;
+  /** Site-wide global variable metadata (id -> type/name), used for render-time type resolution. */
+  globalsMeta?: Record<string, GlobalFieldMeta>;
   /**
    * Layer id of the LCP candidate image, detected server-side. When this image
    * is rendered we override the template's default `loading="lazy"` with
@@ -139,6 +149,7 @@ const LayerRendererPublic: React.FC<LayerRendererPublicProps> = ({
   currentLocale,
   availableLocales = [],
   localeSelectorFormat,
+  localizedPageUrls,
   isInsideForm = false,
   isInsideLink = false,
   parentFormSettings,
@@ -152,6 +163,8 @@ const LayerRendererPublic: React.FC<LayerRendererPublicProps> = ({
   ancestorComponentIds,
   isSlideChild: isSlideChildProp,
   serverSettings,
+  globalsData,
+  globalsMeta,
   lcpCandidateLayerId,
   passwordProtection,
 }) => {
@@ -211,6 +224,7 @@ const LayerRendererPublic: React.FC<LayerRendererPublicProps> = ({
               sortByInputLayerId={layer._filterConfig!.sortByInputLayerId}
               sortOrderInputLayerId={layer._filterConfig!.sortOrderInputLayerId}
               limit={layer._filterConfig!.limit}
+              maxTotal={layer._filterConfig!.maxTotal}
               paginationMode={layer._filterConfig!.paginationMode}
               layerTemplate={layer._filterConfig!.layerTemplate}
               collectionLayerClasses={layer._filterConfig!.collectionLayerClasses}
@@ -252,6 +266,7 @@ const LayerRendererPublic: React.FC<LayerRendererPublicProps> = ({
         currentLocale={currentLocale}
         availableLocales={availableLocales}
         localeSelectorFormat={localeSelectorFormat}
+        localizedPageUrls={localizedPageUrls}
         isInsideForm={isInsideForm}
         isInsideLink={isInsideLink}
         parentFormSettings={parentFormSettings}
@@ -266,6 +281,8 @@ const LayerRendererPublic: React.FC<LayerRendererPublicProps> = ({
         ancestorComponentIds={ancestorComponentIds}
         isSlideChild={isSlideChildProp}
         serverSettings={serverSettings}
+        globalsData={globalsData}
+        globalsMeta={globalsMeta}
         lcpCandidateLayerId={lcpCandidateLayerId}
         passwordProtection={passwordProtection}
       />
@@ -294,6 +311,7 @@ const LayerItem: React.FC<{
   currentLocale?: Locale | null;
   availableLocales?: Locale[];
   localeSelectorFormat?: 'locale' | 'code';
+  localizedPageUrls?: Record<string, string>;
   isInsideForm?: boolean;
   isInsideLink?: boolean;
   parentFormSettings?: FormSettings;
@@ -308,6 +326,8 @@ const LayerItem: React.FC<{
   ancestorComponentIds?: Set<string>;
   isSlideChild?: boolean;
   serverSettings?: Record<string, unknown>;
+  globalsData?: Record<string, string>;
+  globalsMeta?: Record<string, GlobalFieldMeta>;
   lcpCandidateLayerId?: string | null;
   passwordProtection?: PasswordProtectionContext;
 }> = ({
@@ -324,6 +344,7 @@ const LayerItem: React.FC<{
   currentLocale,
   availableLocales,
   localeSelectorFormat,
+  localizedPageUrls,
   isInsideForm = false,
   isInsideLink = false,
   parentFormSettings,
@@ -338,12 +359,20 @@ const LayerItem: React.FC<{
   ancestorComponentIds,
   isSlideChild,
   serverSettings,
+  globalsData,
+  globalsMeta,
   lcpCandidateLayerId,
   passwordProtection,
 }) => {
   const classesString = getClassesString(layer);
   const collectionLayerItemId = layer._collectionItemId || collectionItemId;
-  const collectionLayerData = layer._collectionItemValues || collectionItemData;
+  const baseCollectionLayerData = layer._collectionItemValues || collectionItemData;
+  // Merge site-wide globals into the collection data map so global-source
+  // bindings resolve anywhere (global ids are unique UUIDs, no collisions).
+  const collectionLayerData = React.useMemo(
+    () => mergeGlobalsIntoFieldData(baseCollectionLayerData, globalsData),
+    [baseCollectionLayerData, globalsData]
+  );
   const effectiveLayerDataMap = React.useMemo(() => ({
     ...layerDataMap,
     ...(layer._layerDataMap || {}),
@@ -384,6 +413,7 @@ const LayerItem: React.FC<{
     currentLocale,
     availableLocales,
     localeSelectorFormat,
+    localizedPageUrls,
     isInsideForm,
     isInsideLink,
     parentFormSettings,
@@ -396,9 +426,11 @@ const LayerItem: React.FC<{
     resolvedAssets,
     components: componentsProp,
     serverSettings,
+    globalsData,
+    globalsMeta,
     lcpCandidateLayerId,
     passwordProtection,
-  }), [isPublished, pageId, collectionLayerData, collectionLayerItemId, effectiveLayerDataMap, pageCollectionItemId, pageCollectionItemData, pageCollectionSortedItemIds, hiddenLayerInfo, currentLocale, availableLocales, localeSelectorFormat, isInsideForm, isInsideLink, parentFormSettings, pages, folders, collectionItemSlugs, isPreview, translations, anchorMap, resolvedAssets, componentsProp, serverSettings, lcpCandidateLayerId, passwordProtection]);
+  }), [isPublished, pageId, collectionLayerData, collectionLayerItemId, effectiveLayerDataMap, pageCollectionItemId, pageCollectionItemData, pageCollectionSortedItemIds, hiddenLayerInfo, currentLocale, availableLocales, localeSelectorFormat, localizedPageUrls, isInsideForm, isInsideLink, parentFormSettings, pages, folders, collectionItemSlugs, isPreview, translations, anchorMap, resolvedAssets, componentsProp, serverSettings, globalsData, globalsMeta, lcpCandidateLayerId, passwordProtection]);
 
   const renderComponentBlock: RenderComponentBlockFn = useCallback(
     (comp, resolvedLayers, _overrides, key, innerAncestorIds) => {
@@ -434,7 +466,14 @@ const LayerItem: React.FC<{
 
   // Check if we need to override the tag for rich text with block elements
   // Tags like <p>, <h1>-<h6> cannot contain block elements like <ul>/<ol>
-  const textVariable = layer.variables?.text;
+  // Pagination count/info layers resolve their `pagination` inline variables to
+  // live numbers here (after translation injection), keeping the words editable.
+  const rawTextVariable = layer.variables?.text;
+  const paginationKind = getPaginationLayerKind(layer.id);
+  const paginationNumbers = layer._paginationNumbers;
+  const textVariable = (paginationKind && paginationNumbers && rawTextVariable)
+    ? resolvePaginationTextVariable(rawTextVariable as DynamicTextVariable | DynamicRichTextVariable, paginationNumbers)
+    : rawTextVariable;
   let useSpanForParagraphs = false;
 
   // Detect block-level expansion (lists, tables, headings, embedded components,
@@ -597,7 +636,7 @@ const LayerItem: React.FC<{
       const variable = shouldFlatten
         ? { ...textVariable, data: { ...textVariable.data, content: flattenTiptapParagraphs(textVariable.data.content) } }
         : textVariable;
-      return renderRichText(variable as any, collectionLayerData, pageCollectionItemData || undefined, layer.textStyles, useSpanForParagraphs, false, linkContext, timezone, effectiveLayerDataMap, allComponents, renderComponentBlock, effectiveAncestorIds, shouldFlatten);
+      return renderRichText(variable as any, collectionLayerData, pageCollectionItemData || undefined, layer.textStyles, useSpanForParagraphs, false, linkContext, timezone, effectiveLayerDataMap, allComponents, renderComponentBlock, effectiveAncestorIds, shouldFlatten, globalsMeta);
     }
 
     // Check for inline variables in DynamicTextVariable format (legacy)
@@ -644,8 +683,13 @@ const LayerItem: React.FC<{
     pageCollectionItemData
   );
 
-  // Get image alt text, resolve inline variables, and apply translation if available
-  const rawImageAlt = String(getDynamicTextContent(effectiveImageSettings?.alt) || 'Image');
+  // Get image alt text, resolve inline variables, and apply translation if available.
+  // Alt is an attribute and must be a plain string: if a Tiptap doc slips in
+  // (e.g. legacy data), extract its text instead of stringifying to "[object Object]".
+  const rawImageAltContent = getDynamicTextContent(effectiveImageSettings?.alt) as unknown;
+  const rawImageAlt = typeof rawImageAltContent === 'object' && rawImageAltContent !== null
+    ? (extractPlainTextFromTiptap(rawImageAltContent) || 'Image')
+    : String(rawImageAltContent || 'Image');
   const originalImageAlt = rawImageAlt.includes('<ycode-inline-variable>')
     ? resolveInlineVariablesFromData(rawImageAlt, collectionLayerData, pageCollectionItemData ?? undefined, timezone, effectiveLayerDataMap)
     : rawImageAlt;
@@ -673,30 +717,51 @@ const LayerItem: React.FC<{
     return filterDisabledSliderLayers(children, layer.settings);
   }, [layer.name, layer.settings, children]);
 
-  const subtreeHasInteractiveDescendants = useMemo(() => {
-    const interactiveTags = new Set(['a', 'button', 'input', 'select', 'textarea']);
+  // Detect descendants that can't live inside an <a> and can't be safely
+  // downgraded: real anchors, form controls, or anything with its own link.
+  // Plain <button>s are excluded — styling is class-driven, so inside a link we
+  // render them as <div> (see the isInsideLink downgrade below) instead of
+  // breaking the wrapping link.
+  const subtreeHasHardInteractive = useMemo(() => {
+    const hardTags = new Set(['a', 'input', 'select', 'textarea']);
 
     const visit = (nodes?: Layer[]): boolean => {
       if (!nodes?.length) return false;
-
       return nodes.some((node) => {
         if (!node) return false;
-
         const childTag = node.settings?.tag || node.name || 'div';
         const childHasLink = isValidLinkSettings(node.variables?.link);
-
-        return interactiveTags.has(childTag) || childHasLink || visit(node.children);
+        return hardTags.has(childTag) || childHasLink || visit(node.children);
       });
     };
 
     return visit(effectiveChildren);
   }, [effectiveChildren]);
 
-  // Browsers repair invalid interactive nesting (<a><button>, <a><a>, etc.)
-  // differently during SSR, which can cause hydration mismatches.
-  if (htmlTag === 'a' && subtreeHasInteractiveDescendants) {
+  // <a><button>/<a><a>/etc. is invalid HTML; browsers repair it differently
+  // during SSR, causing hydration mismatches. Plain buttons are downgraded to
+  // <div> (below), so we only fall back to a non-link <div> when the subtree
+  // contains hard interactive content that can't be downgraded.
+  if (htmlTag === 'a' && subtreeHasHardInteractive) {
     htmlTag = 'div';
   }
+
+  // Inside a link, render <button> as a styled <div> to keep the wrapping <a>
+  // valid (its appearance is driven by classes, not the button element).
+  if (isInsideLink && htmlTag === 'button') {
+    htmlTag = 'div';
+  }
+
+  // Container layers that aren't a div/button/<a> (e.g. an <article> or <section>
+  // with a link) wrap their content in <a class="contents">. Soft buttons inside
+  // are downgraded (children receive isInsideLink), so only hard interactive
+  // content blocks the wrap. Computed early so children render as inside-a-link.
+  const willWrapWithLink = !isButtonWithLink
+    && !isDivWithLink
+    && !isInsideLink
+    && htmlTag !== 'a'
+    && !subtreeHasHardInteractive
+    && isValidLinkSettings(layer.variables?.link);
 
   // Public renderer never needs the canvas slider hook; live sliders are
   // initialized by SliderInitializer (loaded only when slider layers exist).
@@ -747,6 +812,7 @@ const LayerItem: React.FC<{
   const layerLinkContext: LinkResolutionContext = {
     pages,
     folders,
+    pageId,
     collectionItemSlugs,
     collectionItemId: collectionLayerItemId,
     pageCollectionItemId,
@@ -766,13 +832,6 @@ const LayerItem: React.FC<{
     const Tag = htmlTag as any;
     const { style: attrStyle, ...otherAttributes } = effectiveLayer.attributes || {};
 
-    // Map HTML attributes to React JSX equivalents
-    const htmlToJsxAttrMap: Record<string, string> = {
-      'for': 'htmlFor',
-      'class': 'className',
-      'autofocus': 'autoFocus',
-    };
-
     // Convert string boolean values to actual booleans and map HTML attrs to JSX
     const normalizedAttributes = Object.fromEntries(
       Object.entries(otherAttributes)
@@ -783,7 +842,7 @@ const LayerItem: React.FC<{
         })
         .map(([key, value]) => {
           // Map HTML attribute names to JSX equivalents
-          const jsxKey = htmlToJsxAttrMap[key] || key;
+          const jsxKey = HTML_TO_REACT_ATTRS[key.toLowerCase()] || key;
 
           // If value is already a boolean, keep it
           if (typeof value === 'boolean') {
@@ -885,6 +944,9 @@ const LayerItem: React.FC<{
         const linkAttrs = resolveLinkAttrs(layer.variables.link, layerLinkContext);
         if (linkAttrs) {
           Object.assign(elementProps, linkAttrs);
+          if (isLinkToCurrentPage(layer.variables.link, layerLinkContext, linkAttrs.href)) {
+            elementProps['aria-current'] = 'page';
+          }
         } else if (isLinkAtCollectionBoundary(layer.variables.link, layerLinkContext)) {
           elementProps['aria-disabled'] = 'true';
           elementProps['data-link-disabled'] = 'true';
@@ -955,11 +1017,16 @@ const LayerItem: React.FC<{
       elementProps.id = layer.attributes.id;
     }
 
-    // Apply custom attributes from settings
+    // Apply custom attributes from settings (map HTML attr names to JSX equivalents)
     if (layer.settings?.customAttributes) {
-      Object.entries(layer.settings.customAttributes).forEach(([name, value]) => {
-        elementProps[name] = value;
-      });
+      applyCustomAttributes(elementProps, layer.settings.customAttributes);
+    }
+
+    // Pagination count/info layers: expose the (translated) template so the
+    // client runtime can re-resolve the numbers after load-more/filter/page nav.
+    if (paginationKind && paginationNumbers) {
+      const template = paginationTextVariableToTemplate(rawTextVariable);
+      if (template) elementProps['data-pagination-template'] = template;
     }
 
     // Select with placeholder: set defaultValue so React shows the placeholder option
@@ -1339,10 +1406,17 @@ const LayerItem: React.FC<{
         iconHtml = DEFAULT_ASSETS.ICON;
       }
 
+      // Derive aspect-ratio from the SVG viewBox so an icon with only one of
+      // width/height set resolves the missing axis to its true proportions
+      // instead of collapsing. Inert when both dimensions are explicitly set.
+      const iconAspectRatio = getSvgAspectRatioStyle(iconHtml);
+      const iconElementStyle = (typeof elementProps.style === 'object' && elementProps.style) || undefined;
+
       return (
         <Tag
           {...elementProps}
           data-icon="true"
+          style={iconAspectRatio ? { aspectRatio: iconAspectRatio, ...iconElementStyle } : iconElementStyle}
           dangerouslySetInnerHTML={{ __html: iconHtml }}
         />
       );
@@ -1467,11 +1541,9 @@ const LayerItem: React.FC<{
             iframeProps.id = layer.attributes.id;
           }
 
-          // Apply custom attributes from settings
+          // Apply custom attributes from settings (map HTML attr names to JSX equivalents)
           if (layer.settings?.customAttributes) {
-            Object.entries(layer.settings.customAttributes).forEach(([name, value]) => {
-              iframeProps[name] = value;
-            });
+            applyCustomAttributes(iframeProps, layer.settings.customAttributes);
           }
 
           return (
@@ -1664,6 +1736,7 @@ const LayerItem: React.FC<{
               currentLocale={currentLocale}
               availableLocales={availableLocales}
               localeSelectorFormat={localeSelectorFormat}
+              localizedPageUrls={localizedPageUrls}
               isInsideForm={isInsideForm}
               isInsideLink={isInsideLink}
               parentFormSettings={parentFormSettings}
@@ -1714,7 +1787,7 @@ const LayerItem: React.FC<{
               {...sharedRendererProps}
               localeSelectorFormat={format}
               isInsideForm={isInsideForm || htmlTag === 'form'}
-              isInsideLink={isInsideLink || htmlTag === 'a'}
+              isInsideLink={isInsideLink || htmlTag === 'a' || willWrapWithLink}
               parentFormSettings={htmlTag === 'form' ? layer.settings?.form : parentFormSettings}
               ancestorComponentIds={effectiveAncestorIds}
             />
@@ -1726,6 +1799,7 @@ const LayerItem: React.FC<{
             availableLocales={availableLocales}
             currentPageSlug={currentPageSlug}
             isPublished={isPublished}
+            localizedPageUrls={localizedPageUrls}
           />
         </Tag>
       );
@@ -1741,7 +1815,7 @@ const LayerItem: React.FC<{
             layers={effectiveChildren}
             {...sharedRendererProps}
             isInsideForm={isInsideForm || htmlTag === 'form'}
-            isInsideLink={isInsideLink || htmlTag === 'a'}
+            isInsideLink={isInsideLink || htmlTag === 'a' || willWrapWithLink}
             parentFormSettings={htmlTag === 'form' ? layer.settings?.form : parentFormSettings}
             ancestorComponentIds={effectiveAncestorIds}
             isSlideChild={layer.name === 'slides'}
@@ -1773,12 +1847,7 @@ const LayerItem: React.FC<{
   // Skip for buttons/divs — they render as <a> directly (see isButtonWithLink, isDivWithLink)
   // Skip for <a> layers — they already render as <a> and nesting <a> inside <a> is invalid HTML
   const linkSettings = layer.variables?.link;
-  const shouldWrapWithLink = !isButtonWithLink
-    && !isDivWithLink
-    && !isInsideLink
-    && htmlTag !== 'a'
-    && !subtreeHasInteractiveDescendants
-    && isValidLinkSettings(linkSettings);
+  const shouldWrapWithLink = willWrapWithLink;
 
   if (shouldWrapWithLink && linkSettings) {
     const linkAttrs = resolveLinkAttrs(linkSettings, layerLinkContext);
@@ -1786,6 +1855,7 @@ const LayerItem: React.FC<{
       content = (
         <a
           {...linkAttrs}
+          {...(isLinkToCurrentPage(linkSettings, layerLinkContext, linkAttrs.href) ? { 'aria-current': 'page' } : {})}
           className="contents"
         >
           {content}

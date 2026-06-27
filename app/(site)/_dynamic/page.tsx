@@ -22,11 +22,17 @@ export default async function DynamicHome({ searchParams }: DynamicHomeProps) {
   const pageNumbers: Record<string, number> = {};
   for (const [key, value] of Object.entries(resolvedSearchParams)) {
     if (key.startsWith('p_') && typeof value === 'string') {
-      const strippedId = key.slice(2);
-      const layerId = strippedId.startsWith('lyr-') ? strippedId : `lyr-${strippedId}`;
       const pageNum = parseInt(value, 10);
       if (!isNaN(pageNum) && pageNum >= 1) {
-        pageNumbers[layerId] = pageNum;
+        // The `p_` param carries the layer id with its `lyr-` prefix stripped.
+        // Native cloud layers are `lyr-`-prefixed, but migrated (legacy) layers
+        // use bare uids — register both forms so `resolveCollectionLayers`,
+        // which looks up `pageNumbers[layer.id]`, matches whichever the layer
+        // actually uses (otherwise the page number is dropped and the list
+        // always renders page 1).
+        const bareId = key.slice(2).replace(/^lyr-/, '');
+        pageNumbers[bareId] = pageNum;
+        pageNumbers[`lyr-${bareId}`] = pageNum;
       }
     }
   }

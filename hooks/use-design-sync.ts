@@ -622,6 +622,9 @@ function mapClassToDesignValue(className: string, property: string): string | un
       'transition-transform': 'transform',
       'transition-none': 'none',
     },
+    overflow: {
+      'truncate': 'ellipsis',
+    },
   };
 
   if (fullClassMappings[property]?.[cleanClass]) {

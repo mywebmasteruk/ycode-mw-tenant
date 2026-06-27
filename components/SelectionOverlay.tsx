@@ -113,17 +113,13 @@ export function SelectionOverlay({
     const iframeRect = iframeElement.getBoundingClientRect();
     const containerRect = containerElement.getBoundingClientRect();
 
-    // Derive the scale that maps the iframe's INNER coordinate space (where
-    // element rects are measured) to OUTER screen pixels, instead of trusting
-    // zoom/100. The canvas is scaled with CSS `zoom` on a wrapper, and Safari
-    // propagates that zoom into the iframe's own getBoundingClientRect/offset
-    // measurements (so inner rects come back already scaled), while
-    // Chrome/Firefox report inner rects unscaled. Comparing the painted iframe
-    // width to the inner root width — both via getBoundingClientRect — yields
-    // the correct multiplier in every browser (≈zoom in Chrome, ≈1 in Safari)
-    // and prevents the double-scaling that pushed outlines off on Safari.
-    const innerRootWidth = iframeDoc.documentElement.getBoundingClientRect().width;
-    const effectiveScale = innerRootWidth > 0 ? iframeRect.width / innerRootWidth : scale;
+    // The canvas is scaled with `transform: scale()` on a wrapper, so inner
+    // element rects (measured via getBoundingClientRect inside the iframe) are
+    // reported in the iframe's own unscaled layout coordinates in every browser.
+    // Multiplying by the scale factor (`scale` = zoom/100) maps them to on-screen
+    // pixels. NOTE: do NOT derive the multiplier from iframeRect.width /
+    // innerRootWidth — the iframe element width (canvas width) and the content
+    // layout width can differ, which over-scaled outlines on Safari.
 
     // Ensure we have the right number of child outline divs
     while (container.children.length < targetElements.length) {
@@ -151,10 +147,10 @@ export function SelectionOverlay({
         height = iframeRect.height;
       } else {
         const elementRect = targetElement.getBoundingClientRect();
-        top = iframeRect.top - containerRect.top + (elementRect.top * effectiveScale);
-        left = iframeRect.left - containerRect.left + (elementRect.left * effectiveScale);
-        width = elementRect.width * effectiveScale;
-        height = elementRect.height * effectiveScale;
+        top = iframeRect.top - containerRect.top + (elementRect.top * scale);
+        left = iframeRect.left - containerRect.left + (elementRect.left * scale);
+        width = elementRect.width * scale;
+        height = elementRect.height * scale;
       }
 
       child.className = `absolute ${outlineClass}`;
@@ -217,9 +213,20 @@ export function SelectionOverlay({
     updateOutline(parentContainerRef.current, effectiveParentId, ctx.iframeDoc, ctx.iframeElement, ctx.containerElement, ctx.scale, PARENT_OUTLINE_CLASS);
   }, [getOutlineContext, hideAllOutlines, selectedLayerId, parentLayerId, updateOutline, activeSublayerIndex, activeListItemIndex, SELECTED_OUTLINE_CLASS, HOVERED_OUTLINE_CLASS, PARENT_OUTLINE_CLASS]);
 
-  // Initial update and updates when IDs change
+  // Initial update and updates when IDs change. Selecting a layer can reveal a
+  // previously hidden ancestor (display:none → visible) in the iframe's separate
+  // React root, which commits a frame or two after this effect runs — so the
+  // first measurement would land on the element's stale (hidden) rect. Re-run on
+  // the next frame and once more shortly after so the outline tracks the revealed
+  // element.
   useEffect(() => {
     updateAllOutlines();
+    const rafId = requestAnimationFrame(() => updateAllOutlines());
+    const timeoutId = setTimeout(() => updateAllOutlines(), 120);
+    return () => {
+      cancelAnimationFrame(rafId);
+      clearTimeout(timeoutId);
+    };
   }, [updateAllOutlines]);
 
   // Subscribe to hoveredLayerId changes without re-rendering. Uses a
@@ -336,6 +343,12 @@ export function SelectionOverlay({
     if (iframeDoc.body) {
       resizeObserver.observe(iframeDoc.body);
     }
+    // Also observe the iframe element itself. In component-edit mode the canvas
+    // is vertically centered and its height tracks content, so revealing/hiding
+    // a block resizes and re-centers the iframe — shifting every element's
+    // on-screen position. Observing the element catches that move so outlines
+    // re-measure to the new position (not just the body's internal size).
+    resizeObserver.observe(iframeElement);
 
     // Hide outlines during viewport switch, show after transition settles
     let viewportTimeout: ReturnType<typeof setTimeout> | null = null;

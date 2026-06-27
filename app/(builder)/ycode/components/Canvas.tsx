@@ -18,7 +18,7 @@ import { createRoot, Root } from 'react-dom/client';
 import LayerRenderer from '@/components/LayerRenderer';
 import { serializeLayers, getClassesString } from '@/lib/layer-utils';
 import { collectEditorHiddenLayerIds } from '@/lib/animation-utils';
-import { getCanvasIframeHtml, updateViewportOverrides, measureContentExtent } from '@/lib/canvas-utils';
+import { getCanvasIframeHtml, updateViewportOverrides, measureContentExtent, isNonContentLayer } from '@/lib/canvas-utils';
 import { CanvasPortalProvider } from '@/lib/canvas-portal-context';
 import { cn } from '@/lib/utils';
 import { loadSwiperCss } from '@/lib/slider-utils';
@@ -30,7 +30,7 @@ import { useColorVariablesStore } from '@/stores/useColorVariablesStore';
 import { usePagesStore } from '@/stores/usePagesStore';
 import { useSettingsStore } from '@/stores/useSettingsStore';
 
-import { injectTranslatedText, translateComponentOverrides } from '@/lib/localisation-utils';
+import { applyCmsTranslations, injectTranslatedText, translateComponentOverrides } from '@/lib/localisation-utils';
 
 import type { Layer, Component, CollectionItemWithValues, CollectionField, Breakpoint, Asset, ComponentVariable, Locale, Translation } from '@/types';
 import type { UseLiveLayerUpdatesReturn } from '@/hooks/use-live-layer-updates';
@@ -381,13 +381,21 @@ const Canvas = React.memo(function Canvas({
   const enrichedPageCollectionItemDataRaw = useMemo(() => {
     const values = pageCollectionItem?.values;
     if (!values || !pageCollectionFields?.length) return values || null;
+    // Translate referenced item values so relationship paths render in the
+    // active locale on canvas (matches server-side page fetcher).
+    const translateRefValues = (currentLocale && !currentLocale.is_default && translations)
+      ? (refItemId: string, refValues: Record<string, string>, refFields: CollectionField[]) =>
+        applyCmsTranslations(refItemId, refValues, refFields, translations, { includeIncomplete: true })
+      : undefined;
     return resolveReferenceFieldsSync(
       values,
       pageCollectionFields,
       collectionItems,
-      collectionFields
+      collectionFields,
+      new Set(),
+      translateRefValues
     );
-  }, [pageCollectionItem?.values, pageCollectionFields, collectionItems, collectionFields]);
+  }, [pageCollectionItem?.values, pageCollectionFields, collectionItems, collectionFields, currentLocale, translations]);
 
   const enrichedPageCollectionItemDataRef = useRef(enrichedPageCollectionItemDataRaw);
   const enrichedPageCollectionItemDataKeyRef = useRef('');
@@ -401,7 +409,11 @@ const Canvas = React.memo(function Canvas({
   }, [enrichedPageCollectionItemDataRaw]);
 
   // Collect layer IDs that should be hidden on canvas (display: hidden with on-load)
-  // Exclude layers that are force-visible (targets of the active interaction)
+  // Exclude layers that are force-visible (targets of the active interaction).
+  // NOTE: this must NOT depend on selectedLayerId — it's a dependency of the
+  // iframe root.render() effect, so adding selection here forces a full (slow)
+  // iframe re-render on every click. Reveal-on-select is handled reactively
+  // inside LayerRenderer instead.
   const editorHiddenLayerIds = useMemo(() => {
     const hiddenMap = collectEditorHiddenLayerIds(resolvedLayers);
     if (forceVisibleLayerIds && forceVisibleLayerIds.length > 0) {
@@ -823,13 +835,19 @@ const Canvas = React.memo(function Canvas({
         const canvasBody = doc.getElementById('canvas-body');
         if (canvasBody && canvasBody.children.length > 0) {
           const bodyRect = body.getBoundingClientRect();
+          const win = doc.defaultView;
           let maxChildWidth = 0;
           let maxChildBottom = 0;
 
           const allLayers = canvasBody.querySelectorAll('[data-layer-id]');
           allLayers.forEach(el => {
-            const rect = (el as HTMLElement).getBoundingClientRect();
+            const node = el as HTMLElement;
+            const rect = node.getBoundingClientRect();
             if (rect.width === 0 && rect.height === 0) return;
+            // Ignore fixed overlays/backdrops (e.g. `fixed h-full`) — they track
+            // the iframe height and would balloon the canvas. Revealed dropdowns
+            // keep a real rect and are measured so the height recalculates.
+            if (win && isNonContentLayer(node, win)) return;
             maxChildWidth = Math.max(maxChildWidth, rect.right - bodyRect.left);
             maxChildBottom = Math.max(maxChildBottom, rect.bottom - bodyRect.top);
           });

@@ -104,6 +104,13 @@ const OBJECT_FIT_MAP: Record<string, string> = {
   contain: 'object-contain', cover: 'object-cover', fill: 'object-fill',
   none: 'object-none', 'scale-down': 'object-scale-down',
 };
+const OBJECT_POSITION_MAP: Record<string, string> = {
+  top: 'object-top', bottom: 'object-bottom', left: 'object-left', right: 'object-right',
+  center: 'object-center', 'left top': 'object-left-top', 'top left': 'object-left-top',
+  'right top': 'object-right-top', 'top right': 'object-right-top',
+  'left bottom': 'object-left-bottom', 'bottom left': 'object-left-bottom',
+  'right bottom': 'object-right-bottom', 'bottom right': 'object-right-bottom',
+};
 const BORDER_STYLE_VALUES = new Set(['solid', 'dashed', 'dotted', 'double', 'none']);
 const SIDE_ABBR: Record<string, string> = { top: 't', right: 'r', bottom: 'b', left: 'l' };
 
@@ -145,13 +152,14 @@ function mapDeclaration(prop: string, val: string): string[] {
                             prop === 'overflow' ? OVERFLOW_MAP[val] :
                               prop === 'cursor' ? CURSOR_MAP[val] :
                                 prop === 'object-fit' ? OBJECT_FIT_MAP[val] :
-                                  prop === 'font-style' && val === 'italic' ? 'italic' :
-                                    prop === 'font-style' && val === 'normal' ? 'not-italic' :
-                                      prop === 'pointer-events' && val === 'none' ? 'pointer-events-none' :
-                                        prop === 'pointer-events' && val === 'auto' ? 'pointer-events-auto' :
-                                          prop === 'word-break' && val === 'break-all' ? 'break-all' :
-                                            prop === 'overflow-wrap' && val === 'break-word' ? 'break-words' :
-                                              null;
+                                  prop === 'object-position' ? OBJECT_POSITION_MAP[val] :
+                                    prop === 'font-style' && val === 'italic' ? 'italic' :
+                                      prop === 'font-style' && val === 'normal' ? 'not-italic' :
+                                        prop === 'pointer-events' && val === 'none' ? 'pointer-events-none' :
+                                          prop === 'pointer-events' && val === 'auto' ? 'pointer-events-auto' :
+                                            prop === 'word-break' && val === 'break-all' ? 'break-all' :
+                                              prop === 'overflow-wrap' && val === 'break-word' ? 'break-words' :
+                                                null;
 
   if (mapped) { out.push(mapped); return out; }
 

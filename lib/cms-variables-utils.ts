@@ -10,6 +10,7 @@ import { isDateFieldType } from '@/lib/collection-field-utils';
 import { formatDateInTimezone } from '@/lib/date-format-utils';
 import { extractPlainTextFromTiptap } from '@/lib/tiptap-utils';
 import { formatDateWithPreset, formatNumberWithPreset } from '@/lib/variable-format-utils';
+import { PAGINATION_VARIABLE_LABELS } from '@/lib/pagination-text-utils';
 
 /**
  * Format a field value for display based on field type
@@ -98,8 +99,16 @@ export function resolveFieldFromSources(
   collectionItemData?: Record<string, string>,
   pageCollectionItemData?: Record<string, string> | null,
   collectionLayerId?: string,
-  layerDataMap?: Record<string, Record<string, string>>
+  layerDataMap?: Record<string, Record<string, string>>,
+  globalsData?: Record<string, string>
 ): string | undefined {
+  // Global source - site-wide variable, independent of collection/page context.
+  // Renderers merge globals into collectionItemData, so fall back to it when an
+  // explicit globalsData map isn't threaded.
+  if (source === 'global') {
+    return globalsData?.[fieldId] ?? collectionItemData?.[fieldId] ?? pageCollectionItemData?.[fieldId] ?? undefined;
+  }
+
   // Page source - use page data only
   if (source === 'page') {
     return pageCollectionItemData?.[fieldId];
@@ -162,6 +171,9 @@ export function getVariableLabel(
     }
 
     return rootField?.name || '[Deleted Field]';
+  }
+  if (variable.type === 'pagination' && variable.data?.key) {
+    return PAGINATION_VARIABLE_LABELS[variable.data.key] || 'Pagination';
   }
   return variable.type;
 }

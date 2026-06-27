@@ -33,6 +33,7 @@ import {
 } from '@/components/ui/empty';
 
 // 4. Hooks
+import { useCanvasPan } from '@/hooks/use-canvas-pan';
 import { useEditorUrl } from '@/hooks/use-editor-url';
 import { useEditComponent } from '@/hooks/use-edit-component';
 import { useZoom } from '@/hooks/use-zoom';
@@ -44,6 +45,7 @@ import { useEditorStore } from '@/stores/useEditorStore';
 import { usePagesStore } from '@/stores/usePagesStore';
 import { useComponentsStore } from '@/stores/useComponentsStore';
 import { useCollectionsStore } from '@/stores/useCollectionsStore';
+import { useGlobalsStore } from '@/stores/useGlobalsStore';
 import { useCollectionLayerStore } from '@/stores/useCollectionLayerStore';
 import { useLocalisationStore } from '@/stores/useLocalisationStore';
 import { useAssetsStore } from '@/stores/useAssetsStore';
@@ -66,6 +68,7 @@ import { getCollectionVariable, canDeleteLayer, findLayerById, findParentCollect
 import { CANVAS_BORDER, CANVAS_PADDING, updateViewportOverrides } from '@/lib/canvas-utils';
 import { BREAKPOINTS } from '@/lib/breakpoint-utils';
 import { buildFieldGroupsForLayer, flattenFieldGroups, filterFieldGroupsByType, SIMPLE_TEXT_FIELD_TYPES } from '@/lib/collection-field-utils';
+import { getPaginationLayerKind, PAGINATION_VARIABLE_LABELS, type PaginationVariableKey } from '@/lib/pagination-text-utils';
 import { buildFieldVariableData } from '@/lib/variable-format-utils';
 import { getRichTextValue } from '@/lib/tiptap-utils';
 import { DropContainerIndicator, DropLineIndicator } from '@/components/DropIndicators';
@@ -77,7 +80,7 @@ import { setDragCursor, clearDragCursor } from '@/lib/drag-cursor';
 import type { Layer, Page, CollectionField, Asset } from '@/types';
 import {
   DropdownMenu,
-  DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuShortcut,
+  DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuShortcut,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu';
 import {
@@ -167,6 +170,9 @@ function ViewportZoomControls({
           avoidCollisions={false}
           collisionPadding={0}
           className="max-h-75! w-38"
+          // Don't return focus to the trigger on close, otherwise pressing Space
+          // (the pan shortcut) re-activates the focused button and reopens this menu.
+          onCloseAutoFocus={(e) => e.preventDefault()}
         >
           <DropdownMenuItem onClick={onZoomIn}>
             Zoom in
@@ -593,6 +599,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
   const previewContainerRef = useRef<HTMLDivElement>(null);
   const [previewContentHeight, setPreviewContentHeight] = useState(0);
   const [previewContainerHeight, setPreviewContainerHeight] = useState(0);
+  const [previewContainerWidth, setPreviewContainerWidth] = useState(0);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // State for iframe element (for SelectionOverlay)
@@ -608,6 +615,12 @@ const CenterCanvas = React.memo(function CenterCanvas({
 
   // Track whether zoom calculation is ready (prevents flash of wrong zoom on initial load)
   const [isCanvasReady, setIsCanvasReady] = useState(false);
+
+  // Hide the component canvas while its auto-zoom settles. Opening a component
+  // runs several measurement passes (width/height) that each re-fit the zoom;
+  // revealing only after dimensions hold steady avoids a visible size jump.
+  const [isComponentCanvasSettling, setIsComponentCanvasSettling] = useState(false);
+  const componentSettleTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Optimize store subscriptions - use selective selectors (scoped to current page only)
   const currentDraft = usePagesStore((state) => currentPageId ? state.draftsByPageId[currentPageId] : null);
@@ -714,9 +727,27 @@ const CenterCanvas = React.memo(function CenterCanvas({
     setReportedContentWidth(0);
   }, [editingComponentId]);
 
+  // On component open, hide the canvas so the initial multi-pass auto-zoom isn't
+  // visible. Only keyed on editingComponentId — NOT on dimensions — so reveals
+  // during normal editing don't re-hide and blink the canvas.
+  useEffect(() => {
+    setIsComponentCanvasSettling(!!editingComponentId);
+  }, [editingComponentId]);
+
+  // While settling (just opened), reveal once measured dimensions hold steady
+  // (debounced). Runs only while settling, so editing-time dimension changes
+  // don't trigger it. Fires even with no change via the settling dependency.
+  useEffect(() => {
+    if (!editingComponentId || !isComponentCanvasSettling) return;
+    clearTimeout(componentSettleTimerRef.current);
+    componentSettleTimerRef.current = setTimeout(() => setIsComponentCanvasSettling(false), 200);
+    return () => clearTimeout(componentSettleTimerRef.current);
+  }, [editingComponentId, isComponentCanvasSettling, reportedContentWidth, reportedContentHeight]);
+
   const collectionItemsFromStore = useCollectionsStore((state) => state.items);
   const collectionsFromStore = useCollectionsStore((state) => state.collections);
   const collectionFieldsFromStore = useCollectionsStore((state) => state.fields);
+  const globalsFromStore = useGlobalsStore((state) => state.globals);
 
   // Collection layer store for independent layer data
   const referencedItems = useCollectionLayerStore((state) => state.referencedItems);
@@ -824,6 +855,14 @@ const CenterCanvas = React.memo(function CenterCanvas({
     shortcutsEnabled: !isPreviewMode,
   });
 
+  // Pan the canvas by dragging while holding Space or with the middle mouse button
+  const { isPanGestureActive } = useCanvasPan({
+    scrollContainerRef,
+    iframeElement: canvasIframeElement,
+    enabled: !isPreviewMode,
+    isTextEditing,
+  });
+
   // Independent zoom for the preview (second useZoom instance, active only in preview mode)
   const previewContentWidth = parseInt(viewportSizes[viewportMode].width);
   const {
@@ -867,6 +906,19 @@ const CenterCanvas = React.memo(function CenterCanvas({
     if (!previewContainerHeight || previewZoom <= 0) return 0;
     return (previewContainerHeight - CANVAS_PADDING) / (previewZoom / 100);
   }, [previewContainerHeight, previewZoom]);
+
+  // Natural (unscaled) width of the preview iframe — its true layout viewport.
+  // Mirrors the previous `width: '100%' (minWidth: viewport)` vs fixed-width
+  // logic, but as a concrete pixel value so the iframe can be scaled with
+  // `transform` instead of CSS `zoom`. In desktop autofit the preview fills the
+  // available container width (but never below the desktop breakpoint); other
+  // modes use the exact breakpoint width.
+  const previewStageWidth = useMemo(() => {
+    if (viewportMode === 'desktop' && previewZoomMode === 'autofit') {
+      return Math.max(previewContainerWidth - CANVAS_PADDING, previewContentWidth);
+    }
+    return previewContentWidth;
+  }, [viewportMode, previewZoomMode, previewContainerWidth, previewContentWidth]);
 
   const previewObserverRef = useRef<ResizeObserver | null>(null);
 
@@ -1135,7 +1187,10 @@ const CenterCanvas = React.memo(function CenterCanvas({
     const container = previewContainerRef.current;
     if (!container) return;
 
-    const update = () => setPreviewContainerHeight(container.clientHeight);
+    const update = () => {
+      setPreviewContainerHeight(container.clientHeight);
+      setPreviewContainerWidth(container.clientWidth);
+    };
     update();
     const resizeObserver = new ResizeObserver(update);
     resizeObserver.observe(container);
@@ -1330,13 +1385,21 @@ const CenterCanvas = React.memo(function CenterCanvas({
     }
     if (!layers.length) return undefined;
     const page = editingComponentId ? null : currentPage;
-    return buildFieldGroupsForLayer(editingLayerId, layers, page, collectionFieldsFromStore, collectionsFromStore);
-  }, [editingLayerId, editingComponentId, activeComponentVariantId, componentDrafts, currentPageId, currentDraft, currentPage, collectionFieldsFromStore, collectionsFromStore]);
+    return buildFieldGroupsForLayer(editingLayerId, layers, page, collectionFieldsFromStore, collectionsFromStore, globalsFromStore);
+  }, [editingLayerId, editingComponentId, activeComponentVariantId, componentDrafts, currentPageId, currentDraft, currentPage, collectionFieldsFromStore, collectionsFromStore, globalsFromStore]);
 
   const textFieldGroups = useMemo(
     () => filterFieldGroupsByType(fieldGroups, SIMPLE_TEXT_FIELD_TYPES),
     [fieldGroups],
   );
+
+  // Pagination count/info layers expose dynamic number variables to insert.
+  const paginationVariableKeys = useMemo<PaginationVariableKey[]>(() => {
+    const kind = getPaginationLayerKind(editingLayerId);
+    if (kind === 'count') return ['shown', 'total'];
+    if (kind === 'info') return ['current', 'pages'];
+    return [];
+  }, [editingLayerId]);
 
   // Create assets map for Canvas (asset ID -> asset)
   const assetsMap = useMemo(() => {
@@ -1349,12 +1412,17 @@ const CenterCanvas = React.memo(function CenterCanvas({
 
   // Handle any click inside the canvas (closes ElementLibrary panel and other popovers)
   const handleCanvasClick = useCallback(() => {
+    // Ignore clicks that are part of a pan gesture (Space-drag / middle-mouse)
+    if (isPanGestureActive()) return;
     window.dispatchEvent(new CustomEvent('closeElementLibrary'));
     window.dispatchEvent(new CustomEvent('canvasClick'));
-  }, []);
+  }, [isPanGestureActive]);
 
   // Canvas callback handlers
   const handleCanvasLayerClick = useCallback((layerId: string, event?: React.MouseEvent) => {
+    // Don't select layers while panning the canvas (Space-drag / middle-mouse)
+    if (isPanGestureActive()) return;
+
     // Skip selection changes during drag operations
     const { isDraggingLayerOnCanvas, isDraggingToCanvas, elementPicker: picker } = useEditorStore.getState();
     if (isDraggingLayerOnCanvas || isDraggingToCanvas) {
@@ -1440,7 +1508,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
         listItemIndex: resolvedListItemIndex,
       });
     }
-  }, [isPreviewMode, setActiveSidebarTab, selectLayerWithSublayer, editingComponentId, activeComponentVariantId, componentDrafts, currentDraft]);
+  }, [isPanGestureActive, isPreviewMode, setActiveSidebarTab, selectLayerWithSublayer, editingComponentId, activeComponentVariantId, componentDrafts, currentDraft]);
 
   const handleCanvasLayerUpdate = useCallback((layerId: string, updates: Partial<Layer>) => {
     // Block all source-layer mutations from the canvas while in a non-default
@@ -1448,7 +1516,11 @@ const CenterCanvas = React.memo(function CenterCanvas({
     // of mutating the layer tree.
     if (selectedLocale && !selectedLocale.is_default) return;
 
-    if (editingComponentId && activeComponentVariantId) {
+    if (editingComponentId) {
+      // While editing a component, never fall through to the page draft — doing
+      // so would write the component's inner-layer edit onto the page (or drop
+      // it). If the variant can't be resolved yet, skip rather than corrupt.
+      if (!activeComponentVariantId) return;
       const { componentDrafts, updateComponentDraft } = useComponentsStore.getState();
       const currentDraft = componentDrafts[editingComponentId]?.[activeComponentVariantId] || [];
       updateComponentDraft(editingComponentId, activeComponentVariantId, updateLayerProps(currentDraft, layerId, updates));
@@ -1535,8 +1607,8 @@ const CenterCanvas = React.memo(function CenterCanvas({
     }
     if (!layers.length) return undefined;
     const page = editingComponentId ? null : currentPage;
-    return buildFieldGroupsForLayer(richTextSheetLayerId, layers, page, collectionFieldsFromStore, collectionsFromStore);
-  }, [richTextSheetLayerId, editingComponentId, activeComponentVariantId, componentDrafts, currentPageId, currentDraft, currentPage, collectionFieldsFromStore, collectionsFromStore]);
+    return buildFieldGroupsForLayer(richTextSheetLayerId, layers, page, collectionFieldsFromStore, collectionsFromStore, globalsFromStore);
+  }, [richTextSheetLayerId, editingComponentId, activeComponentVariantId, componentDrafts, currentPageId, currentDraft, currentPage, collectionFieldsFromStore, collectionsFromStore, globalsFromStore]);
 
   // Track the current value locally so the value prop always matches the editor's
   // internal state. This prevents the editor's sync effect from resetting content
@@ -1715,8 +1787,13 @@ const CenterCanvas = React.memo(function CenterCanvas({
 
   // Handle layer hover from Canvas (for SelectionOverlay)
   const handleCanvasLayerHover = useCallback((layerId: string | null) => {
+    // Don't draw hover outlines while panning the canvas (Space-drag / middle-mouse)
+    if (isPanGestureActive()) {
+      setHoveredLayerId(null);
+      return;
+    }
     setHoveredLayerId(layerId);
-  }, [setHoveredLayerId]);
+  }, [isPanGestureActive, setHoveredLayerId]);
 
   // Open the master component when a component instance is double-clicked.
   // Mirrors the "Edit component" sidebar button.
@@ -2389,7 +2466,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
           </ToggleGroup>
 
           {/* Inline Variable Button */}
-          {textFieldGroups.length > 0 && (
+          {(textFieldGroups.length > 0 || paginationVariableKeys.length > 0) && (
             <ToggleGroup
               type="single"
               size="xs"
@@ -2411,12 +2488,31 @@ const CenterCanvas = React.memo(function CenterCanvas({
                   </ToggleGroupItem>
                 </DropdownMenuTrigger>
 
-                {fieldGroups && (
-                  <DropdownMenuContent
-                    className="w-56 py-1 px-1 max-h-none!"
-                    align="start"
-                    sideOffset={4}
-                  >
+                <DropdownMenuContent
+                  className="w-56 py-1 px-1 max-h-none!"
+                  align="start"
+                  sideOffset={4}
+                >
+                  {paginationVariableKeys.length > 0 && (
+                    <>
+                      <DropdownMenuLabel className="text-xs text-foreground/80">Pagination</DropdownMenuLabel>
+                      {paginationVariableKeys.map((key) => (
+                        <DropdownMenuItem
+                          key={key}
+                          className="gap-2"
+                          onClick={() => {
+                            addFieldVariable({ type: 'pagination', data: { key } });
+                            setTextEditorVariableDropdownOpen(false);
+                          }}
+                        >
+                          <Icon name="hash" className="size-3 text-muted-foreground shrink-0" />
+                          <span className="truncate">{PAGINATION_VARIABLE_LABELS[key]}</span>
+                        </DropdownMenuItem>
+                      ))}
+                      {textFieldGroups.length > 0 && <DropdownMenuSeparator />}
+                    </>
+                  )}
+                  {fieldGroups && textFieldGroups.length > 0 && (
                     <CollectionFieldSelector
                       fieldGroups={textFieldGroups}
                       allFields={collectionFieldsFromStore}
@@ -2432,8 +2528,8 @@ const CenterCanvas = React.memo(function CenterCanvas({
                         setTextEditorVariableDropdownOpen(false);
                       }}
                     />
-                  </DropdownMenuContent>
-                )}
+                  )}
+                </DropdownMenuContent>
               </DropdownMenu>
             </ToggleGroup>
           )}
@@ -2501,7 +2597,8 @@ const CenterCanvas = React.memo(function CenterCanvas({
             elementPicker?.active && 'cursor-crosshair'
           )}
           style={{
-            opacity: isCanvasReady ? 1 : 0,
+            opacity: isCanvasReady && !isComponentCanvasSettling ? 1 : 0,
+            transition: 'opacity 120ms ease-out',
             scrollbarWidth: 'none', // Firefox
             msOverflowStyle: 'none', // IE/Edge
             WebkitOverflowScrolling: 'touch',
@@ -2544,19 +2641,38 @@ const CenterCanvas = React.memo(function CenterCanvas({
                   position: 'relative',
                 }}
               >
+                {/* Sizer: occupies the SCALED footprint so the scroll area,
+                    centering, and drop shadow match the visible canvas size. */}
                 <div
                   className={editingComponentId ? 'relative' : 'bg-white shadow-3xl relative'}
                   style={{
-                    zoom: zoom / 100,
-                    width: `${effectiveCanvasWidth}px`,
-                    height: `${finalIframeHeight}px`,
+                    width: `${effectiveCanvasWidth * (zoom / 100)}px`,
+                    height: `${finalIframeHeight * (zoom / 100)}px`,
                     flexShrink: 0, // Prevent shrinking - maintain fixed size
-                    // No transition to prevent shifts
-                    transition: 'none',
                     // Clip overflow when canvas is smaller than iframe (component editing)
                     overflow: editingComponentId ? 'hidden' : undefined,
                   }}
                 >
+                  {/* Stage: natural (unscaled) size, scaled with CSS transform from
+                      the top-left corner. We deliberately use `transform: scale()`
+                      instead of CSS `zoom`: Safari shrinks an iframe's content layout
+                      viewport when an ancestor uses `zoom`, which rendered the page
+                      too narrow (white space on the right) and misaligned the
+                      selection overlay. transform keeps the iframe at its true
+                      breakpoint width while only scaling the painted output. */}
+                  <div
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: `${effectiveCanvasWidth}px`,
+                      height: `${finalIframeHeight}px`,
+                      transform: `scale(${zoom / 100})`,
+                      transformOrigin: 'top left',
+                      // No transition to prevent shifts
+                      transition: 'none',
+                    }}
+                  >
                   {/* Inner wrapper: keep iframe at viewport width for natural content rendering */}
                   <div
                     style={{
@@ -2813,6 +2929,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
                     </div>
                   )}
                   </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -2872,45 +2989,59 @@ const CenterCanvas = React.memo(function CenterCanvas({
               <Spinner />
             </div>
           )}
+          {/* Sizer: occupies the SCALED footprint so centering and scrolling
+              match the visible preview size. */}
           <div
             className="bg-white shadow-3xl relative mx-auto my-auto"
             style={{
-              zoom: previewZoom / 100,
-              width: viewportMode === 'desktop' && previewZoomMode === 'autofit'
-                ? '100%'
-                : viewportSizes[viewportMode].width,
-              minWidth: viewportMode === 'desktop' && previewZoomMode === 'autofit'
-                ? viewportSizes[viewportMode].width
-                : undefined,
-              height: finalPreviewIframeHeight > 0 ? `${finalPreviewIframeHeight}px` : '100%',
+              width: `${previewStageWidth * (previewZoom / 100)}px`,
+              height: finalPreviewIframeHeight > 0
+                ? `${finalPreviewIframeHeight * (previewZoom / 100)}px`
+                : '100%',
               flexShrink: 0,
-              transition: 'none',
             }}
           >
-            {layers.length > 0 && isPreviewMode ? (
-              <iframe
-                ref={iframeRef}
-                src={previewUrl}
-                className="w-full h-full border-0"
-                title="Preview"
-                tabIndex={-1}
-                onLoad={handlePreviewLoad}
-              />
-            ) : layers.length === 0 && isPreviewMode ? (
-              <div className="w-full h-full flex items-center justify-center p-12">
-                <div className="text-center max-w-md">
-                  <div className="w-20 h-20 bg-linear-to-br from-blue-100 to-blue-50 rounded-2xl mx-auto mb-6 flex items-center justify-center">
-                    <Icon name="layout" className="w-10 h-10 text-blue-500" />
+            {/* Stage: natural (unscaled) size, scaled with `transform` instead of
+                CSS `zoom`. Safari shrinks an iframe's content viewport under an
+                ancestor `zoom`, which rendered previews too narrow; transform keeps
+                the iframe at its true breakpoint width. */}
+            <div
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                width: `${previewStageWidth}px`,
+                height: finalPreviewIframeHeight > 0 ? `${finalPreviewIframeHeight}px` : '100%',
+                transform: `scale(${previewZoom / 100})`,
+                transformOrigin: 'top left',
+                transition: 'none',
+              }}
+            >
+              {layers.length > 0 && isPreviewMode ? (
+                <iframe
+                  ref={iframeRef}
+                  src={previewUrl}
+                  className="w-full h-full border-0"
+                  title="Preview"
+                  tabIndex={-1}
+                  onLoad={handlePreviewLoad}
+                />
+              ) : layers.length === 0 && isPreviewMode ? (
+                <div className="w-full h-full flex items-center justify-center p-12">
+                  <div className="text-center max-w-md">
+                    <div className="w-20 h-20 bg-linear-to-br from-blue-100 to-blue-50 rounded-2xl mx-auto mb-6 flex items-center justify-center">
+                      <Icon name="layout" className="w-10 h-10 text-blue-500" />
+                    </div>
+                    <h2 className="text-2xl font-bold text-gray-900 mb-3">
+                      No content
+                    </h2>
+                    <p className="text-gray-600">
+                      This page has no content to preview.
+                    </p>
                   </div>
-                  <h2 className="text-2xl font-bold text-gray-900 mb-3">
-                    No content
-                  </h2>
-                  <p className="text-gray-600">
-                    This page has no content to preview.
-                  </p>
                 </div>
-              </div>
-            ) : null}
+              ) : null}
+            </div>
           </div>
         </div>
       </div>
