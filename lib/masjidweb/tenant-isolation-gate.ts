@@ -24,6 +24,7 @@ import ts from 'typescript';
  * masjidweb-backend TENANT_SCOPED_CONTENT_TABLES and public.delete_tenant_scoped_data.
  */
 export const TENANT_SCOPED_TABLES: ReadonlySet<string> = new Set([
+  'global_variables',
   'webhook_deliveries',
   'webhooks',
   'versions',

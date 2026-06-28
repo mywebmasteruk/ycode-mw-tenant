@@ -14,11 +14,17 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Icon, type IconProps } from '@/components/ui/icon';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useEditorStore } from '@/stores/useEditorStore';
 import { useRole } from '@/hooks/use-role';
 
 interface ShortcutKey {
   name: string;
+  /** Force the following keys onto a new line (wraps in the flex container) */
+  isBreak?: boolean;
+  /** Render an icon inside the key box instead of the name text */
+  icon?: IconProps['name'];
 }
 
 interface Shortcut {
@@ -74,13 +80,14 @@ const shortcutCategories: { left: ShortcutCategory[]; right: ShortcutCategory[] 
       ],
     },
     {
-      name: 'Zoom',
+      name: 'Canvas',
       shortcuts: [
         { name: 'Zoom in', keys: [{ name: '⌘' }, { name: '+' }] },
         { name: 'Zoom out', keys: [{ name: '⌘' }, { name: '-' }] },
         { name: 'Zoom to 100%', keys: [{ name: '⌘' }, { name: '0' }] },
         { name: 'Zoom to Fit', keys: [{ name: '⌘' }, { name: '1' }] },
         { name: 'Autofit', keys: [{ name: '⌘' }, { name: '2' }] },
+        { name: 'Pan', keys: [{ name: 'Space', icon: 'space' }, { name: 'Drag (left-click)' }, { name: '', isBreak: true }, { name: 'Drag (middle-click)' }] },
       ],
     },
     {
@@ -92,6 +99,15 @@ const shortcutCategories: { left: ShortcutCategory[]; right: ShortcutCategory[] 
   ],
 };
 
+// Human-readable labels for modifier/symbol keys, shown in a tooltip on hover
+const KEY_LABELS: Record<string, string> = {
+  '⌘': 'Command',
+  '⇧': 'Shift',
+  '⌥': 'Option',
+  '⌫': 'Delete',
+  '⌃': 'Control',
+};
+
 function ShortcutCategory({ category }: { category: ShortcutCategory }) {
   return (
     <div>
@@ -99,18 +115,35 @@ function ShortcutCategory({ category }: { category: ShortcutCategory }) {
         {category.name}
       </div>
       <ul className="space-y-2">
-        {category.shortcuts.map((shortcut) => (
-          <li key={shortcut.name} className="flex items-center justify-between">
-            <span className="text-xs text-muted-foreground">{shortcut.name}</span>
-            <div className="flex items-center gap-0.5">
-              {shortcut.keys.map((key, index) => (
-                <div
-                  key={index}
-                  className="px-1.5 py-0.5 leading-none rounded flex items-center justify-center bg-muted text-[10px] min-w-[18px]"
-                >
-                  {key.name}
-                </div>
-              ))}
+        {category.shortcuts.map((shortcut, shortcutIndex) => (
+          <li key={`${shortcut.name}-${shortcutIndex}`} className="flex items-start justify-between">
+            <span className="text-xs text-muted-foreground whitespace-nowrap">{shortcut.name}</span>
+            <div className="flex flex-wrap items-center justify-end gap-x-0.5 gap-y-1">
+              {shortcut.keys.map((key, index) => {
+                if (key.isBreak) {
+                  return <div key={index} className="basis-full h-0" />;
+                }
+
+                const keyCap = (
+                  <div
+                    className="px-1.5 py-0.75 leading-none rounded flex items-center justify-center bg-muted text-[10px] min-w-4.5"
+                    aria-label={key.icon ? key.name : undefined}
+                  >
+                    {key.icon ? <Icon name={key.icon} className="w-2.5 h-2.5" /> : key.name}
+                  </div>
+                );
+
+                // Tooltip for modifier symbols and icon-only keys (no visible text)
+                const label = KEY_LABELS[key.name] ?? (key.icon ? key.name : undefined);
+                if (!label) return <div key={index}>{keyCap}</div>;
+
+                return (
+                  <Tooltip key={index} disableHoverableContent>
+                    <TooltipTrigger asChild>{keyCap}</TooltipTrigger>
+                    <TooltipContent>{label}</TooltipContent>
+                  </Tooltip>
+                );
+              })}
             </div>
           </li>
         ))}

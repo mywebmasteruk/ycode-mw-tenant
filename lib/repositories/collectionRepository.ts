@@ -2,6 +2,7 @@ import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 import { getSupabaseAdmin, getTenantIdFromHeaders } from '@/lib/supabase-server';
 import { getKnexClient } from '@/lib/knex-client';
+import { SUPABASE_IN_FILTER_CHUNK_SIZE } from '@/lib/supabase-constants';
 import type { Collection, CreateCollectionData, UpdateCollectionData } from '@/types';
 import { randomUUID } from 'crypto';
 
@@ -419,24 +420,29 @@ export async function deleteCollection(id: string, isPublished: boolean = false)
   if (items && items.length > 0) {
     const itemIds = items.map(item => item.id);
 
-    let valUpd = client
-      .from('collection_item_values')
-      .update({
-        deleted_at: now,
-        updated_at: now,
-      })
-      .in('item_id', itemIds)
-      .eq('is_published', isPublished)
-      .is('deleted_at', null);
+    // Chunk the id list so large `.in()` filters don't overflow the request URL
+    // length limit (which returns 400 Bad Request).
+    for (let i = 0; i < itemIds.length; i += SUPABASE_IN_FILTER_CHUNK_SIZE) {
+      const idsChunk = itemIds.slice(i, i + SUPABASE_IN_FILTER_CHUNK_SIZE);
+      let valUpd = client
+        .from('collection_item_values')
+        .update({
+          deleted_at: now,
+          updated_at: now,
+        })
+        .in('item_id', idsChunk)
+        .eq('is_published', isPublished)
+        .is('deleted_at', null);
 
-    if (effectiveTenantId) {
-      valUpd = valUpd.eq('tenant_id', effectiveTenantId);
-    }
+      if (effectiveTenantId) {
+        valUpd = valUpd.eq('tenant_id', effectiveTenantId);
+      }
 
-    const { error: valuesError } = await valUpd;
+      const { error: valuesError } = await valUpd;
 
-    if (valuesError) {
-      console.error('Error soft-deleting collection item values:', valuesError);
+      if (valuesError) {
+        console.error('Error soft-deleting collection item values:', valuesError);
+      }
     }
   }
 }

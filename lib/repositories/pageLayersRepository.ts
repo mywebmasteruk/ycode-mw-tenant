@@ -751,6 +751,46 @@ async function expandThroughComponents(
 }
 
 /**
+ * Find components that render any of the given collections — e.g. a
+ * collection-list/grid block bound to the collection placed inside a reusable
+ * component. The binding lives in the component's layers, not in the pages that
+ * use the component, so a plain page_layers scan for the collection ID misses
+ * those pages. Returns the embedding component IDs (transitively expanded
+ * through nested components) so callers can flag the pages using them.
+ */
+async function findComponentsEmbeddingCollections(
+  client: NonNullable<Awaited<ReturnType<typeof getSupabaseAdmin>>>,
+  collectionIds: string[],
+): Promise<string[]> {
+  const tenantId = await resolveEffectiveTenantId();
+  if (collectionIds.length === 0) return [];
+
+  const { data: allComponents } = await applyTenantEq(client
+    .from('components')
+    .select('id, layers')
+    .eq('is_published', false)
+    .is('deleted_at', null), tenantId);
+
+  if (!allComponents || allComponents.length === 0) return [];
+
+  const directIds: string[] = [];
+  for (const comp of allComponents) {
+    if (!comp.layers) continue;
+    const text = JSON.stringify(comp.layers);
+    for (const id of collectionIds) {
+      if (text.includes(id)) { directIds.push(comp.id as string); break; }
+    }
+  }
+
+  if (directIds.length === 0) return [];
+
+  // A collection-embedding component may itself be nested inside other
+  // components, so expand so pages using any ancestor are flagged too.
+  const transitive = await expandThroughComponents(client, directIds, []);
+  return [...new Set([...directIds, ...transitive])];
+}
+
+/**
  * Find pages affected by changed components, layer styles, and collections
  * in a single pass over draft page_layers (and pages.settings for collections).
  *
@@ -790,6 +830,16 @@ export async function findAffectedPages(
   const allComponentIds = [...new Set([...componentIds, ...expandedComponentIds])];
   const hasExpandedComponents = allComponentIds.length > 0;
 
+  // A collection can be rendered through a reusable component (the binding
+  // lives in the component, not the page using it). Find those components so
+  // pages embedding them are invalidated on CMS publish. Treated as collection
+  // matches — a page is collection-affected if its layers reference a changed
+  // collection ID directly OR a component that embeds one.
+  const collectionEmbeddingComponentIds = hasCollections
+    ? await findComponentsEmbeddingCollections(client, collectionIds)
+    : [];
+  const collectionMatchIds = new Set([...collectionIds, ...collectionEmbeddingComponentIds]);
+
   // Single scan of all draft page_layers
   let layersQuery = client
     .from('page_layers')
@@ -804,7 +854,6 @@ export async function findAffectedPages(
   if (allLayers) {
     const componentSet = new Set(allComponentIds);
     const styleSet = new Set(styleIds);
-    const collectionSet = new Set(collectionIds);
     const componentPages = new Set<string>();
     const stylePages = new Set<string>();
     const collectionPages = new Set<string>();
@@ -824,7 +873,7 @@ export async function findAffectedPages(
         }
       }
       if (hasCollections && !collectionPages.has(row.page_id)) {
-        for (const id of collectionSet) {
+        for (const id of collectionMatchIds) {
           if (text.includes(id)) { collectionPages.add(row.page_id); break; }
         }
       }
@@ -857,6 +906,174 @@ export async function findAffectedPages(
         }
       }
       result.collectionPageIds = Array.from(collectionPageSet);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Find collections whose PUBLISHED rich-text field values embed any of the
+ * given (changed) components.
+ *
+ * Components placed inside a CMS Rich Text *field* are stored as
+ * `richTextComponent` nodes inside `collection_item_values.value` — NOT in
+ * `page_layers`. As a result `findAffectedPages` (which only scans page_layers
+ * and pages.settings) can't see them, so editing such a component would never
+ * invalidate the pages that render those CMS items. Callers map the returned
+ * collection IDs back to affected pages via `findAffectedPages([], [], ids)`.
+ *
+ * Component IDs are expanded through nested components first, so editing a
+ * component nested inside another component that is itself embedded in a CMS
+ * rich-text value still flags the collection.
+ */
+export async function findCollectionsEmbeddingComponents(
+  componentIds: string[],
+): Promise<string[]> {
+  const tenantId = await resolveEffectiveTenantId();
+  if (componentIds.length === 0) return [];
+
+  const client = await getSupabaseAdmin();
+  if (!client) return [];
+
+  // Only rich-text fields can contain embedded `richTextComponent` nodes, so
+  // restrict the value scan to those fields. A field keeps the same `id`
+  // across its draft/published rows (composite PK `id,is_published`), so the
+  // published field id matches `collection_item_values.field_id` on published
+  // values, and the field carries its own `collection_id` — no item lookup
+  // needed to map a match back to a collection.
+  const { data: richTextFields } = await applyTenantEq(client
+    .from('collection_fields')
+    .select('id, collection_id')
+    .eq('type', 'rich_text')
+    .eq('is_published', true)
+    .is('deleted_at', null), tenantId);
+
+  if (!richTextFields || richTextFields.length === 0) return [];
+
+  const fieldToCollection = new Map<string, string>();
+  for (const f of richTextFields) {
+    fieldToCollection.set(f.id as string, f.collection_id as string);
+  }
+  const fieldIds = Array.from(fieldToCollection.keys());
+
+  const expanded = await expandThroughComponents(client, componentIds, []);
+  const allComponentIds = [...new Set([...componentIds, ...expanded])];
+
+  const { chunk } = await import('@/lib/utils');
+  const collectionIds = new Set<string>();
+
+  // Scan published rich-text values only. The cheap `richTextComponent` marker
+  // check skips values that hold no embedded component before the id match.
+  for (const idChunk of chunk(fieldIds, 500)) {
+    const { data: values } = await applyTenantEq(client
+      .from('collection_item_values')
+      .select('field_id, value')
+      .eq('is_published', true)
+      .is('deleted_at', null)
+      .in('field_id', idChunk), tenantId);
+
+    for (const row of values ?? []) {
+      if (!row.value) continue;
+      const collectionId = fieldToCollection.get(row.field_id as string);
+      if (!collectionId || collectionIds.has(collectionId)) continue;
+      const text = typeof row.value === 'string' ? row.value : JSON.stringify(row.value);
+      if (!text.includes('richTextComponent')) continue;
+      for (const id of allComponentIds) {
+        if (text.includes(id)) { collectionIds.add(collectionId); break; }
+      }
+    }
+  }
+
+  return Array.from(collectionIds);
+}
+
+/** Parse a rich-text field value into a Tiptap node, tolerating JSON strings. */
+function parseTiptapValue(value: unknown): unknown {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    try { return JSON.parse(value); } catch { return null; }
+  }
+  return value;
+}
+
+/** Recursively collect `richTextComponent` component IDs from a Tiptap node. */
+function collectEmbeddedComponentIds(node: unknown, ids: Set<string>): void {
+  if (!node || typeof node !== 'object') return;
+  const n = node as { type?: string; attrs?: { componentId?: string }; content?: unknown[] };
+  if (n.type === 'richTextComponent' && n.attrs?.componentId) {
+    ids.add(n.attrs.componentId);
+  }
+  if (Array.isArray(n.content)) {
+    for (const child of n.content) collectEmbeddedComponentIds(child, ids);
+  }
+}
+
+/**
+ * Map collections to the component IDs embedded in their rich-text field VALUES.
+ *
+ * Components dropped into a CMS Rich Text field are stored as `richTextComponent`
+ * nodes inside `collection_item_values.value`, NOT in `page_layers`. A dynamic
+ * page bound to such a collection renders those components, but the per-page CSS
+ * generator only walks `page_layers` — so the embedded component's classes never
+ * compile and the published instance renders unstyled. The CSS generator uses
+ * this map to seed those components into the page's class extraction.
+ *
+ * @param collectionIds - Collections to scan (typically a dynamic page's bindings)
+ * @param isPublished - Scan draft (false, default) or published (true) values.
+ *   CSS is generated from draft data pre-publish, so draft is the correct source.
+ * @returns Map of collectionId → set of embedded component IDs (only collections
+ *   that actually embed at least one component are present)
+ */
+export async function getEmbeddedComponentIdsForCollections(
+  collectionIds: string[],
+  isPublished: boolean = false,
+): Promise<Map<string, Set<string>>> {
+  const tenantId = await resolveEffectiveTenantId();
+  const result = new Map<string, Set<string>>();
+  if (collectionIds.length === 0) return result;
+
+  const client = await getSupabaseAdmin();
+  if (!client) return result;
+
+  const { data: richTextFields } = await applyTenantEq(client
+    .from('collection_fields')
+    .select('id, collection_id')
+    .eq('type', 'rich_text')
+    .eq('is_published', isPublished)
+    .is('deleted_at', null)
+    .in('collection_id', collectionIds), tenantId);
+
+  if (!richTextFields || richTextFields.length === 0) return result;
+
+  const fieldToCollection = new Map<string, string>();
+  for (const f of richTextFields) {
+    fieldToCollection.set(f.id as string, f.collection_id as string);
+  }
+  const fieldIds = Array.from(fieldToCollection.keys());
+
+  const { chunk } = await import('@/lib/utils');
+
+  for (const idChunk of chunk(fieldIds, 500)) {
+    const { data: values } = await applyTenantEq(client
+      .from('collection_item_values')
+      .select('field_id, value')
+      .eq('is_published', isPublished)
+      .is('deleted_at', null)
+      .in('field_id', idChunk), tenantId);
+
+    for (const row of values ?? []) {
+      if (!row.value) continue;
+      const collectionId = fieldToCollection.get(row.field_id as string);
+      if (!collectionId) continue;
+      // Cheap marker check before the (more expensive) JSON parse + walk.
+      const text = typeof row.value === 'string' ? row.value : JSON.stringify(row.value);
+      if (!text.includes('richTextComponent')) continue;
+      const parsed = parseTiptapValue(row.value);
+      if (!parsed) continue;
+      const ids = result.get(collectionId) ?? new Set<string>();
+      collectEmbeddedComponentIds(parsed, ids);
+      if (ids.size > 0) result.set(collectionId, ids);
     }
   }
 

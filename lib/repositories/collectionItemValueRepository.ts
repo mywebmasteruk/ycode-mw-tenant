@@ -3,10 +3,12 @@ import { getSupabaseAdmin, getTenantIdFromHeaders } from '@/lib/supabase-server'
 import { SUPABASE_QUERY_LIMIT } from '@/lib/supabase-constants';
 import { getKnexClient } from '@/lib/knex-client';
 import type { CollectionItemValue, CollectionFieldType } from '@/types';
+import { isValidUUID } from '@/lib/utils';
 import { castValue, valueToString } from '../collection-utils';
 import { generateCollectionItemContentHash } from '../hash-utils';
 import { randomUUID } from 'crypto';
 import { deleteTranslationsInBulk, markTranslationsIncomplete } from '@/lib/repositories/translationRepository';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 /**
  * Collection Item Value Repository
@@ -141,7 +143,13 @@ export async function getValuesByItemIds(
     throw new Error('Supabase client not configured');
   }
 
-  if (item_ids.length === 0) {
+  // Guard against non-UUID ids (e.g. dangling legacy bindings from imported
+  // content). Passing them to a uuid column throws and would otherwise take
+  // down the whole page render.
+  const safeItemIds = item_ids.filter(isValidUUID);
+  const safeFieldIds = fieldIds?.filter(isValidUUID);
+
+  if (safeItemIds.length === 0 || (safeFieldIds && safeFieldIds.length === 0)) {
     return {};
   }
 
@@ -153,38 +161,33 @@ export async function getValuesByItemIds(
     const knex = await getKnexClient();
     let query = knex('collection_item_values')
       .select('item_id', 'field_id', 'value')
-      .whereIn('item_id', item_ids)
+      .whereIn('item_id', safeItemIds)
       .andWhere('is_published', is_published)
       .whereNull('deleted_at');
-
-    if (tenantId) {
-      query = query.andWhere('tenant_id', tenantId);
-    }
-    if (fieldIds) {
-      query = query.whereIn('field_id', fieldIds);
+    if (safeFieldIds) {
+      query = query.whereIn('field_id', safeFieldIds);
     }
 
     allRows = await query;
   } catch {
     const CHUNK_SIZE = 50;
     const chunks: string[][] = [];
-    for (let i = 0; i < item_ids.length; i += CHUNK_SIZE) {
-      chunks.push(item_ids.slice(i, i + CHUNK_SIZE));
+    for (let i = 0; i < safeItemIds.length; i += CHUNK_SIZE) {
+      chunks.push(safeItemIds.slice(i, i + CHUNK_SIZE));
     }
 
     const chunkResults = await Promise.all(
       chunks.map(async (chunk) => {
+        const tenantId = await resolveEffectiveTenantId();
         let q = client
           .from('collection_item_values')
           .select('item_id, field_id, value')
           .in('item_id', chunk)
           .eq('is_published', is_published)
           .is('deleted_at', null);
-        if (tenantId) {
-          q = q.eq('tenant_id', tenantId);
-        }
-        if (fieldIds) {
-          q = q.in('field_id', fieldIds);
+        q = applyTenantEq(q, tenantId);
+        if (safeFieldIds) {
+          q = q.in('field_id', safeFieldIds);
         }
         const { data, error } = await q.limit(5000);
 
@@ -875,6 +878,21 @@ export async function publishValues(item_id: string): Promise<number> {
   // Copy the draft content_hash to the published item
   const hash = generateCollectionItemContentHash(draftValues.map(v => ({ field_id: v.field_id, value: v.value })));
   await updateContentHash(item_id, true, hash);
+
+  // Publish assets referenced by this item (e.g. CMS thumbnails or rich-text
+  // images) so they get a published row in the same operation. Without this, a
+  // single-item publish (Set as published / staged item) leaves images as drafts
+  // and the live page renders the default placeholder until a later full publish.
+  try {
+    const { collectItemValueAssetIds } = await import('@/lib/collection-asset-utils');
+    const { publishAssets } = await import('@/lib/repositories/assetRepository');
+    const assetIds = collectItemValueAssetIds(draftValues);
+    if (assetIds.length > 0) {
+      await publishAssets(assetIds);
+    }
+  } catch {
+    // Non-fatal: asset publishing failure should not roll back value publishing
+  }
 
   return draftValues.length;
 }

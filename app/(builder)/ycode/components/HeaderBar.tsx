@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useEffect, useState, useMemo } from 'react';
+import { useCallback, useRef, useEffect, useState, useMemo } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useEditorUrl } from '@/hooks/use-editor-url';
 import { findHomepage } from '@/lib/page-utils';
@@ -304,6 +304,65 @@ export default function HeaderBar({
     return path === '/' ? '' : path;
   }, [currentPage, isSettingsRoute, storePages, folders, localizedPagePath, collectionItemSlug, selectedLocale, localeTranslations]);
 
+  // Toggle preview mode (shared by the header button and the ⌘P shortcut)
+  const handleTogglePreview = useCallback(() => {
+    if (!currentPage || isSaving) return;
+
+    if (isPreviewMode) {
+      if (previewReturnUrl) {
+        // Navigate back while keeping preview visible — the useEffect
+        // above will turn off preview once the route change completes
+        if (previewReturnTab) {
+          setActiveSidebarTab(previewReturnTab);
+        }
+        router.push(previewReturnUrl);
+        setPreviewReturn(null);
+        return;
+      }
+
+      setPreviewMode(false);
+      updateQueryParams({ preview: undefined });
+      return;
+    }
+
+    setPreviewMode(true);
+
+    // Preview renders the current page, so when invoked from a non-design
+    // route (CMS, forms, etc.) we need to jump to the layers view first
+    const isDesignRoute = routeType === 'layers' || routeType === 'page' || routeType === 'component' || routeType === null;
+    if (!isDesignRoute && currentPageId) {
+      setPreviewReturn(window.location.pathname + window.location.search, activeTab);
+      setActiveSidebarTab('layers');
+      const params = new URLSearchParams(window.location.search);
+      params.set('preview', 'true');
+      router.push(`/ycode/layers/${currentPageId}?${params.toString()}`);
+      return;
+    }
+
+    updateQueryParams({ preview: 'true' });
+  }, [
+    currentPage,
+    currentPageId,
+    isSaving,
+    isPreviewMode,
+    previewReturnUrl,
+    previewReturnTab,
+    routeType,
+    activeTab,
+    router,
+    setActiveSidebarTab,
+    setPreviewMode,
+    setPreviewReturn,
+    updateQueryParams,
+  ]);
+
+  // Listen for the ⌘P shortcut dispatched from the global keyboard handler
+  useEffect(() => {
+    const handleTogglePreviewEvent = () => handleTogglePreview();
+    window.addEventListener('togglePreview', handleTogglePreviewEvent);
+    return () => window.removeEventListener('togglePreview', handleTogglePreviewEvent);
+  }, [handleTogglePreview]);
+
   // Apply theme to HTML element
   useEffect(() => {
     const root = document.documentElement;
@@ -576,6 +635,16 @@ export default function HeaderBar({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
+            {canManageSettings && !pathname?.startsWith('/ycode/localization') && (
+              <>
+                <DropdownMenuItem
+                  onClick={() => router.push('/ycode/localization')}
+                >
+                  Manage locales
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+              </>
+            )}
             <DropdownMenuRadioGroup
               value={selectedLocaleId || ''}
               onValueChange={(value) => {
@@ -599,16 +668,6 @@ export default function HeaderBar({
                 </DropdownMenuRadioItem>
               ))}
             </DropdownMenuRadioGroup>
-            {canManageSettings && !pathname?.startsWith('/ycode/localization') && (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onClick={() => router.push('/ycode/localization')}
-                >
-                  Manage locales
-                </DropdownMenuItem>
-              </>
-            )}
           </DropdownMenuContent>
         </DropdownMenu>
 
@@ -680,40 +739,7 @@ export default function HeaderBar({
         <Button
           size="sm"
           variant="secondary"
-          onClick={() => {
-            if (isPreviewMode) {
-              if (previewReturnUrl) {
-                // Navigate back while keeping preview visible — the useEffect
-                // above will turn off preview once the route change completes
-                if (previewReturnTab) {
-                  setActiveSidebarTab(previewReturnTab);
-                }
-                router.push(previewReturnUrl);
-                setPreviewReturn(null);
-                return;
-              }
-
-              setPreviewMode(false);
-              updateQueryParams({ preview: undefined });
-              return;
-            }
-
-            setPreviewMode(true);
-
-            // Preview renders the current page, so when invoked from a non-design
-            // route (CMS, forms, etc.) we need to jump to the layers view first
-            const isDesignRoute = routeType === 'layers' || routeType === 'page' || routeType === 'component' || routeType === null;
-            if (!isDesignRoute && currentPageId) {
-              setPreviewReturn(window.location.pathname + window.location.search, activeTab);
-              setActiveSidebarTab('layers');
-              const params = new URLSearchParams(window.location.search);
-              params.set('preview', 'true');
-              router.push(`/ycode/layers/${currentPageId}?${params.toString()}`);
-              return;
-            }
-
-            updateQueryParams({ preview: 'true' });
-          }}
+          onClick={handleTogglePreview}
           disabled={!currentPage || isSaving}
           className={isPreviewMode ? 'bg-black text-white hover:bg-black/90 dark:bg-white dark:text-black dark:hover:bg-white/90' : ''}
         >

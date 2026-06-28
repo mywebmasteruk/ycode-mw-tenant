@@ -719,22 +719,22 @@ export async function getAllDraftPageFolders(includeSoftDeleted = false): Promis
  * @param includeSoftDeleted - Whether to include soft-deleted folders (default: false)
  * @returns Array of published page folders
  */
-export async function getAllPublishedPageFolders(includeSoftDeleted = false): Promise<PageFolder[]> {
+export async function getAllPublishedPageFolders(includeSoftDeleted = false, tenantId?: string): Promise<PageFolder[]> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
 
   let query = client
     .from('page_folders')
     .select('*')
     .eq('is_published', true);
 
-  if (tenantId) {
-    query = query.eq('tenant_id', tenantId);
+  if (effectiveTenantId) {
+    query = query.eq('tenant_id', effectiveTenantId);
   }
 
   if (!includeSoftDeleted) {

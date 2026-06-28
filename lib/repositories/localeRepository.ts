@@ -13,13 +13,13 @@ import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 /**
  * Get all locales (draft by default)
  */
-export async function getAllLocales(isPublished: boolean = false): Promise<Locale[]> {
+export async function getAllLocales(isPublished: boolean = false, tenantId?: string): Promise<Locale[]> {
   const client = await getSupabaseAdmin();
   if (!client) {
     throw new Error('Failed to initialize Supabase client');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
+  const effectiveTenantId = await resolveEffectiveTenantId();
   let query = client
     .from('locales')
     .select('*')
@@ -27,7 +27,7 @@ export async function getAllLocales(isPublished: boolean = false): Promise<Local
     .is('deleted_at', null)
     .order('is_default', { ascending: false })
     .order('label', { ascending: true });
-  query = applyTenantEq(query, tenantId);
+  query = applyTenantEq(query, effectiveTenantId);
   const { data, error } = await query;
 
   if (error) {

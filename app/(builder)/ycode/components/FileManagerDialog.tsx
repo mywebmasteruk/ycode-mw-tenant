@@ -1029,11 +1029,22 @@ export default function FileManagerDialog({
     setSelectedAssetIds(new Set());
   }, [selectedFolderId]);
 
+  // Navigate to the asset's folder only once per open session, so manual
+  // folder navigation isn't reset when the asset cache (assetsById) updates
+  const hasNavigatedToAssetRef = useRef(false);
+
+  useEffect(() => {
+    if (!open) {
+      hasNavigatedToAssetRef.current = false;
+    }
+  }, [open]);
+
   // When dialog opens with an assetId, navigate to that asset's folder
   useEffect(() => {
-    if (open && assetId) {
+    if (open && assetId && !hasNavigatedToAssetRef.current) {
       const asset = assetsById[assetId] || getAsset(assetId);
       if (asset) {
+        hasNavigatedToAssetRef.current = true;
         const assetFolderId = asset.asset_folder_id || null;
 
         // Set the folder as selected

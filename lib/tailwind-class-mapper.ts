@@ -259,11 +259,15 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
 
   // Spacing
   padding: /^p-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
+  paddingX: /^px-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
+  paddingY: /^py-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
   paddingTop: /^pt-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
   paddingRight: /^pr-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
   paddingBottom: /^pb-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
   paddingLeft: /^pl-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
   margin: /^m-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
+  marginX: /^mx-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
+  marginY: /^my-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
   marginTop: /^mt-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
   marginRight: /^mr-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
   marginBottom: /^mb-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
@@ -367,6 +371,113 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
   easing: /^ease-(linear|in|out|in-out)$/,
   delay: /^delay-(\[.+\]|\d+)$/,
 };
+
+/**
+ * Spacing shorthands and the properties they override. Adding a shorthand
+ * clears conflicting classes lower in the hierarchy: full (p-/m-) overrides
+ * both axes and all sides; an axis (px-/py-/mx-/my-) overrides its two sides.
+ */
+const SPACING_OVERRIDES: Record<string, string[]> = {
+  padding: ['paddingX', 'paddingY', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'],
+  margin: ['marginX', 'marginY', 'marginTop', 'marginRight', 'marginBottom', 'marginLeft'],
+  paddingX: ['paddingLeft', 'paddingRight'],
+  paddingY: ['paddingTop', 'paddingBottom'],
+  marginX: ['marginLeft', 'marginRight'],
+  marginY: ['marginTop', 'marginBottom'],
+};
+
+/**
+ * Per-side spacing inputs fall back through more general shorthands so the UI
+ * reflects axis/full classes (e.g. paddingTop reads py-* then p-* when no pt-*).
+ */
+const SPACING_SIDE_FALLBACKS: Record<string, string[]> = {
+  paddingTop: ['paddingY', 'padding'],
+  paddingBottom: ['paddingY', 'padding'],
+  paddingLeft: ['paddingX', 'padding'],
+  paddingRight: ['paddingX', 'padding'],
+  marginTop: ['marginY', 'margin'],
+  marginBottom: ['marginY', 'margin'],
+  marginLeft: ['marginX', 'margin'],
+  marginRight: ['marginX', 'margin'],
+};
+
+/**
+ * For each spacing shorthand, the sides it controls. A shorthand is redundant
+ * once every side it controls is covered by a more specific class (full p-/m-
+ * may be covered by an axis, an axis only by its sides).
+ */
+const SPACING_SHORTHAND_CONTROLS: Record<string, string[]> = {
+  paddingX: ['paddingLeft', 'paddingRight'],
+  paddingY: ['paddingTop', 'paddingBottom'],
+  padding: ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'],
+  marginX: ['marginLeft', 'marginRight'],
+  marginY: ['marginTop', 'marginBottom'],
+  margin: ['marginTop', 'marginRight', 'marginBottom', 'marginLeft'],
+};
+
+/** Maps a spacing side property to the axis shorthand that covers it. */
+const SPACING_SIDE_AXIS: Record<string, string> = {
+  paddingTop: 'paddingY',
+  paddingBottom: 'paddingY',
+  paddingLeft: 'paddingX',
+  paddingRight: 'paddingX',
+  marginTop: 'marginY',
+  marginBottom: 'marginY',
+  marginLeft: 'marginX',
+  marginRight: 'marginX',
+};
+
+/** Full shorthands that can be covered by axis classes (not just sides). */
+const SPACING_FULL_SHORTHANDS = new Set(['padding', 'margin']);
+
+/** All spacing property names, used to gate redundancy cleanup. */
+const SPACING_PROPERTY_NAMES = new Set([
+  ...Object.keys(SPACING_SHORTHAND_CONTROLS),
+  ...Object.keys(SPACING_SIDE_AXIS),
+]);
+
+/**
+ * Identify which spacing property a prefix-stripped class matches, if any.
+ */
+function getSpacingProperty(baseClass: string): string | null {
+  for (const property of SPACING_PROPERTY_NAMES) {
+    if (CLASS_PROPERTY_MAP[property].test(baseClass)) return property;
+  }
+  return null;
+}
+
+/**
+ * Remove spacing shorthands fully overridden by more specific classes (e.g.
+ * px-* once both pl-* and pr-* are set, or p-* once every side/axis is covered).
+ * Scoped per breakpoint + UI state so responsive/state values stay independent.
+ */
+export function removeRedundantSpacingShorthands(classes: string[]): string[] {
+  // "breakpoint|uiState" → spacing properties explicitly present in that group
+  const presentByGroup = new Map<string, Set<string>>();
+  classes.forEach((cls) => {
+    const { breakpoint, uiState, baseClass } = parseFullClass(cls);
+    const property = getSpacingProperty(baseClass);
+    if (!property) return;
+    const key = `${breakpoint}|${uiState}`;
+    if (!presentByGroup.has(key)) presentByGroup.set(key, new Set());
+    presentByGroup.get(key)!.add(property);
+  });
+
+  const isRedundant = (shorthand: string, present: Set<string>): boolean => {
+    const allowAxisCoverage = SPACING_FULL_SHORTHANDS.has(shorthand);
+    return SPACING_SHORTHAND_CONTROLS[shorthand].every(
+      (side) => present.has(side) || (allowAxisCoverage && present.has(SPACING_SIDE_AXIS[side]))
+    );
+  };
+
+  return classes.filter((cls) => {
+    const { breakpoint, uiState, baseClass } = parseFullClass(cls);
+    const property = getSpacingProperty(baseClass);
+    if (!property || !SPACING_SHORTHAND_CONTROLS[property]) return true;
+    const present = presentByGroup.get(`${breakpoint}|${uiState}`);
+    return present ? !isRedundant(property, present) : true;
+  });
+}
 
 /**
  * Get the conflicting class pattern for a given property
@@ -1168,6 +1279,12 @@ export function removeConflictsForClass(
   // Remove conflicts for each affected property
   affectedProperties.forEach(property => {
     result = removeConflictingClasses(result, property);
+
+    // A spacing shorthand also overrides more specific classes, so clear those
+    // too (e.g. p-[10px] removes px-/py-/pt-/pr-/pb-/pl-; px-[10px] removes pl-/pr-).
+    SPACING_OVERRIDES[property]?.forEach(overridden => {
+      result = removeConflictingClasses(result, overridden);
+    });
   });
 
   // Additional check: if newClass is a standard color class (e.g., text-blue-500),
@@ -2230,6 +2347,16 @@ export function getInheritedValue(
     }
   }
 
+  // Per-side spacing inputs fall back through axis then full shorthands (e.g.
+  // paddingTop reads py-* then p-* when no pt-* class exists), so the spacing
+  // UI reflects px-/py-/p- and mx-/my-/m- classes.
+  if (lastValue === null) {
+    for (const fallback of SPACING_SIDE_FALLBACKS[property] ?? []) {
+      const inherited = getInheritedValue(classes, fallback, currentBreakpoint, currentUIState);
+      if (inherited.value !== null) return inherited;
+    }
+  }
+
   return { value: lastValue, source: lastSource };
 }
 
@@ -2311,6 +2438,12 @@ export function setBreakpointClass(
     classesToAdd.forEach(cls => {
       newClasses.push(fullPrefix + cls);
     });
+  }
+
+  // Setting a spacing side/axis can make a broader shorthand redundant
+  // (e.g. setting both pl-* and pr-* removes px-*), so clean those up.
+  if (SPACING_PROPERTY_NAMES.has(property)) {
+    return removeRedundantSpacingShorthands(newClasses);
   }
 
   return newClasses;

@@ -35,8 +35,8 @@ const updateDesignOp = z.object({
   layer_id: z.string().describe('Layer ID or ref_id from a prior add_layer'),
   design: designSchema,
   breakpoint: z.enum(['desktop', 'tablet', 'mobile']).default('desktop').optional(),
-  ui_state: z.enum(['neutral', 'hover', 'focus', 'active', 'disabled']).default('neutral').optional()
-    .describe('UI state: "hover" for hover styles, "focus" for focus, etc.'),
+  ui_state: z.enum(['neutral', 'hover', 'focus', 'active', 'disabled', 'current']).default('neutral').optional()
+    .describe('UI state: "hover" for hover styles, "focus" for focus, "current" for the active/current navigation link, etc.'),
 });
 
 const updateTextOp = z.object({
