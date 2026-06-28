@@ -20,6 +20,8 @@ import { base62ToUuid } from '@/lib/convertion-utils'
 import { getSupabaseAdmin } from '@/lib/supabase-server'
 
 import { mediaContentType, type OutputFile } from './writers/types'
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 /**
  * SEO-proxy URL pattern Ycode emits for asset variables: `/a/<22-char hash>/<filename>`.
@@ -84,6 +86,7 @@ async function fetchAssetByProxyUrl(
   client: SupabaseAssetClient,
   proxyUrl: string,
 ): Promise<OutputFile | null> {
+  const tenantId = await resolveEffectiveTenantId();
   const match = proxyUrl.match(/\/a\/([A-Za-z0-9]{22})\//)
   if (!match) return null
 
@@ -94,13 +97,13 @@ async function fetchAssetByProxyUrl(
     return null
   }
 
-  const { data: asset, error } = await client
+  const { data: asset, error } = await applyTenantEq(client
     .from('assets')
     .select('id, filename, mime_type, public_url')
     .eq('id', assetId)
     .eq('is_published', true)
     .is('deleted_at', null)
-    .maybeSingle()
+    .maybeSingle(), tenantId)
 
   if (error || !asset?.public_url) {
     console.warn(`[Static Export] Could not look up asset for ${proxyUrl}: ${error?.message ?? 'not found'}`)

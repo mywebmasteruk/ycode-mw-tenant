@@ -14,6 +14,7 @@ import {
   tenantAllPagesTag,
   tenantRouteTag,
 } from '@/lib/masjidweb/tenant-cache-tags';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 /**
  * Maximum number of routes to warm in a single invalidation event.
@@ -343,6 +344,7 @@ export async function clearAllCache(
  * returning a {slug} placeholder (which would never match a real cache tag).
  */
 export async function getRoutePathsForPages(pageIds: string[]): Promise<string[]> {
+  const tenantId = await resolveEffectiveTenantId();
   if (pageIds.length === 0) return [];
 
   const client = await getSupabaseAdmin();
@@ -354,10 +356,10 @@ export async function getRoutePathsForPages(pageIds: string[]): Promise<string[]
     { data: locales },
     { data: translations },
   ] = await Promise.all([
-    client.from('pages').select('*').in('id', pageIds).eq('is_published', true).is('deleted_at', null),
-    client.from('page_folders').select('*').eq('is_published', true).is('deleted_at', null),
-    client.from('locales').select('*').is('deleted_at', null),
-    client.from('translations').select('*').eq('is_published', true).is('deleted_at', null),
+    applyTenantEq(client.from('pages').select('*').in('id', pageIds).eq('is_published', true).is('deleted_at', null), tenantId),
+    applyTenantEq(client.from('page_folders').select('*').eq('is_published', true).is('deleted_at', null), tenantId),
+    applyTenantEq(client.from('locales').select('*').is('deleted_at', null), tenantId),
+    applyTenantEq(client.from('translations').select('*').eq('is_published', true).is('deleted_at', null), tenantId),
   ]);
 
   if (!pages || !folders) return [];
@@ -444,42 +446,43 @@ async function resolveDynamicPageRoutes(
   locales: Array<{ id: string; code: string; is_default: boolean }>,
   translationsMap: Record<string, Record<string, string>>,
 ): Promise<string[]> {
+  const tenantId = await resolveEffectiveTenantId();
   const routes: string[] = [];
 
   for (const page of dynamicPages) {
     const collectionId = (page.settings as any)?.cms?.collection_id;
     if (!collectionId) continue;
 
-    const { data: slugField } = await client
+    const { data: slugField } = await applyTenantEq(client
       .from('collection_fields')
       .select('id')
       .eq('collection_id', collectionId)
       .eq('key', 'slug')
       .is('deleted_at', null)
       .limit(1)
-      .single();
+      .single(), tenantId);
 
     if (!slugField) continue;
 
-    const { data: items } = await client
+    const { data: items } = await applyTenantEq(client
       .from('collection_items')
       .select('id')
       .eq('collection_id', collectionId)
       .eq('is_published', true)
-      .is('deleted_at', null);
+      .is('deleted_at', null), tenantId);
 
     if (!items || items.length === 0) continue;
 
     const itemIds = items.map(i => i.id);
     const slugValues: Array<{ item_id: string; value: unknown }> = [];
     for (const idChunk of chunk(itemIds, SUPABASE_IN_LIMIT)) {
-      const { data } = await client
+      const { data } = await applyTenantEq(client
         .from('collection_item_values')
         .select('item_id, value')
         .eq('field_id', slugField.id)
         .eq('is_published', true)
         .is('deleted_at', null)
-        .in('item_id', idChunk);
+        .in('item_id', idChunk), tenantId);
       if (data) slugValues.push(...data);
     }
 
@@ -532,6 +535,7 @@ async function resolveDynamicPageRoutes(
 export async function getRoutePathsForDeletedCollectionItems(
   deletedSlugs: Map<string, string[]>,
 ): Promise<string[]> {
+  const tenantId = await resolveEffectiveTenantId();
   if (deletedSlugs.size === 0) return [];
 
   const client = await getSupabaseAdmin();
@@ -545,13 +549,13 @@ export async function getRoutePathsForDeletedCollectionItems(
     { data: locales },
     { data: translations },
   ] = await Promise.all([
-    client.from('pages').select('*').eq('is_published', true).eq('is_dynamic', true).is('deleted_at', null),
-    client.from('page_folders').select('*').eq('is_published', true).is('deleted_at', null),
-    client.from('locales').select('*').is('deleted_at', null),
-    client.from('translations')
+    applyTenantEq(client.from('pages').select('*').eq('is_published', true).eq('is_dynamic', true).is('deleted_at', null), tenantId),
+    applyTenantEq(client.from('page_folders').select('*').eq('is_published', true).is('deleted_at', null), tenantId),
+    applyTenantEq(client.from('locales').select('*').is('deleted_at', null), tenantId),
+    applyTenantEq(client.from('translations')
       .select('locale_id, source_type, source_id, content_key, content_value')
       .eq('is_published', true).is('deleted_at', null)
-      .in('content_key', ['slug', 'field:key:slug']),
+      .in('content_key', ['slug', 'field:key:slug']), tenantId),
   ]);
 
   if (!dynamicPages || !folders) return [];
@@ -569,21 +573,21 @@ export async function getRoutePathsForDeletedCollectionItems(
   const slugToItemIdByCollection = new Map<string, Map<string, string>>();
   for (const [collectionId, slugs] of deletedSlugs) {
     if (!slugs || slugs.length === 0) continue;
-    const { data: slugField } = await client
+    const { data: slugField } = await applyTenantEq(client
       .from('collection_fields')
       .select('id')
       .eq('collection_id', collectionId)
       .eq('key', 'slug')
       .is('deleted_at', null)
       .limit(1)
-      .single();
+      .single(), tenantId);
     if (!slugField) continue;
-    const { data: values } = await client
+    const { data: values } = await applyTenantEq(client
       .from('collection_item_values')
       .select('item_id, value')
       .eq('field_id', slugField.id)
       .is('deleted_at', null)
-      .in('value', slugs);
+      .in('value', slugs), tenantId);
     const map = new Map<string, string>();
     for (const v of values || []) {
       if (typeof v.value === 'string') map.set(v.value, v.item_id);
@@ -684,20 +688,21 @@ export interface SelectiveInvalidationResult {
  * (404/401, etc.). Error pages carry an `error_page` code instead of a slug.
  */
 async function hasErrorPage(pageIds: string[]): Promise<boolean> {
+  const tenantId = await resolveEffectiveTenantId();
   if (pageIds.length === 0) return false;
 
   const client = await getSupabaseAdmin();
   if (!client) return false;
 
   for (const ids of chunk(pageIds, SUPABASE_IN_LIMIT)) {
-    const { data } = await client
+    const { data } = await applyTenantEq(client
       .from('pages')
       .select('id')
       .in('id', ids)
       .eq('is_published', true)
       .not('error_page', 'is', null)
       .is('deleted_at', null)
-      .limit(1);
+      .limit(1), tenantId);
 
     if (data && data.length > 0) return true;
   }
@@ -763,14 +768,15 @@ export async function selectiveInvalidation(
  * visitor doesn't pay the cold-cache cost.
  */
 export async function getAllPublishedRoutes(): Promise<string[]> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
   if (!client) return [];
 
-  const { data: pages } = await client
+  const { data: pages } = await applyTenantEq(client
     .from('pages')
     .select('id')
     .eq('is_published', true)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (!pages || pages.length === 0) return [];
 
@@ -858,6 +864,7 @@ interface CurrentLocalisationState {
 
 /** Read everything we need to construct locale URLs (post-upsert state). */
 async function loadCurrentLocalisationState(): Promise<CurrentLocalisationState | null> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
   if (!client) return null;
 
@@ -870,15 +877,15 @@ async function loadCurrentLocalisationState(): Promise<CurrentLocalisationState 
     { data: collectionFields },
     { data: collectionItemValues },
   ] = await Promise.all([
-    client.from('pages').select('*').eq('is_published', true).is('deleted_at', null),
-    client.from('page_folders').select('*').eq('is_published', true).is('deleted_at', null),
-    client.from('locales').select('*').eq('is_published', true).is('deleted_at', null),
-    client.from('translations').select('locale_id, source_type, source_id, content_key, content_value')
+    applyTenantEq(client.from('pages').select('*').eq('is_published', true).is('deleted_at', null), tenantId),
+    applyTenantEq(client.from('page_folders').select('*').eq('is_published', true).is('deleted_at', null), tenantId),
+    applyTenantEq(client.from('locales').select('*').eq('is_published', true).is('deleted_at', null), tenantId),
+    applyTenantEq(client.from('translations').select('locale_id, source_type, source_id, content_key, content_value')
       .eq('is_published', true).is('deleted_at', null)
-      .in('content_key', ['slug', 'field:key:slug']),
-    client.from('collection_items').select('id, collection_id').eq('is_published', true).is('deleted_at', null),
-    client.from('collection_fields').select('id, collection_id, key').eq('key', 'slug').is('deleted_at', null),
-    client.from('collection_item_values').select('item_id, field_id, value').eq('is_published', true).is('deleted_at', null),
+      .in('content_key', ['slug', 'field:key:slug']), tenantId),
+    applyTenantEq(client.from('collection_items').select('id, collection_id').eq('is_published', true).is('deleted_at', null), tenantId),
+    applyTenantEq(client.from('collection_fields').select('id, collection_id, key').eq('key', 'slug').is('deleted_at', null), tenantId),
+    applyTenantEq(client.from('collection_item_values').select('item_id, field_id, value').eq('is_published', true).is('deleted_at', null), tenantId),
   ]);
 
   if (!pages || !folders) return null;

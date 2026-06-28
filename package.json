@@ -43,6 +43,7 @@
     "updates:ai-repair": "npx ts-node scripts/ai-repair-safe-update.ts",
     "updates:premium-ai-repair": "npx ts-node scripts/core-update/run-premium-ai-repair.ts",
     "updates:isolation-gate": "npx tsx scripts/core-update/run-tenant-isolation-gate.ts",
+    "updates:isolation-audit": "npx tsx scripts/core-update/absolute-isolation-audit.ts",
     "updates:tier2-resolver": "npx tsx scripts/core-update/run-tenant-codemod-resolver.ts",
     "fonts:update": "npx ts-node scripts/fetch-google-fonts.ts",
     "prepare": "husky"

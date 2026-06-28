@@ -32,6 +32,8 @@ import { listAllRecords, listRecordsByIds, getWebhookPayloads, deleteWebhook, re
 import { transformFieldValue } from './field-mapping';
 import type { AirtableConnection, AirtableRecord, AirtableWebhookPayload, SyncResult, TableChanges } from './types';
 import type { CollectionFieldType, CollectionField } from '@/types';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 export const APP_ID = 'airtable';
 const HIDDEN_FIELD_KEY = 'airtable_id';
@@ -748,18 +750,19 @@ async function getExistingAirtableRecordIds(
   recordIdFieldId: string,
   airtableRecordIds: string[]
 ): Promise<Set<string>> {
+  const tenantId = await resolveEffectiveTenantId();
   if (airtableRecordIds.length === 0) return new Set();
 
   const client = await getSupabaseAdmin();
   if (!client) return new Set();
 
-  const { data } = await client
+  const { data } = await applyTenantEq(client
     .from('collection_item_values')
     .select('value')
     .eq('field_id', recordIdFieldId)
     .eq('is_published', false)
     .is('deleted_at', null)
-    .in('value', airtableRecordIds);
+    .in('value', airtableRecordIds), tenantId);
 
   return new Set((data || []).map((row) => row.value).filter(Boolean));
 }
@@ -1091,16 +1094,17 @@ async function batchUpsertValues(
 
 /** Soft-delete multiple items in a single query */
 async function batchSoftDelete(itemIds: string[]): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
   if (!client) throw new Error('Supabase not configured');
 
   const now = new Date().toISOString();
 
-  const { error } = await client
+  const { error } = await applyTenantEq(client
     .from('collection_items')
     .update({ deleted_at: now, updated_at: now })
     .in('id', itemIds)
-    .eq('is_published', false);
+    .eq('is_published', false), tenantId);
 
   if (error) throw new Error(`Batch delete failed: ${error.message}`);
 }

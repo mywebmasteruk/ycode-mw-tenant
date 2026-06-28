@@ -1032,11 +1032,11 @@ export async function backfillMissingPageHashes(): Promise<{
   let pagesUpdated = 0;
   let layersUpdated = 0;
 
-  const { data: pagesToBackfill } = await client
+  const { data: pagesToBackfill } = await applyTenantEq(client
     .from('pages')
     .select('*')
     .is('content_hash', null)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (pagesToBackfill && pagesToBackfill.length > 0) {
     const upsertRows = pagesToBackfill.map((page) => ({ tenant_id: tenantId,
@@ -1062,11 +1062,11 @@ export async function backfillMissingPageHashes(): Promise<{
     }
   }
 
-  const { data: layersToBackfill } = await client
+  const { data: layersToBackfill } = await applyTenantEq(client
     .from('page_layers')
     .select('*')
     .is('content_hash', null)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (layersToBackfill && layersToBackfill.length > 0) {
     const upsertRows = layersToBackfill.map((row) => ({

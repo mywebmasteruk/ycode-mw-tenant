@@ -2,6 +2,8 @@ import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { getFieldsByCollectionId, getFieldById } from '@/lib/repositories/collectionFieldRepository';
 import { parseMultiReferenceValue } from '@/lib/collection-utils';
 import type { CollectionField, CollectionItemWithValues } from '@/types';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 /**
  * Collection Count Repository
@@ -64,6 +66,7 @@ async function loadCountFieldContexts(
 async function buildCountMap(
   sourceField: CollectionField,
 ): Promise<Map<string, number>> {
+  const tenantId = await resolveEffectiveTenantId();
   const counts = new Map<string, number>();
   const client = await getSupabaseAdmin();
   if (!client) return counts;
@@ -73,14 +76,14 @@ async function buildCountMap(
   // and items with pending changes — all exactly once. Joining via inner
   // select on `collection_items` filters out values whose owning item has
   // been soft-deleted.
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('collection_item_values')
     .select('value, collection_items!inner(id, is_published, deleted_at)')
     .eq('field_id', sourceField.id)
     .eq('is_published', false)
     .is('deleted_at', null)
     .eq('collection_items.is_published', false)
-    .is('collection_items.deleted_at', null);
+    .is('collection_items.deleted_at', null), tenantId);
 
   if (error) {
     console.error(`[count] Failed to load reference values for field ${sourceField.id}: ${error.message}`);

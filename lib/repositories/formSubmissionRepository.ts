@@ -51,6 +51,10 @@ export async function getAllFormSubmissions(
 
   if (error) {
     if (tenantId && isMissingTenantScopeColumnError(error)) {
+      // Legacy fallback: only reached when the tenant_id column is absent
+      // (pre-migration). The column exists on all live envs, so the primary
+      // applyTenantOrLegacyScope path above always applies.
+      // isolation-ok: pre-migration legacy fallback (tenant_id column absent)
       let legacyQuery = client
         .from('form_submissions')
         .select('*')

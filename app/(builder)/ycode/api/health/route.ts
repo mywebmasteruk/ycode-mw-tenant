@@ -10,6 +10,8 @@ export async function GET() {
   try {
     const sb = await getSupabaseAdmin();
     if (sb) {
+      // DB connectivity probe — returns no row data to the caller (only ok/ms).
+      // isolation-ok: not tenant-relevant; selects one arbitrary column to ping
       const { error } = await sb.from('settings').select('key').limit(1);
       checks.supabase = error
         ? { ok: false, ms: Date.now() - supaStart, error: error.message }

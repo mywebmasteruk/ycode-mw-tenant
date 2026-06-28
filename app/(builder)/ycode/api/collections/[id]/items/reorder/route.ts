@@ -1,6 +1,8 @@
 import { NextRequest } from 'next/server';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { noCache } from '@/lib/api-response';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 // Disable caching for this route
 export const dynamic = 'force-dynamic';
@@ -15,6 +17,7 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const tenantId = await resolveEffectiveTenantId();
   try {
     const { id: collectionId } = await params;
     
@@ -48,7 +51,7 @@ export async function POST(
     
     // Update manual_order on draft rows only so publish detects the change
     const updatePromises = updates.map(({ id, manual_order }) =>
-      client
+      applyTenantEq(client
         .from('collection_items')
         .update({
           manual_order,
@@ -56,7 +59,7 @@ export async function POST(
         })
         .eq('id', id)
         .eq('collection_id', collectionId)
-        .eq('is_published', false)
+        .eq('is_published', false), tenantId)
     );
     
     const results = await Promise.all(updatePromises);

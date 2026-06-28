@@ -3,6 +3,7 @@ import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { STORAGE_BUCKET } from '@/lib/asset-constants';
 import { getCollectionById } from '@/lib/repositories/collectionRepository';
 import type { CollectionImport, CollectionImportStatus } from '@/types';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 /**
  * Collection Import Repository
@@ -22,6 +23,7 @@ export interface CreateImportData {
  * Create a new import job
  */
 export async function createImport(data: CreateImportData): Promise<CollectionImport> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -35,7 +37,7 @@ export async function createImport(data: CreateImportData): Promise<CollectionIm
 
   const { data: result, error } = await client
     .from('collection_imports')
-    .insert({
+    .insert({ tenant_id: tenantId,
       collection_id: data.collection_id,
       column_mapping: data.column_mapping,
       csv_data: { storage_path: data.csv_storage_path },
@@ -59,17 +61,18 @@ export async function createImport(data: CreateImportData): Promise<CollectionIm
  * Get import by ID
  */
 export async function getImportById(id: string): Promise<CollectionImport | null> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('collection_imports')
     .select('*')
     .eq('id', id)
-    .single();
+    .single(), tenantId);
 
   if (error && error.code !== 'PGRST116') {
     throw new Error(`Failed to fetch import: ${error.message}`);
@@ -101,12 +104,12 @@ export async function getPendingImports(limit: number = 5): Promise<CollectionIm
 
   const fetchLimit = tenantId ? Math.max(limit * 20, limit) : limit;
 
-  const { data: raw, error } = await client
+  const { data: raw, error } = await applyTenantEq(client
     .from('collection_imports')
     .select('*')
     .in('status', ['pending', 'processing'])
     .order('created_at', { ascending: true })
-    .limit(fetchLimit);
+    .limit(fetchLimit), tenantId);
 
   if (error) {
     throw new Error(`Failed to fetch pending imports: ${error.message}`);
@@ -137,6 +140,7 @@ export async function updateImportStatus(
   id: string,
   status: CollectionImportStatus
 ): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -148,13 +152,13 @@ export async function updateImportStatus(
     throw new Error('Import not found');
   }
 
-  const { error } = await client
+  const { error } = await applyTenantEq(client
     .from('collection_imports')
     .update({
       status,
       updated_at: new Date().toISOString(),
     })
-    .eq('id', id);
+    .eq('id', id), tenantId);
 
   if (error) {
     throw new Error(`Failed to update import status: ${error.message}`);
@@ -170,6 +174,7 @@ export async function updateImportProgress(
   failedRows: number,
   errors: string[] | null = null
 ): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -191,10 +196,10 @@ export async function updateImportProgress(
     updateData.errors = errors;
   }
 
-  const { error } = await client
+  const { error } = await applyTenantEq(client
     .from('collection_imports')
     .update(updateData)
-    .eq('id', id);
+    .eq('id', id), tenantId);
 
   if (error) {
     throw new Error(`Failed to update import progress: ${error.message}`);
@@ -210,6 +215,7 @@ export async function completeImport(
   failedRows: number,
   errors: string[]
 ): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -223,7 +229,7 @@ export async function completeImport(
 
   const status: CollectionImportStatus = failedRows > 0 && processedRows === 0 ? 'failed' : 'completed';
 
-  const { error } = await client
+  const { error } = await applyTenantEq(client
     .from('collection_imports')
     .update({
       status,
@@ -232,7 +238,7 @@ export async function completeImport(
       errors: errors.length > 0 ? errors : null,
       updated_at: new Date().toISOString(),
     })
-    .eq('id', id);
+    .eq('id', id), tenantId);
 
   if (error) {
     throw new Error(`Failed to complete import: ${error.message}`);
@@ -243,6 +249,7 @@ export async function completeImport(
  * Delete import job
  */
 export async function deleteImport(id: string): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -254,10 +261,10 @@ export async function deleteImport(id: string): Promise<void> {
     throw new Error('Import not found');
   }
 
-  const { error } = await client
+  const { error } = await applyTenantEq(client
     .from('collection_imports')
     .delete()
-    .eq('id', id);
+    .eq('id', id), tenantId);
 
   if (error) {
     throw new Error(`Failed to delete import: ${error.message}`);
@@ -268,6 +275,7 @@ export async function deleteImport(id: string): Promise<void> {
  * Get imports for a collection
  */
 export async function getImportsByCollectionId(collectionId: string): Promise<CollectionImport[]> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -279,11 +287,11 @@ export async function getImportsByCollectionId(collectionId: string): Promise<Co
     return [];
   }
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('collection_imports')
     .select('*')
     .eq('collection_id', collectionId)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false }), tenantId);
 
   if (error) {
     throw new Error(`Failed to fetch imports: ${error.message}`);
@@ -300,16 +308,17 @@ const STALE_IMPORT_HOURS = 2;
  * (i.e. the user closed the page or the server crashed).
  */
 export async function cleanupStaleImports(): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
   if (!client) return;
 
   const cutoff = new Date(Date.now() - STALE_IMPORT_HOURS * 60 * 60 * 1000).toISOString();
 
-  const { data: staleImports, error } = await client
+  const { data: staleImports, error } = await applyTenantEq(client
     .from('collection_imports')
     .select('id, csv_data')
     .in('status', ['pending', 'processing'])
-    .lt('updated_at', cutoff);
+    .lt('updated_at', cutoff), tenantId);
 
   if (error || !staleImports?.length) return;
 
@@ -333,8 +342,8 @@ export async function cleanupStaleImports(): Promise<void> {
   }
 
   // Mark stale imports as failed
-  await client
+  await applyTenantEq(client
     .from('collection_imports')
     .update({ status: 'failed' as CollectionImportStatus, updated_at: new Date().toISOString() })
-    .in('id', importIds);
+    .in('id', importIds), tenantId);
 }

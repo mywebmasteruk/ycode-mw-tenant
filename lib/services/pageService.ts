@@ -228,11 +228,11 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
   const unpublishedPageRoutes: string[] = [];
   if (nonPublishableDraftPages.length > 0) {
     const draftIds = nonPublishableDraftPages.map((p) => p.id);
-    const { data: livePages } = await client
+    const { data: livePages } = await applyTenantEq(client
       .from('pages')
       .select('id')
       .in('id', draftIds)
-      .eq('is_published', true);
+      .eq('is_published', true), tenantId);
 
     const livePageIds = (livePages || []).map((p) => p.id);
     if (livePageIds.length > 0) {
@@ -244,11 +244,11 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
       }
 
       // Delete live rows (page_layers removed via ON DELETE CASCADE)
-      await client
+      await applyTenantEq(client
         .from('pages')
         .delete()
         .in('id', livePageIds)
-        .eq('is_published', true);
+        .eq('is_published', true), tenantId);
     }
   }
 
@@ -494,22 +494,22 @@ export async function publishPages(pageIds: string[]): Promise<PublishPagesResul
       }
 
       // Delete page_layers first (FK constraint)
-      const { error: layersDeleteError } = await client
+      const { error: layersDeleteError } = await applyTenantEq(client
         .from('page_layers')
         .delete()
         .eq('is_published', true)
-        .in('page_id', idsToDelete);
+        .in('page_id', idsToDelete), tenantId);
 
       if (layersDeleteError) {
         throw new Error(`Failed to remove conflicting published page layers: ${layersDeleteError.message}`);
       }
 
       // Then delete the pages
-      const { error: deleteError } = await client
+      const { error: deleteError } = await applyTenantEq(client
         .from('pages')
         .delete()
         .eq('is_published', true)
-        .in('id', idsToDelete);
+        .in('id', idsToDelete), tenantId);
 
       if (deleteError) {
         throw new Error(`Failed to remove conflicting published pages: ${deleteError.message}`);

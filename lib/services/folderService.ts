@@ -24,26 +24,27 @@ async function collectAncestorFolderIds(
   pageIds: string[],
   client: any
 ): Promise<Set<string>> {
+  const tenantId = await resolveEffectiveTenantId();
   const folderIdsToPublish = new Set<string>();
 
   // Fetch pages to get their folder IDs
-  const { data: pagesToPublish } = await client
+  const { data: pagesToPublish } = await applyTenantEq(client
     .from('pages')
     .select('page_folder_id')
     .in('id', pageIds)
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (!pagesToPublish) {
     return folderIdsToPublish;
   }
 
   // Get all draft folders to traverse ancestors
-  const { data: allDraftFolders } = await client
+  const { data: allDraftFolders } = await applyTenantEq(client
     .from('page_folders')
     .select('*')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (!allDraftFolders) {
     return folderIdsToPublish;
@@ -161,12 +162,12 @@ export async function publishFolders(
       .map((f: PageFolder) => f.id);
 
     if (idsToSoftDelete.length > 0) {
-      await client
+      await applyTenantEq(client
         .from('page_folders')
         .update({ deleted_at: new Date().toISOString() })
         .eq('is_published', true)
         .in('id', idsToSoftDelete)
-        .is('deleted_at', null);
+        .is('deleted_at', null), tenantId);
     }
   }
 

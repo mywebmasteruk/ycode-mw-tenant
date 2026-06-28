@@ -9,6 +9,8 @@ import { isAssetOfType } from './asset-utils';
 import { ASSET_CATEGORIES, STORAGE_BUCKET, generateStoragePath, getDisplayName } from '@/lib/asset-constants';
 import sharp from 'sharp';
 import type { Asset } from '@/types';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 /**
  * Validate SVG content
@@ -305,6 +307,7 @@ export async function uploadFile(
  * @returns True if successful, false otherwise
  */
 export async function deleteAsset(assetId: string): Promise<boolean> {
+  const tenantId = await resolveEffectiveTenantId();
   try {
     const supabase = await getSupabaseAdmin();
 
@@ -312,11 +315,11 @@ export async function deleteAsset(assetId: string): Promise<boolean> {
       throw new Error('Supabase client not available');
     }
 
-    const { data: asset, error: fetchError } = await supabase
+    const { data: asset, error: fetchError } = await applyTenantEq(supabase
       .from('assets')
       .select('storage_path')
       .eq('id', assetId)
-      .single();
+      .single(), tenantId);
 
     if (fetchError || !asset) {
       console.error('Error fetching asset:', fetchError);
@@ -332,10 +335,10 @@ export async function deleteAsset(assetId: string): Promise<boolean> {
       return false;
     }
 
-    const { error: dbError } = await supabase
+    const { error: dbError } = await applyTenantEq(supabase
       .from('assets')
       .delete()
-      .eq('id', assetId);
+      .eq('id', assetId), tenantId);
 
     if (dbError) {
       console.error('Error deleting asset from database:', dbError);

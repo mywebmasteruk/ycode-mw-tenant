@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getItemsWithValues } from '@/lib/repositories/collectionItemRepository';
 import { noCache } from '@/lib/api-response';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 // Disable caching for this route
 export const dynamic = 'force-dynamic';
@@ -19,6 +21,7 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const tenantId = await resolveEffectiveTenantId();
   try {
     const { id } = await params;
     const collectionId = id; // UUID string, no parsing needed
@@ -43,13 +46,13 @@ export async function GET(
       // If item is deleted, check if it has published values
       if (item.deleted_at) {
         // Get published values to check if item was ever published
-        const { data: publishedValues, error: publishedCheckError } = await client
+        const { data: publishedValues, error: publishedCheckError } = await applyTenantEq(client
           .from('collection_item_values')
           .select('field_id')
           .eq('item_id', item.id)
           .eq('is_published', true)
           .is('deleted_at', null)
-          .limit(1);
+          .limit(1), tenantId);
 
         if (publishedCheckError) {
           console.error(`Error checking published values for item ${item.id}:`, publishedCheckError);
@@ -66,12 +69,12 @@ export async function GET(
 
       // If item is not publishable, check if it has a published version that needs removal
       if (!item.is_publishable) {
-        const { data: publishedItem } = await client
+        const { data: publishedItem } = await applyTenantEq(client
           .from('collection_items')
           .select('id')
           .eq('id', item.id)
           .eq('is_published', true)
-          .limit(1);
+          .limit(1), tenantId);
 
         if (publishedItem && publishedItem.length > 0) {
           unpublishedItems.push({ ...item, publish_status: 'deleted' });
@@ -80,12 +83,12 @@ export async function GET(
       }
 
       // Get draft values
-      const { data: draftValues, error: draftError } = await client
+      const { data: draftValues, error: draftError } = await applyTenantEq(client
         .from('collection_item_values')
         .select('field_id, value')
         .eq('item_id', item.id)
         .eq('is_published', false)
-        .is('deleted_at', null);
+        .is('deleted_at', null), tenantId);
 
       if (draftError) {
         console.error(`Error fetching draft values for item ${item.id}:`, draftError);
@@ -93,12 +96,12 @@ export async function GET(
       }
 
       // Get published values
-      const { data: publishedValues, error: publishedError } = await client
+      const { data: publishedValues, error: publishedError } = await applyTenantEq(client
         .from('collection_item_values')
         .select('field_id, value')
         .eq('item_id', item.id)
         .eq('is_published', true)
-        .is('deleted_at', null);
+        .is('deleted_at', null), tenantId);
 
       if (publishedError) {
         console.error(`Error fetching published values for item ${item.id}:`, publishedError);

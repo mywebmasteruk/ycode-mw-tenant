@@ -1,4 +1,6 @@
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 /**
  * Webhook Repository
@@ -98,16 +100,17 @@ export interface UpdateWebhookDeliveryData {
  * Get all webhooks
  */
 export async function getAllWebhooks(): Promise<Webhook[]> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('webhooks')
     .select('*')
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false }), tenantId);
 
   if (error) {
     throw new Error(`Failed to fetch webhooks: ${error.message}`);
@@ -120,17 +123,18 @@ export async function getAllWebhooks(): Promise<Webhook[]> {
  * Get webhook by ID
  */
 export async function getWebhookById(id: string): Promise<Webhook | null> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('webhooks')
     .select('*')
     .eq('id', id)
-    .single();
+    .single(), tenantId);
 
   if (error && error.code !== 'PGRST116') {
     throw new Error(`Failed to fetch webhook: ${error.message}`);
@@ -143,16 +147,17 @@ export async function getWebhookById(id: string): Promise<Webhook | null> {
  * Get all enabled webhooks for a specific event type
  */
 export async function getWebhooksForEvent(eventType: WebhookEventType): Promise<Webhook[]> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('webhooks')
     .select('*')
-    .eq('enabled', true);
+    .eq('enabled', true), tenantId);
 
   if (error) {
     throw new Error(`Failed to fetch webhooks for event: ${error.message}`);
@@ -168,6 +173,7 @@ export async function getWebhooksForEvent(eventType: WebhookEventType): Promise<
  * Create a new webhook
  */
 export async function createWebhook(webhookData: CreateWebhookData): Promise<Webhook> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -176,7 +182,7 @@ export async function createWebhook(webhookData: CreateWebhookData): Promise<Web
 
   const { data, error } = await client
     .from('webhooks')
-    .insert({
+    .insert({ tenant_id: tenantId,
       name: webhookData.name,
       url: webhookData.url,
       secret: webhookData.secret || null,
@@ -201,6 +207,7 @@ export async function createWebhook(webhookData: CreateWebhookData): Promise<Web
  * Update a webhook
  */
 export async function updateWebhook(id: string, updates: UpdateWebhookData): Promise<Webhook> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -218,12 +225,12 @@ export async function updateWebhook(id: string, updates: UpdateWebhookData): Pro
   if (updates.filters !== undefined) updateData.filters = updates.filters;
   if (updates.enabled !== undefined) updateData.enabled = updates.enabled;
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('webhooks')
     .update(updateData)
     .eq('id', id)
     .select()
-    .single();
+    .single(), tenantId);
 
   if (error) {
     throw new Error(`Failed to update webhook: ${error.message}`);
@@ -236,16 +243,17 @@ export async function updateWebhook(id: string, updates: UpdateWebhookData): Pro
  * Delete a webhook
  */
 export async function deleteWebhook(id: string): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { error } = await client
+  const { error } = await applyTenantEq(client
     .from('webhooks')
     .delete()
-    .eq('id', id);
+    .eq('id', id), tenantId);
 
   if (error) {
     throw new Error(`Failed to delete webhook: ${error.message}`);
@@ -256,6 +264,7 @@ export async function deleteWebhook(id: string): Promise<void> {
  * Update webhook trigger timestamp and reset failure count on success
  */
 export async function markWebhookTriggered(id: string, success: boolean): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -263,14 +272,14 @@ export async function markWebhookTriggered(id: string, success: boolean): Promis
   }
 
   if (success) {
-    await client
+    await applyTenantEq(client
       .from('webhooks')
       .update({
         last_triggered_at: new Date().toISOString(),
         failure_count: 0,
         updated_at: new Date().toISOString(),
       })
-      .eq('id', id);
+      .eq('id', id), tenantId);
   } else {
     // Increment failure count
     await client.rpc('increment_webhook_failure_count', { webhook_id: id });
@@ -281,6 +290,7 @@ export async function markWebhookTriggered(id: string, success: boolean): Promis
  * Increment webhook failure count (called when delivery fails)
  */
 export async function incrementWebhookFailureCount(id: string): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -288,25 +298,25 @@ export async function incrementWebhookFailureCount(id: string): Promise<void> {
   }
 
   // Use raw SQL to increment
-  const { error } = await client
+  const { error } = await applyTenantEq(client
     .from('webhooks')
     .update({
       failure_count: client.rpc('increment', { x: 1 }) as unknown as number,
       updated_at: new Date().toISOString(),
     })
-    .eq('id', id);
+    .eq('id', id), tenantId);
 
   // Fallback: fetch and update if rpc fails
   if (error) {
     const webhook = await getWebhookById(id);
     if (webhook) {
-      await client
+      await applyTenantEq(client
         .from('webhooks')
         .update({
           failure_count: webhook.failure_count + 1,
           updated_at: new Date().toISOString(),
         })
-        .eq('id', id);
+        .eq('id', id), tenantId);
     }
   }
 }
@@ -321,6 +331,7 @@ export async function incrementWebhookFailureCount(id: string): Promise<void> {
 export async function createWebhookDelivery(
   deliveryData: CreateWebhookDeliveryData
 ): Promise<WebhookDelivery> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -329,7 +340,7 @@ export async function createWebhookDelivery(
 
   const { data, error } = await client
     .from('webhook_deliveries')
-    .insert({
+    .insert({ tenant_id: tenantId,
       webhook_id: deliveryData.webhook_id,
       event_type: deliveryData.event_type,
       payload: deliveryData.payload,
@@ -354,16 +365,17 @@ export async function updateWebhookDelivery(
   id: string,
   updates: UpdateWebhookDeliveryData
 ): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { error } = await client
+  const { error } = await applyTenantEq(client
     .from('webhook_deliveries')
     .update(updates)
-    .eq('id', id);
+    .eq('id', id), tenantId);
 
   if (error) {
     throw new Error(`Failed to update webhook delivery: ${error.message}`);
@@ -377,6 +389,7 @@ export async function getWebhookDeliveries(
   webhookId: string,
   options: { limit?: number; offset?: number } = {}
 ): Promise<{ deliveries: WebhookDelivery[]; total: number }> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -387,22 +400,22 @@ export async function getWebhookDeliveries(
   const offset = options.offset || 0;
 
   // Get total count
-  const { count, error: countError } = await client
+  const { count, error: countError } = await applyTenantEq(client
     .from('webhook_deliveries')
     .select('*', { count: 'exact', head: true })
-    .eq('webhook_id', webhookId);
+    .eq('webhook_id', webhookId), tenantId);
 
   if (countError) {
     throw new Error(`Failed to count webhook deliveries: ${countError.message}`);
   }
 
   // Get paginated results
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('webhook_deliveries')
     .select('*')
     .eq('webhook_id', webhookId)
     .order('created_at', { ascending: false })
-    .range(offset, offset + limit - 1);
+    .range(offset, offset + limit - 1), tenantId);
 
   if (error) {
     throw new Error(`Failed to fetch webhook deliveries: ${error.message}`);
@@ -418,6 +431,7 @@ export async function getWebhookDeliveries(
  * Delete old webhook deliveries (cleanup)
  */
 export async function deleteOldWebhookDeliveries(olderThanDays: number = 30): Promise<number> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -427,11 +441,11 @@ export async function deleteOldWebhookDeliveries(olderThanDays: number = 30): Pr
   const cutoffDate = new Date();
   cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('webhook_deliveries')
     .delete()
     .lt('created_at', cutoffDate.toISOString())
-    .select('id');
+    .select('id'), tenantId);
 
   if (error) {
     throw new Error(`Failed to delete old webhook deliveries: ${error.message}`);

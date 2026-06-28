@@ -8,6 +8,8 @@ import { getSupabaseAdmin } from '@/lib/supabase-server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Layer } from '@/types';
 import { ASSET_FIELD_TYPES, findDisplayField } from './collection-field-utils';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 export interface AssetUsageEntry {
   id: string;
@@ -188,14 +190,15 @@ async function fetchCollectionNames(
   client: SupabaseClient,
   collectionIds: string[]
 ): Promise<Record<string, string>> {
+  const tenantId = await resolveEffectiveTenantId();
   if (collectionIds.length === 0) return {};
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('collections')
     .select('id, name')
     .in('id', collectionIds)
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (error) {
     throw new Error(`Failed to fetch collections: ${error.message}`);
@@ -220,13 +223,14 @@ async function fetchAssetFieldsWithDefaults(
   client: SupabaseClient,
   selectColumns: string = 'id, name, collection_id, default'
 ): Promise<AssetFieldDefault[]> {
-  const { data, error } = await client
+  const tenantId = await resolveEffectiveTenantId();
+  const { data, error } = await applyTenantEq(client
     .from('collection_fields')
     .select(selectColumns)
     .in('type', ASSET_FIELD_TYPES)
     .eq('is_published', false)
     .is('deleted_at', null)
-    .not('default', 'is', null);
+    .not('default', 'is', null), tenantId);
 
   if (error) {
     throw new Error(`Failed to fetch field defaults: ${error.message}`);
@@ -238,6 +242,7 @@ async function fetchAssetFieldsWithDefaults(
  * Get asset usage with names across pages, components, and CMS items
  */
 export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -252,11 +257,11 @@ export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> 
   const pageIdsWithAsset = new Set<string>();
 
   // Check page layers (draft versions)
-  const { data: pageLayersRecords, error: pageLayersError } = await client
+  const { data: pageLayersRecords, error: pageLayersError } = await applyTenantEq(client
     .from('page_layers')
     .select('id, page_id, layers')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (pageLayersError) {
     throw new Error(`Failed to fetch page layers: ${pageLayersError.message}`);
@@ -269,11 +274,11 @@ export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> 
   }
 
   // Check page settings for SEO images
-  const { data: pagesData, error: pagesError } = await client
+  const { data: pagesData, error: pagesError } = await applyTenantEq(client
     .from('pages')
     .select('id, name, settings')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (pagesError) {
     throw new Error(`Failed to fetch pages: ${pagesError.message}`);
@@ -294,11 +299,11 @@ export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> 
   }
 
   // Check components (draft versions)
-  const { data: components, error: componentsError } = await client
+  const { data: components, error: componentsError } = await applyTenantEq(client
     .from('components')
     .select('id, name, layers')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (componentsError) {
     throw new Error(`Failed to fetch components: ${componentsError.message}`);
@@ -311,12 +316,12 @@ export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> 
   }
 
   // Check CMS collection item values (image/file fields)
-  const { data: imageFields, error: fieldsError } = await client
+  const { data: imageFields, error: fieldsError } = await applyTenantEq(client
     .from('collection_fields')
     .select('id, collection_id')
     .in('type', ['image', 'file'])
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (fieldsError) {
     throw new Error(`Failed to fetch collection fields: ${fieldsError.message}`);
@@ -325,13 +330,13 @@ export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> 
   if (imageFields && imageFields.length > 0) {
     const fieldIds = imageFields.map((f) => f.id);
 
-    const { data: itemValues, error: valuesError } = await client
+    const { data: itemValues, error: valuesError } = await applyTenantEq(client
       .from('collection_item_values')
       .select('item_id')
       .in('field_id', fieldIds)
       .eq('value', assetId)
       .eq('is_published', false)
-      .is('deleted_at', null);
+      .is('deleted_at', null), tenantId);
 
     if (valuesError) {
       throw new Error(`Failed to fetch item values: ${valuesError.message}`);
@@ -340,12 +345,12 @@ export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> 
     const uniqueItemIds = [...new Set(itemValues?.map((v) => v.item_id) || [])];
     if (uniqueItemIds.length > 0) {
       // Get items with collection_id
-      const { data: items, error: itemsError } = await client
+      const { data: items, error: itemsError } = await applyTenantEq(client
         .from('collection_items')
         .select('id, collection_id')
         .in('id', uniqueItemIds)
         .eq('is_published', false)
-        .is('deleted_at', null);
+        .is('deleted_at', null), tenantId);
 
       if (itemsError) {
         throw new Error(`Failed to fetch collection items: ${itemsError.message}`);
@@ -354,12 +359,12 @@ export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> 
       const cmsCollectionIds = [...new Set((items || []).map((i) => i.collection_id))];
 
       // Get fields for display name (key=name, title, or first text field)
-      const { data: allFields, error: allFieldsError } = await client
+      const { data: allFields, error: allFieldsError } = await applyTenantEq(client
         .from('collection_fields')
         .select('id, key, type, fillable, collection_id')
         .in('collection_id', cmsCollectionIds)
         .eq('is_published', false)
-        .is('deleted_at', null);
+        .is('deleted_at', null), tenantId);
 
       if (allFieldsError) {
         throw new Error(`Failed to fetch collection fields: ${allFieldsError.message}`);
@@ -377,13 +382,13 @@ export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> 
 
       // Get values for display fields
       const displayFieldIds = Object.values(displayFieldByCollection).map((f) => f.id);
-      const { data: displayValues, error: displayValuesError } = await client
+      const { data: displayValues, error: displayValuesError } = await applyTenantEq(client
         .from('collection_item_values')
         .select('item_id, field_id, value')
         .in('item_id', uniqueItemIds)
         .in('field_id', displayFieldIds)
         .eq('is_published', false)
-        .is('deleted_at', null);
+        .is('deleted_at', null), tenantId);
 
       if (displayValuesError) {
         throw new Error(`Failed to fetch display values: ${displayValuesError.message}`);
@@ -406,12 +411,12 @@ export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> 
   }
 
   // Check CMS link field values that embed an asset reference in JSON
-  const { data: linkFields, error: linkFieldsError } = await client
+  const { data: linkFields, error: linkFieldsError } = await applyTenantEq(client
     .from('collection_fields')
     .select('id, collection_id')
     .eq('type', 'link')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (linkFieldsError) {
     throw new Error(`Failed to fetch link fields: ${linkFieldsError.message}`);
@@ -421,13 +426,13 @@ export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> 
     const linkFieldIds = linkFields.map((f) => f.id);
 
     // Fetch values that contain the asset ID substring (pre-filter)
-    const { data: linkItemValues, error: linkValuesError } = await client
+    const { data: linkItemValues, error: linkValuesError } = await applyTenantEq(client
       .from('collection_item_values')
       .select('item_id, value')
       .in('field_id', linkFieldIds)
       .like('value', `%${assetId}%`)
       .eq('is_published', false)
-      .is('deleted_at', null);
+      .is('deleted_at', null), tenantId);
 
     if (linkValuesError) {
       throw new Error(`Failed to fetch link field values: ${linkValuesError.message}`);
@@ -443,12 +448,12 @@ export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> 
     );
 
     if (uniqueLinkItemIds.length > 0) {
-      const { data: linkItems, error: linkItemsError } = await client
+      const { data: linkItems, error: linkItemsError } = await applyTenantEq(client
         .from('collection_items')
         .select('id, collection_id')
         .in('id', uniqueLinkItemIds)
         .eq('is_published', false)
-        .is('deleted_at', null);
+        .is('deleted_at', null), tenantId);
 
       if (linkItemsError) {
         throw new Error(`Failed to fetch link items: ${linkItemsError.message}`);
@@ -457,12 +462,12 @@ export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> 
       const linkCollectionIds = [...new Set((linkItems || []).map((i) => i.collection_id))];
 
       // Get display fields for these collections
-      const { data: linkAllFields } = await client
+      const { data: linkAllFields } = await applyTenantEq(client
         .from('collection_fields')
         .select('id, key, type, fillable, collection_id')
         .in('collection_id', linkCollectionIds)
         .eq('is_published', false)
-        .is('deleted_at', null);
+        .is('deleted_at', null), tenantId);
 
       const linkDisplayFieldByCollection: Record<string, { id: string }> = {};
       for (const collectionId of linkCollectionIds) {
@@ -474,13 +479,13 @@ export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> 
       }
 
       const linkDisplayFieldIds = Object.values(linkDisplayFieldByCollection).map((f) => f.id);
-      const { data: linkDisplayValues } = await client
+      const { data: linkDisplayValues } = await applyTenantEq(client
         .from('collection_item_values')
         .select('item_id, field_id, value')
         .in('item_id', uniqueLinkItemIds)
         .in('field_id', linkDisplayFieldIds)
         .eq('is_published', false)
-        .is('deleted_at', null);
+        .is('deleted_at', null), tenantId);
 
       const linkValueByItem: Record<string, string> = {};
       linkDisplayValues?.forEach((row: any) => {
@@ -546,6 +551,7 @@ export async function getAssetUsage(assetId: string): Promise<AssetUsageResult> 
 export async function getBulkAssetUsage(
   assetIds: string[]
 ): Promise<Record<string, AssetUsageResult>> {
+  const tenantId = await resolveEffectiveTenantId();
   if (assetIds.length === 0) {
     return {};
   }
@@ -566,11 +572,11 @@ export async function getBulkAssetUsage(
   const assetIdSet = new Set(assetIds);
 
   // Check page layers
-  const { data: pageLayersRecords, error: pageLayersError } = await client
+  const { data: pageLayersRecords, error: pageLayersError } = await applyTenantEq(client
     .from('page_layers')
     .select('id, page_id, layers')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (pageLayersError) {
     throw new Error(`Failed to fetch page layers: ${pageLayersError.message}`);
@@ -593,11 +599,11 @@ export async function getBulkAssetUsage(
   }
 
   // Check page settings
-  const { data: pages, error: pagesError } = await client
+  const { data: pages, error: pagesError } = await applyTenantEq(client
     .from('pages')
     .select('id, settings')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (pagesError) {
     throw new Error(`Failed to fetch pages: ${pagesError.message}`);
@@ -617,11 +623,11 @@ export async function getBulkAssetUsage(
   const pageIds = [...new Set(assetIds.flatMap((id) => [...pageIdsByAsset[id]]))];
   let pageNamesById: Record<string, string> = {};
   if (pageIds.length > 0) {
-    const { data: pagesWithNames } = await client
+    const { data: pagesWithNames } = await applyTenantEq(client
       .from('pages')
       .select('id, name')
       .in('id', pageIds)
-      .eq('is_published', false);
+      .eq('is_published', false), tenantId);
     pageNamesById = (pagesWithNames || []).reduce((acc, p) => ({ ...acc, [p.id]: p.name ?? 'Unknown Page' }), {});
   }
 
@@ -633,11 +639,11 @@ export async function getBulkAssetUsage(
   }
 
   // Check components
-  const { data: components, error: componentsError } = await client
+  const { data: components, error: componentsError } = await applyTenantEq(client
     .from('components')
     .select('id, name, layers')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (componentsError) {
     throw new Error(`Failed to fetch components: ${componentsError.message}`);
@@ -656,12 +662,12 @@ export async function getBulkAssetUsage(
   // Check CMS items
   let cmsCollectionIds: string[] = [];
 
-  const { data: imageFields, error: fieldsError } = await client
+  const { data: imageFields, error: fieldsError } = await applyTenantEq(client
     .from('collection_fields')
     .select('id')
     .in('type', ['image', 'file'])
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (fieldsError) {
     throw new Error(`Failed to fetch collection fields: ${fieldsError.message}`);
@@ -670,13 +676,13 @@ export async function getBulkAssetUsage(
   if (imageFields && imageFields.length > 0) {
     const fieldIds = imageFields.map((f) => f.id);
 
-    const { data: itemValues, error: valuesError } = await client
+    const { data: itemValues, error: valuesError } = await applyTenantEq(client
       .from('collection_item_values')
       .select('item_id, value')
       .in('field_id', fieldIds)
       .in('value', assetIds)
       .eq('is_published', false)
-      .is('deleted_at', null);
+      .is('deleted_at', null), tenantId);
 
     if (valuesError) {
       throw new Error(`Failed to fetch item values: ${valuesError.message}`);
@@ -697,12 +703,12 @@ export async function getBulkAssetUsage(
     const itemCollectionById: Record<string, string> = {};
 
     if (uniqueItemIds.length > 0) {
-      const { data: items } = await client
+      const { data: items } = await applyTenantEq(client
         .from('collection_items')
         .select('id, collection_id')
         .in('id', uniqueItemIds)
         .eq('is_published', false)
-        .is('deleted_at', null);
+        .is('deleted_at', null), tenantId);
 
       (items || []).forEach((i: any) => {
         itemCollectionById[i.id] = i.collection_id;
@@ -720,12 +726,12 @@ export async function getBulkAssetUsage(
   }
 
   // Check CMS link field values that embed asset references in JSON
-  const { data: linkFields, error: linkFieldsError } = await client
+  const { data: linkFields, error: linkFieldsError } = await applyTenantEq(client
     .from('collection_fields')
     .select('id')
     .eq('type', 'link')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (linkFieldsError) {
     throw new Error(`Failed to fetch link fields: ${linkFieldsError.message}`);
@@ -737,13 +743,13 @@ export async function getBulkAssetUsage(
     // Fetch link values that contain any of the asset IDs (pre-filter with OR of LIKE patterns)
     // For bulk, we check each asset individually since LIKE doesn't support IN
     for (const assetId of assetIds) {
-      const { data: linkItemValues } = await client
+      const { data: linkItemValues } = await applyTenantEq(client
         .from('collection_item_values')
         .select('item_id, value')
         .in('field_id', linkFieldIds)
         .like('value', `%${assetId}%`)
         .eq('is_published', false)
-        .is('deleted_at', null);
+        .is('deleted_at', null), tenantId);
 
       for (const v of linkItemValues || []) {
         if (v.value && collectionLinkValueHasAsset(v.value, assetId)) {
@@ -769,12 +775,12 @@ export async function getBulkAssetUsage(
     }
 
     if (linkItemIds.size > 0) {
-      const { data: linkItems } = await client
+      const { data: linkItems } = await applyTenantEq(client
         .from('collection_items')
         .select('id, collection_id')
         .in('id', [...linkItemIds])
         .eq('is_published', false)
-        .is('deleted_at', null);
+        .is('deleted_at', null), tenantId);
 
       const linkItemCollectionById: Record<string, string> = {};
       (linkItems || []).forEach((i: any) => {
@@ -977,6 +983,7 @@ export interface AssetCleanupResult {
  * Returns affected entities with before/after states for version tracking
  */
 export async function cleanupAssetReferences(assetId: string): Promise<AssetCleanupResult> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -990,11 +997,11 @@ export async function cleanupAssetReferences(assetId: string): Promise<AssetClea
   const affectedComponents: AffectedComponentEntity[] = [];
 
   // 1. Update page layers (draft versions)
-  const { data: pageLayersRecords, error: pageLayersError } = await client
+  const { data: pageLayersRecords, error: pageLayersError } = await applyTenantEq(client
     .from('page_layers')
     .select('id, page_id, layers')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (pageLayersError) {
     throw new Error(`Failed to fetch page layers: ${pageLayersError.message}`);
@@ -1017,11 +1024,11 @@ export async function cleanupAssetReferences(assetId: string): Promise<AssetClea
   // Batch update page layers
   if (pageLayersToUpdate.length > 0) {
     for (const { id, pageId, previousLayers, newLayers } of pageLayersToUpdate) {
-      const { error } = await client
+      const { error } = await applyTenantEq(client
         .from('page_layers')
         .update({ layers: newLayers, updated_at: new Date().toISOString() })
         .eq('id', id)
-        .eq('is_published', false);
+        .eq('is_published', false), tenantId);
 
       if (error) {
         console.error(`Failed to update page_layers ${id}:`, error);
@@ -1033,11 +1040,11 @@ export async function cleanupAssetReferences(assetId: string): Promise<AssetClea
   }
 
   // 2. Update page settings (SEO images)
-  const { data: pagesData, error: pagesError } = await client
+  const { data: pagesData, error: pagesError } = await applyTenantEq(client
     .from('pages')
     .select('id, settings')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (pagesError) {
     throw new Error(`Failed to fetch pages: ${pagesError.message}`);
@@ -1058,11 +1065,11 @@ export async function cleanupAssetReferences(assetId: string): Promise<AssetClea
   // Batch update pages
   if (pagesToUpdate.length > 0) {
     for (const { id, settings } of pagesToUpdate) {
-      const { error } = await client
+      const { error } = await applyTenantEq(client
         .from('pages')
         .update({ settings, updated_at: new Date().toISOString() })
         .eq('id', id)
-        .eq('is_published', false);
+        .eq('is_published', false), tenantId);
 
       if (error) {
         console.error(`Failed to update page ${id}:`, error);
@@ -1072,11 +1079,11 @@ export async function cleanupAssetReferences(assetId: string): Promise<AssetClea
   }
 
   // 3. Update components (draft versions)
-  const { data: components, error: componentsError } = await client
+  const { data: components, error: componentsError } = await applyTenantEq(client
     .from('components')
     .select('id, layers')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (componentsError) {
     throw new Error(`Failed to fetch components: ${componentsError.message}`);
@@ -1098,11 +1105,11 @@ export async function cleanupAssetReferences(assetId: string): Promise<AssetClea
   // Batch update components
   if (componentsToUpdate.length > 0) {
     for (const { id, previousLayers, newLayers } of componentsToUpdate) {
-      const { error } = await client
+      const { error } = await applyTenantEq(client
         .from('components')
         .update({ layers: newLayers, updated_at: new Date().toISOString() })
         .eq('id', id)
-        .eq('is_published', false);
+        .eq('is_published', false), tenantId);
 
       if (error) {
         console.error(`Failed to update component ${id}:`, error);
@@ -1114,12 +1121,12 @@ export async function cleanupAssetReferences(assetId: string): Promise<AssetClea
   }
 
   // 4. Update CMS collection item values (nullify asset references)
-  const { data: imageFields, error: fieldsError } = await client
+  const { data: imageFields, error: fieldsError } = await applyTenantEq(client
     .from('collection_fields')
     .select('id')
     .in('type', ['image', 'file'])
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (fieldsError) {
     throw new Error(`Failed to fetch collection fields: ${fieldsError.message}`);
@@ -1129,14 +1136,14 @@ export async function cleanupAssetReferences(assetId: string): Promise<AssetClea
     const fieldIds = imageFields.map((f) => f.id);
 
     // Update all values that reference this asset to null
-    const { data: updatedValues, error: updateError } = await client
+    const { data: updatedValues, error: updateError } = await applyTenantEq(client
       .from('collection_item_values')
       .update({ value: null, updated_at: new Date().toISOString() })
       .in('field_id', fieldIds)
       .eq('value', assetId)
       .eq('is_published', false)
       .is('deleted_at', null)
-      .select('id');
+      .select('id'), tenantId);
 
     if (updateError) {
       console.error('Failed to update CMS values:', updateError);
@@ -1146,12 +1153,12 @@ export async function cleanupAssetReferences(assetId: string): Promise<AssetClea
   }
 
   // 5. Update CMS link field values that embed asset references in JSON
-  const { data: linkFields, error: linkFieldsError } = await client
+  const { data: linkFields, error: linkFieldsError } = await applyTenantEq(client
     .from('collection_fields')
     .select('id')
     .eq('type', 'link')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (linkFieldsError) {
     throw new Error(`Failed to fetch link fields: ${linkFieldsError.message}`);
@@ -1160,13 +1167,13 @@ export async function cleanupAssetReferences(assetId: string): Promise<AssetClea
   if (linkFields && linkFields.length > 0) {
     const linkFieldIds = linkFields.map((f) => f.id);
 
-    const { data: linkItemValues, error: linkValuesError } = await client
+    const { data: linkItemValues, error: linkValuesError } = await applyTenantEq(client
       .from('collection_item_values')
       .select('id, value')
       .in('field_id', linkFieldIds)
       .like('value', `%${assetId}%`)
       .eq('is_published', false)
-      .is('deleted_at', null);
+      .is('deleted_at', null), tenantId);
 
     if (linkValuesError) {
       console.error('Failed to fetch link field values:', linkValuesError);
@@ -1175,11 +1182,11 @@ export async function cleanupAssetReferences(assetId: string): Promise<AssetClea
         if (!row.value || !collectionLinkValueHasAsset(row.value, assetId)) continue;
 
         const cleanedValue = nullifyAssetInCollectionLinkValue(row.value);
-        const { error: updateError } = await client
+        const { error: updateError } = await applyTenantEq(client
           .from('collection_item_values')
           .update({ value: cleanedValue, updated_at: new Date().toISOString() })
           .eq('id', row.id)
-          .eq('is_published', false);
+          .eq('is_published', false), tenantId);
 
         if (updateError) {
           console.error(`Failed to update link field value ${row.id}:`, updateError);
@@ -1207,11 +1214,11 @@ export async function cleanupAssetReferences(assetId: string): Promise<AssetClea
       newDefault = filtered.length > 0 ? JSON.stringify(filtered) : null;
     }
 
-    const { error: updateError } = await client
+    const { error: updateError } = await applyTenantEq(client
       .from('collection_fields')
       .update({ default: newDefault, updated_at: new Date().toISOString() })
       .eq('id', field.id)
-      .eq('is_published', false);
+      .eq('is_published', false), tenantId);
 
     if (updateError) {
       console.error(`Failed to update field default ${field.id}:`, updateError);

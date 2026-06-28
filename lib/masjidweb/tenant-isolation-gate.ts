@@ -77,13 +77,25 @@ export const TIER2_REPOSITORY_FILES: readonly string[] = [
   'lib/repositories/assetRepository.ts',
   'lib/repositories/assetFolderRepository.ts',
   'lib/repositories/colorVariableRepository.ts',
-  // Tier-3 services that follow the same mechanical tenant-scoping pattern —
-  // included so the codemod resolves them deterministically ($0) and the gate
-  // enforces them, instead of deferring to the premium AI. (cacheService is
-  // intentionally excluded — its invalidation logic is genuinely behavioral.)
+  // Auxiliary repositories that query tenant tables the same mechanical way.
+  // (2026-06-28: these were never scoped originally and leaked across tenants;
+  // now scoped + gated so updates can't regress them.)
+  'lib/repositories/versionRepository.ts',
+  'lib/repositories/webhookRepository.ts',
+  'lib/repositories/appSettingsRepository.ts',
+  'lib/repositories/translationRepository.ts',
+  'lib/repositories/apiKeyRepository.ts',
+  'lib/repositories/formSubmissionRepository.ts',
+  'lib/repositories/mcpTokenRepository.ts',
+  // Tier-3 services / utilities that follow the same mechanical tenant-scoping
+  // pattern — included so the codemod resolves them deterministically ($0) and
+  // the gate enforces them, instead of deferring to the premium AI.
   'lib/services/collectionService.ts',
   'lib/services/localisationService.ts',
   'lib/services/pageService.ts',
+  'lib/services/cacheService.ts',
+  'lib/asset-usage-utils.ts',
+  'lib/collection-usage-utils.ts',
 ];
 
 export type QueryOp = 'read' | 'write';

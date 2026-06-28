@@ -12,6 +12,8 @@ import { noCache } from '@/lib/api-response';
 import { compareDateFilter, isDateFieldType, isDatePreset, parseItemIdList, resolveDateFilterValue } from '@/lib/collection-field-utils';
 import { fetchAllRows } from '@/lib/supabase-constants';
 import type { Layer, CollectionItem, CollectionItemWithValues } from '@/types';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -95,6 +97,7 @@ async function getAllItemIdsForCollection(
   // with >1000 items silently lose their tail from the candidate pool, so valid
   // items vanish from filtered/load-more results. Match SSR and load-more
   // ordering so tie-breaks and any `maxTotal` slice select the same items.
+  const tenantId = await resolveEffectiveTenantId();
   const rows = await fetchAllRows<{ id: string }>((from, to) => {
     let q = client
       .from('collection_items')
@@ -105,6 +108,7 @@ async function getAllItemIdsForCollection(
       .order('manual_order', { ascending: true })
       .order('created_at', { ascending: false })
       .range(from, to);
+    q = applyTenantEq(q, tenantId);
     if (isPublished) q = q.eq('is_publishable', true);
     return q;
   });
@@ -118,27 +122,28 @@ async function getIdsMatchingFilter(
   allItemIds: string[],
   timezone: string,
 ): Promise<Set<string>> {
+  const tenantId = await resolveEffectiveTenantId();
   const { fieldId, operator, value } = filter;
   const allSet = new Set(allItemIds);
   const isDateOnly = filter.fieldType === 'date_only';
 
   const selectIds = (chunk: string[]) =>
-    client
+    applyTenantEq(client
       .from('collection_item_values')
       .select('item_id')
       .eq('field_id', fieldId)
       .eq('is_published', isPublished)
       .is('deleted_at', null)
-      .in('item_id', chunk);
+      .in('item_id', chunk), tenantId);
 
   const selectIdsAndValues = (chunk: string[]) =>
-    client
+    applyTenantEq(client
       .from('collection_item_values')
       .select('item_id, value')
       .eq('field_id', fieldId)
       .eq('is_published', isPublished)
       .is('deleted_at', null)
-      .in('item_id', chunk);
+      .in('item_id', chunk), tenantId);
 
   switch (operator) {
     // --- Text positive ---
@@ -572,18 +577,19 @@ async function getFieldValuesForItems(
   isPublished: boolean,
   itemIds: string[],
 ): Promise<Map<string, string>> {
+  const tenantId = await resolveEffectiveTenantId();
   if (itemIds.length === 0) return new Map();
   const client = await getSupabaseAdmin();
   if (!client) throw new Error('Supabase client not configured');
 
   const rows = await chunkedQuery<{ item_id: string; value: string | null }>(
-    chunk => client
+    chunk => applyTenantEq(client
       .from('collection_item_values')
       .select('item_id, value')
       .eq('field_id', fieldId)
       .eq('is_published', isPublished)
       .is('deleted_at', null)
-      .in('item_id', chunk),
+      .in('item_id', chunk), tenantId),
     itemIds,
   );
 

@@ -57,6 +57,8 @@ import type {
   WebflowItem,
 } from './types';
 import type { CollectionField, CollectionFieldData } from '@/types';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 // =============================================================================
 // Constants
@@ -1080,16 +1082,17 @@ async function batchUpsertValues(
 
 /** Soft-delete a batch of YCode items. */
 async function batchSoftDelete(itemIds: string[]): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   if (itemIds.length === 0) return;
   const client = await getSupabaseAdmin();
   if (!client) throw new Error('Supabase not configured');
 
   const now = new Date().toISOString();
-  const { error } = await client
+  const { error } = await applyTenantEq(client
     .from('collection_items')
     .update({ deleted_at: now, updated_at: now })
     .in('id', itemIds)
-    .eq('is_published', false);
+    .eq('is_published', false), tenantId);
 
   if (error) throw new Error(`Batch delete failed: ${error.message}`);
 }

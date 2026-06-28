@@ -1,5 +1,6 @@
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { applyTenantOrLegacyScope } from '@/lib/masjidweb/tenant-or-legacy-scope';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { createHash, randomBytes } from 'crypto';
 import { invalidateToken } from '@/lib/mcp/token-cache';
 
@@ -32,6 +33,8 @@ export interface CreateOAuthTokenData {
   user_id: string;
   oauth_client_id: string;
   name: string;
+  /** Owning tenant. Falls back to resolveEffectiveTenantId() when omitted. */
+  tenant_id?: string | null;
   access_token_ttl_seconds?: number;
   refresh_token_ttl_seconds?: number;
 }
@@ -123,6 +126,9 @@ export async function validateToken(token: string): Promise<McpToken | null> {
     throw new Error('Supabase not configured');
   }
 
+  // Auth bootstrap — the opaque token IS the credential; the lookup must be
+  // global to discover which tenant it belongs to (data.tenant_id).
+  // isolation-ok: global token lookup is the auth mechanism (see above)
   const { data, error } = await client
     .from('mcp_tokens')
     .select('id, name, token_prefix, tenant_id, is_active, last_used_at, created_at, updated_at, oauth_client_id, expires_at, user_id')
@@ -156,11 +162,12 @@ export async function deleteToken(id: string, tenantId?: string | null): Promise
     throw new Error('Supabase not configured');
   }
 
-  const { data: existing } = await client
+  let existingQuery = client
     .from('mcp_tokens')
     .select('token')
-    .eq('id', id)
-    .single();
+    .eq('id', id);
+  existingQuery = applyTenantOrLegacyScope(existingQuery, tenantId);
+  const { data: existing } = await existingQuery.single();
 
   let query = client
     .from('mcp_tokens')
@@ -225,6 +232,8 @@ export async function createOAuthToken(
   const expiresAt = new Date(now + accessTtl * 1000).toISOString();
   const refreshExpiresAt = new Date(now + refreshTtl * 1000).toISOString();
   const tokenPrefix = token.substring(0, 12);
+  // Stamp the owning tenant so the token is tenant-scoped on every later read.
+  const tenantId = data.tenant_id ?? (await resolveEffectiveTenantId());
 
   const { error } = await client
     .from('mcp_tokens')
@@ -239,6 +248,7 @@ export async function createOAuthToken(
       refresh_expires_at: refreshExpiresAt,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
+      ...(tenantId ? { tenant_id: tenantId } : {}),
     });
 
   if (error) {
@@ -268,9 +278,12 @@ export async function rotateRefreshToken(
     throw new Error('Supabase not configured');
   }
 
+  // Auth bootstrap — the refresh-token secret IS the credential; the lookup
+  // must be global to discover its owning tenant (existing.tenant_id).
+  // isolation-ok: global refresh-token lookup is the auth mechanism (see above)
   const { data: existing, error: fetchError } = await client
     .from('mcp_tokens')
-    .select('id, name, token, oauth_client_id, user_id, refresh_expires_at, is_active')
+    .select('id, name, token, oauth_client_id, user_id, tenant_id, refresh_expires_at, is_active')
     .eq('refresh_token_hash', hashRefreshToken(refreshToken))
     .eq('is_active', true)
     .single();
@@ -289,7 +302,11 @@ export async function rotateRefreshToken(
   }
 
   // Revoke the old token first so a leaked refresh token can't be reused.
-  await client.from('mcp_tokens').delete().eq('id', existing.id);
+  // Scope the delete to the row's own tenant (defense-in-depth; id came from
+  // the secret lookup above so it is provably the caller's own token).
+  let revokeQuery = client.from('mcp_tokens').delete().eq('id', existing.id);
+  revokeQuery = applyTenantOrLegacyScope(revokeQuery, existing.tenant_id);
+  await revokeQuery;
   if (existing.token) {
     invalidateToken(existing.token);
   }
@@ -298,6 +315,7 @@ export async function rotateRefreshToken(
     user_id: existing.user_id,
     oauth_client_id: existing.oauth_client_id,
     name: existing.name,
+    tenant_id: existing.tenant_id,
     access_token_ttl_seconds: options?.access_token_ttl_seconds,
     refresh_token_ttl_seconds: options?.refresh_token_ttl_seconds,
   });

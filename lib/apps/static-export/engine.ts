@@ -37,6 +37,8 @@ import { contentTypeFor, type OutputFile, type Writer } from './writers/types'
 import { createGithubWriter } from './writers/github'
 import { createLocalWriter } from './writers/local'
 import { createS3Writer } from './writers/s3'
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 /**
  * Convert absolute paths to document-relative paths so exported HTML works
@@ -97,6 +99,7 @@ async function resolvePageOgImage(page: Page): Promise<string | null> {
 }
 
 export async function exportSite(presetJobId?: string): Promise<ExportJob> {
+  const tenantId = await resolveEffectiveTenantId();
   const jobId = presetJobId ?? randomUUID()
   const job: ExportJob = {
     id: jobId,
@@ -121,13 +124,13 @@ export async function exportSite(presetJobId?: string): Promise<ExportJob> {
     if (!client) throw new Error('Supabase client not configured')
 
     // ---- Load pages (one query, all published, all routes) --------------
-    const { data: pageRows, error: pagesError } = await client
+    const { data: pageRows, error: pagesError } = await applyTenantEq(client
       .from('pages')
       .select('*')
       .eq('is_published', true)
       .is('deleted_at', null)
       .order('depth', { ascending: true })
-      .order('order', { ascending: true })
+      .order('order', { ascending: true }), tenantId)
 
     if (pagesError) throw new Error(`Failed to fetch pages: ${pagesError.message}`)
     const pages = (pageRows ?? []) as Page[]
@@ -148,21 +151,21 @@ export async function exportSite(presetJobId?: string): Promise<ExportJob> {
       globalCustomCodeBody,
       localeResult,
     ] = await Promise.all([
-      client
+      applyTenantEq(client
         .from('page_folders')
         .select('*')
         .is('deleted_at', null)
-        .order('depth', { ascending: true }),
+        .order('depth', { ascending: true }), tenantId),
       getSettingByKey('published_css').catch(() => null),
       generateColorVariablesCss().catch(() => null),
       getPublishedFonts().catch(() => []),
       getSettingByKey('custom_code_head').catch(() => null),
       getSettingByKey('custom_code_body').catch(() => null),
-      client
+      applyTenantEq(client
         .from('locales')
         .select('*')
         .eq('is_published', true)
-        .is('deleted_at', null),
+        .is('deleted_at', null), tenantId),
     ])
     if (folderResult.error) {
       throw new Error(`Failed to fetch folders: ${folderResult.error.message}`)

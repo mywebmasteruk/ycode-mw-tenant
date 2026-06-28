@@ -226,18 +226,19 @@ export async function getAssetById(id: string, isPublished: boolean = false): Pr
  * Returns the first matching non-deleted record since both draft/published share the same storage_path
  */
 export async function getAssetForProxy(id: string): Promise<Pick<Asset, 'id' | 'filename' | 'storage_path' | 'mime_type'> | null> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
   }
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('assets')
     .select('id, filename, storage_path, mime_type')
     .eq('id', id)
     .is('deleted_at', null)
-    .limit(1);
+    .limit(1), tenantId);
 
   if (error || !data?.length) {
     return null;

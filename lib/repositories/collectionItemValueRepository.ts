@@ -219,10 +219,10 @@ export async function getValuesByItemIds(
   if (!fieldTypeMap) {
     fieldTypeMap = {};
     if (discoveredFieldIds.size > 0) {
-      const { data: fields } = await client
+      const { data: fields } = await applyTenantEq(client
         .from('collection_fields')
         .select('id, type')
-        .in('id', Array.from(discoveredFieldIds));
+        .in('id', Array.from(discoveredFieldIds)), tenantId);
 
       fields?.forEach((f: any) => { fieldTypeMap![f.id] = f.type; });
     }
@@ -319,6 +319,7 @@ export async function getValueRowsForItems(
 export async function getValueMapByFieldIds(
   fieldIds: string[]
 ): Promise<Map<string, Map<string, string>>> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -336,13 +337,13 @@ export async function getValueMapByFieldIds(
   let hasMore = true;
 
   while (hasMore) {
-    const { data, error } = await client
+    const { data, error } = await applyTenantEq(client
       .from('collection_item_values')
       .select('item_id, field_id, value')
       .in('field_id', fieldIds)
       .eq('is_published', false)
       .is('deleted_at', null)
-      .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
+      .range(offset, offset + SUPABASE_QUERY_LIMIT - 1), tenantId);
 
     if (error) {
       throw new Error(`Failed to fetch field values: ${error.message}`);
@@ -757,6 +758,7 @@ export async function clearValuesForField(
   field_id: string,
   value: string
 ): Promise<number> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -764,13 +766,13 @@ export async function clearValuesForField(
   }
 
   const now = new Date().toISOString();
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('collection_item_values')
     .update({ deleted_at: now, updated_at: now })
     .eq('field_id', field_id)
     .eq('value', value)
     .is('deleted_at', null)
-    .select('id');
+    .select('id'), tenantId);
 
   if (error) {
     throw new Error(`Failed to clear values: ${error.message}`);
@@ -790,6 +792,7 @@ export async function renameValuesForField(
   old_value: string,
   new_value: string
 ): Promise<number> {
+  const tenantId = await resolveEffectiveTenantId();
   if (old_value === new_value) return 0;
 
   const client = await getSupabaseAdmin();
@@ -798,7 +801,7 @@ export async function renameValuesForField(
     throw new Error('Supabase client not configured');
   }
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('collection_item_values')
     .update({
       value: new_value,
@@ -807,7 +810,7 @@ export async function renameValuesForField(
     .eq('field_id', field_id)
     .eq('value', old_value)
     .is('deleted_at', null)
-    .select('id');
+    .select('id'), tenantId);
 
   if (error) {
     throw new Error(`Failed to rename values: ${error.message}`);

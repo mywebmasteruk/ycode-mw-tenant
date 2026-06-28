@@ -1,8 +1,12 @@
 /**
  * ABSOLUTE tenant-isolation audit — scans EVERY .ts/.tsx file in the codebase
- * (not just the 19 TIER2 files the gate checks) and reports every unscoped
- * query against a tenant-scoped table. This finds existing leaks, not just
- * regressions.
+ * (not just the TIER2 files the differential gate checks) and reports every
+ * unscoped query against a tenant-scoped table. Finds existing leaks, not just
+ * regressions vs a baseline.
+ *
+ * Exit 1 if any unscoped access is found (so CI blocks the merge); exit 0 when
+ * every tenant-table query is scoped or carries an `// isolation-ok:` reason.
+ * Run: npm run updates:isolation-audit
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -58,3 +62,14 @@ for (const [file, findings] of sorted) {
     console.log(`  L${f.line} [${f.op}] ${f.table}  fn=${f.fn}  — ${f.reason}`);
   }
 }
+
+if (all.length > 0) {
+  console.error(
+    `\nTenant-isolation audit FAILED: ${all.length} unscoped tenant-table access(es). ` +
+      'Scope each with applyTenantEq()/applyTenantOrLegacyScope() (reads) or a tenant_id ' +
+      'payload (writes), or add `// isolation-ok: <reason>` on the .from() chain line for a ' +
+      'genuinely-global query.',
+  );
+  process.exit(1);
+}
+console.log('\nTenant-isolation audit PASS — every tenant-table query is scoped or justified.');

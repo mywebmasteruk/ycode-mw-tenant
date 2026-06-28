@@ -21,6 +21,8 @@ import { getAllComponents } from '@/lib/repositories/componentRepository';
 import { collectComponentIds } from '@/lib/component-utils';
 import { setSetting } from '@/lib/repositories/settingsRepository';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 /**
  * Extract all Tailwind classes from a layer tree.
@@ -234,6 +236,7 @@ type PageLayersForCss = { id: string; layers: Layer[]; generated_css?: string | 
  * Used to discover each page's CMS collection binding (`settings.cms.collection_id`).
  */
 async function getPageSettingsByIds(pageIds: string[]): Promise<Map<string, unknown>> {
+  const tenantId = await resolveEffectiveTenantId();
   const map = new Map<string, unknown>();
   if (pageIds.length === 0) return map;
 
@@ -242,12 +245,12 @@ async function getPageSettingsByIds(pageIds: string[]): Promise<Map<string, unkn
 
   const { chunk } = await import('@/lib/utils');
   for (const idChunk of chunk(pageIds, 500)) {
-    const { data } = await client
+    const { data } = await applyTenantEq(client
       .from('pages')
       .select('id, settings')
       .in('id', idChunk)
       .eq('is_published', false)
-      .is('deleted_at', null);
+      .is('deleted_at', null), tenantId);
     for (const row of data ?? []) map.set(row.id as string, row.settings);
   }
 
@@ -355,6 +358,7 @@ async function updatePageGeneratedCss(
   pageLayers: { id: string; layers: Layer[] },
   css: string,
 ): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const { generatePageLayersHash } = await import('@/lib/hash-utils');
   const client = await getSupabaseAdmin();
   if (!client) return;
@@ -364,7 +368,7 @@ async function updatePageGeneratedCss(
     generated_css: css,
   });
 
-  await client
+  await applyTenantEq(client
     .from('page_layers')
     .update({
       generated_css: css,
@@ -372,5 +376,5 @@ async function updatePageGeneratedCss(
       updated_at: new Date().toISOString(),
     })
     .eq('id', pageLayers.id)
-    .eq('is_published', false);
+    .eq('is_published', false), tenantId);
 }

@@ -187,6 +187,7 @@ export async function createStyle(
 export async function createStyles(
   stylesData: CreateLayerStyleData[]
 ): Promise<LayerStyle[]> {
+  const tenantId = await resolveEffectiveTenantId();
   if (stylesData.length === 0) {
     return [];
   }
@@ -196,7 +197,7 @@ export async function createStyles(
     throw new Error('Failed to initialize Supabase client');
   }
 
-  const rows = stylesData.map((styleData) => ({
+  const rows = stylesData.map((styleData) => ({ tenant_id: tenantId,
     id: randomUUID(),
     name: styleData.name,
     classes: styleData.classes,
@@ -604,11 +605,11 @@ export async function findEntitiesUsingLayerStyle(styleId: string): Promise<Laye
 
   // Snapshot all draft styles so combo stacks can be re-flattened the same way
   // the client does on detach — keeping client and server perfectly in sync.
-  const { data: allDraftStyles } = await client
+  const { data: allDraftStyles } = await applyTenantEq(client
     .from('layer_styles')
     .select('*')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
   const stylesById = new Map<string, LayerStyle>(
     (allDraftStyles || []).map((s) => [s.id, s as LayerStyle])
   );
@@ -940,11 +941,11 @@ export async function syncLayerStyleChangesToDrafts(
   // Combo-class layers reference a stack of styles, so re-flattening needs
   // every style a layer might point at — not just the changed ones. Snapshot
   // all published styles, then overlay the just-published changed values.
-  const { data: allStyles } = await client
+  const { data: allStyles } = await applyTenantEq(client
     .from('layer_styles')
     .select('id, classes, design')
     .eq('is_published', true)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
   const stylesById = new Map<string, LayerStyle>();
   for (const s of allStyles ?? []) stylesById.set(s.id, s as LayerStyle);
   for (const s of styles) stylesById.set(s.id, s as LayerStyle);

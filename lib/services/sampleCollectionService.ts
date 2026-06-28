@@ -13,6 +13,8 @@ import { STORAGE_BUCKET, STORAGE_FOLDERS } from '@/lib/asset-constants';
 import { getSampleCollectionById } from '@/lib/sample-collections';
 import type { SampleCollectionDefinition, SampleFieldDefinition, SampleItemDefinition } from '@/lib/sample-collections';
 import type { Asset, Collection, CollectionField, CollectionItemWithValues } from '@/types';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 const SAMPLES_DIR = path.join(process.cwd(), 'storage', 'collections');
 
 /**
@@ -156,13 +158,14 @@ export async function createSampleCollection(
  * Avoids duplicate storage files and DB records for the same sample image.
  */
 async function getOrUploadSampleImage(filename: string): Promise<Asset> {
+  const tenantId = await resolveEffectiveTenantId();
   const supabase = await getSupabaseAdmin();
   if (!supabase) {
     throw new Error('Supabase not configured');
   }
 
   // Check for existing draft asset with the same filename and source
-  const { data: existing } = await supabase
+  const { data: existing } = await applyTenantEq(supabase
     .from('assets')
     .select('*')
     .eq('filename', filename)
@@ -170,7 +173,7 @@ async function getOrUploadSampleImage(filename: string): Promise<Asset> {
     .eq('is_published', false)
     .is('deleted_at', null)
     .limit(1)
-    .single();
+    .single(), tenantId);
 
   if (existing) return existing as Asset;
 

@@ -8,6 +8,8 @@
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { getConnections as getAirtableConnections } from '@/lib/apps/airtable/sync-service';
 import type { Layer, CollectionVariable, FieldVariable, DesignColorVariable } from '@/types';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -208,6 +210,7 @@ function layersReferenceField(layers: Layer[], fieldId: string): boolean {
  * Get collection usage across pages, components, and reference fields
  */
 export async function getCollectionUsage(collectionId: string): Promise<CollectionUsageResult> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
   if (!client) throw new Error('Supabase not configured');
 
@@ -218,11 +221,11 @@ export async function getCollectionUsage(collectionId: string): Promise<Collecti
   const pageIdsWithUsage = new Set<string>();
 
   // 1. Check page layers for collection bindings
-  const { data: pageLayersRecords, error: plErr } = await client
+  const { data: pageLayersRecords, error: plErr } = await applyTenantEq(client
     .from('page_layers')
     .select('page_id, layers')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (plErr) throw new Error(`Failed to fetch page layers: ${plErr.message}`);
 
@@ -233,11 +236,11 @@ export async function getCollectionUsage(collectionId: string): Promise<Collecti
   }
 
   // 2. Check page-level CMS settings (collection pages)
-  const { data: pagesData, error: pagesErr } = await client
+  const { data: pagesData, error: pagesErr } = await applyTenantEq(client
     .from('pages')
     .select('id, name, settings')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (pagesErr) throw new Error(`Failed to fetch pages: ${pagesErr.message}`);
 
@@ -254,11 +257,11 @@ export async function getCollectionUsage(collectionId: string): Promise<Collecti
   }
 
   // 3. Check components
-  const { data: componentsData, error: compErr } = await client
+  const { data: componentsData, error: compErr } = await applyTenantEq(client
     .from('components')
     .select('id, name, layers')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (compErr) throw new Error(`Failed to fetch components: ${compErr.message}`);
 
@@ -269,24 +272,24 @@ export async function getCollectionUsage(collectionId: string): Promise<Collecti
   }
 
   // 4. Check reference fields pointing to this collection
-  const { data: refFields, error: rfErr } = await client
+  const { data: refFields, error: rfErr } = await applyTenantEq(client
     .from('collection_fields')
     .select('id, name, collection_id')
     .eq('reference_collection_id', collectionId)
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (rfErr) throw new Error(`Failed to fetch reference fields: ${rfErr.message}`);
 
   if (refFields && refFields.length > 0) {
     const parentCollectionIds = [...new Set(refFields.map((f) => f.collection_id))];
 
-    const { data: parentCollections, error: pcErr } = await client
+    const { data: parentCollections, error: pcErr } = await applyTenantEq(client
       .from('collections')
       .select('id, name')
       .in('id', parentCollectionIds)
       .eq('is_published', false)
-      .is('deleted_at', null);
+      .is('deleted_at', null), tenantId);
 
     if (pcErr) throw new Error(`Failed to fetch collections: ${pcErr.message}`);
 
@@ -336,6 +339,7 @@ export async function getCollectionUsage(collectionId: string): Promise<Collecti
  * Get collection field usage across pages and components (layer bindings)
  */
 export async function getCollectionFieldUsage(fieldId: string): Promise<CollectionFieldUsageResult> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
   if (!client) throw new Error('Supabase not configured');
 
@@ -345,11 +349,11 @@ export async function getCollectionFieldUsage(fieldId: string): Promise<Collecti
   const pageIdsWithUsage = new Set<string>();
 
   // 1. Check page layers for field bindings
-  const { data: pageLayersRecords, error: plErr } = await client
+  const { data: pageLayersRecords, error: plErr } = await applyTenantEq(client
     .from('page_layers')
     .select('page_id, layers')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (plErr) throw new Error(`Failed to fetch page layers: ${plErr.message}`);
 
@@ -360,11 +364,11 @@ export async function getCollectionFieldUsage(fieldId: string): Promise<Collecti
   }
 
   // 2. Check page-level CMS settings (slug field)
-  const { data: pagesData, error: pagesErr } = await client
+  const { data: pagesData, error: pagesErr } = await applyTenantEq(client
     .from('pages')
     .select('id, name, settings')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (pagesErr) throw new Error(`Failed to fetch pages: ${pagesErr.message}`);
 
@@ -388,11 +392,11 @@ export async function getCollectionFieldUsage(fieldId: string): Promise<Collecti
   }
 
   // 3. Check components
-  const { data: componentsData, error: compErr } = await client
+  const { data: componentsData, error: compErr } = await applyTenantEq(client
     .from('components')
     .select('id, name, layers')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (compErr) throw new Error(`Failed to fetch components: ${compErr.message}`);
 

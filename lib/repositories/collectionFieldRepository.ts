@@ -4,6 +4,7 @@ import { SUPABASE_QUERY_LIMIT } from '@/lib/supabase-constants';
 import { getKnexClient } from '@/lib/knex-client';
 import type { CollectionField, CreateCollectionFieldData, UpdateCollectionFieldData } from '@/types';
 import { randomUUID } from 'crypto';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 /**
  * Collection Field Repository
@@ -159,6 +160,7 @@ export async function getFieldsByKeyAcrossCollections(
   key: string,
   collectionIds: string[]
 ): Promise<Map<string, CollectionField>> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -168,13 +170,13 @@ export async function getFieldsByKeyAcrossCollections(
   const result = new Map<string, CollectionField>();
   if (collectionIds.length === 0) return result;
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('collection_fields')
     .select('*')
     .eq('key', key)
     .in('collection_id', collectionIds)
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (error) {
     throw new Error(`Failed to fetch fields by key: ${error.message}`);

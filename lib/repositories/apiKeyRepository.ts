@@ -61,6 +61,10 @@ export async function getAllApiKeys(tenantId?: string | null): Promise<ApiKey[]>
 
   if (error) {
     if (tenantId && isMissingTenantScopeColumnError(error)) {
+      // Legacy fallback: only reached when the tenant_id column is absent
+      // (pre-migration). The column exists on all live envs, so the primary
+      // applyTenantOrLegacyScope path above always applies.
+      // isolation-ok: pre-migration legacy fallback (tenant_id column absent)
       const { data: legacyData, error: legacyError } = await client
         .from('api_keys')
         .select('id, name, key_prefix, last_used_at, created_at, updated_at')

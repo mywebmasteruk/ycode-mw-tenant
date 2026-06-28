@@ -2,6 +2,8 @@ import { getKnexClient, closeKnexClient, testKnexConnection } from '../knex-clie
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { STORAGE_BUCKET } from '@/lib/asset-constants';
 import { YCODE_EXTERNAL_API_URL } from '@/lib/config';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 // API key for uploading templates to the shared template service
 const TEMPLATE_UPLOAD_API_KEY =
@@ -445,6 +447,7 @@ export async function collectTemplateAssets(): Promise<
     mimeType: string;
   }>
   > {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
   if (!client) {
     console.error('[collectTemplateAssets] Supabase not configured');
@@ -453,11 +456,11 @@ export async function collectTemplateAssets(): Promise<
 
   // Get assets that have a storage_path (user uploads, not inline SVGs)
   // and are not from other templates
-  const { data: assets, error } = await client
+  const { data: assets, error } = await applyTenantEq(client
     .from('assets')
     .select('*')
     .not('storage_path', 'is', null)
-    .not('source', 'like', 'template:%');
+    .not('source', 'like', 'template:%'), tenantId);
 
   if (error || !assets) {
     console.error('[collectTemplateAssets] Failed to fetch assets:', error);
@@ -499,12 +502,12 @@ export async function collectTemplateAssets(): Promise<
   }
 
   // Collect custom font files (fonts with storage_path)
-  const { data: fonts, error: fontsError } = await client
+  const { data: fonts, error: fontsError } = await applyTenantEq(client
     .from('fonts')
     .select('*')
     .not('storage_path', 'is', null)
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (fontsError) {
     console.warn('[collectTemplateAssets] Failed to fetch fonts:', fontsError);

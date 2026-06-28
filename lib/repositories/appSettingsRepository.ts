@@ -1,4 +1,6 @@
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 /**
  * App Settings Repository
@@ -28,17 +30,18 @@ export interface AppSetting {
  * Get all settings for a specific app
  */
 export async function getAppSettings(appId: string): Promise<AppSetting[]> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('app_settings')
     .select('*')
     .eq('app_id', appId)
-    .order('key', { ascending: true });
+    .order('key', { ascending: true }), tenantId);
 
   if (error) {
     throw new Error(`Failed to fetch app settings: ${error.message}`);
@@ -54,18 +57,19 @@ export async function getAppSetting(
   appId: string,
   key: string
 ): Promise<AppSetting | null> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('app_settings')
     .select('*')
     .eq('app_id', appId)
     .eq('key', key)
-    .single();
+    .single(), tenantId);
 
   if (error && error.code !== 'PGRST116') {
     throw new Error(`Failed to fetch app setting: ${error.message}`);
@@ -100,16 +104,17 @@ export async function hasAppSetting(
  * Get all app IDs that have settings configured (i.e. connected apps)
  */
 export async function getConnectedAppIds(): Promise<string[]> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('app_settings')
     .select('app_id')
-    .order('app_id');
+    .order('app_id'), tenantId);
 
   if (error) {
     throw new Error(`Failed to fetch connected apps: ${error.message}`);
@@ -132,6 +137,7 @@ export async function setAppSetting(
   key: string,
   value: unknown
 ): Promise<AppSetting> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -141,13 +147,15 @@ export async function setAppSetting(
   const { data, error } = await client
     .from('app_settings')
     .upsert(
-      {
+      { tenant_id: tenantId,
         app_id: appId,
         key,
         value,
         updated_at: new Date().toISOString(),
       },
-      { onConflict: 'app_id,key' }
+      // Tenant-scoped conflict target so one tenant's upsert can never overwrite
+      // another tenant's row (matches the app_settings_tenant_app_key_uq index).
+      { onConflict: 'tenant_id,app_id,key' }
     )
     .select()
     .single();
@@ -166,17 +174,18 @@ export async function deleteAppSetting(
   appId: string,
   key: string
 ): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { error } = await client
+  const { error } = await applyTenantEq(client
     .from('app_settings')
     .delete()
     .eq('app_id', appId)
-    .eq('key', key);
+    .eq('key', key), tenantId);
 
   if (error) {
     throw new Error(`Failed to delete app setting: ${error.message}`);
@@ -187,16 +196,17 @@ export async function deleteAppSetting(
  * Delete all settings for an app (disconnect)
  */
 export async function deleteAllAppSettings(appId: string): Promise<void> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { error } = await client
+  const { error } = await applyTenantEq(client
     .from('app_settings')
     .delete()
-    .eq('app_id', appId);
+    .eq('app_id', appId), tenantId);
 
   if (error) {
     throw new Error(`Failed to delete app settings: ${error.message}`);
