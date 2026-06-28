@@ -43,6 +43,9 @@ jobs:
           START_MS=$(($(date +%s) * 1000))
           echo "start_ms=$START_MS" >> "$GITHUB_OUTPUT"
           bash scripts/check-tenant-isolation.sh 2>&1 | tee isolation-output.txt
+          # Absolute scan of every lib/+app/ file for unscoped tenant-table
+          # queries (catches drift even outside the update PR flow).
+          npm run updates:isolation-audit 2>&1 | tee -a isolation-output.txt
 
       - name: Write job summary
         if: always()

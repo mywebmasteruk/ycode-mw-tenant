@@ -67,6 +67,13 @@ jobs:
       - name: Tenant isolation tests
         run: bash scripts/check-tenant-isolation.sh
 
+      - name: Tenant isolation audit (whole codebase)
+        # Absolute scan of ALL lib/ + app/ files (not just the TIER2 set the
+        # differential gate checks). Fails CI on any unscoped tenant-table query
+        # that isn't marked `// isolation-ok:`. This is the backstop that closes
+        # the blind spot which let cross-tenant leaks ship before 2026-06-28.
+        run: npm run updates:isolation-audit
+
       - name: Build
         run: npm run build
 

@@ -263,6 +263,31 @@ jobs:
           COPILOT_ESCALATION_ASSIGN_COPILOT: ${{ inputs.copilot_escalation_mode == 'assign' }}
         run: npx --yes tsx scripts/core-update/create-copilot-escalation.ts
 
+      # The AI/codemod repair only resolves .ts/.tsx; package-lock.json lands
+      # conflicted on nearly every update (upstream + fork both bump deps) and
+      # would otherwise stall the wizard with leftover conflict markers. Resolve
+      # it deterministically: take main's lockfile, then reconcile it to the
+      # merged package.json. No LLM, no cost. Runs regardless of repair outcome
+      # so even a blocked run leaves a clean lockfile for the next resume.
+      - name: Resolve package-lock.json conflict (deterministic)
+        run: |
+          if grep -qE '^(<<<<<<<|=======|>>>>>>>) ' package-lock.json 2>/dev/null \
+             || grep -qxE '(<<<<<<<|=======|>>>>>>>)' package-lock.json 2>/dev/null; then
+            echo "package-lock.json is conflicted — resolving deterministically."
+            git show origin/main:package-lock.json > package-lock.json
+            npm install --package-lock-only --ignore-scripts --no-audit --no-fund --legacy-peer-deps
+            if grep -qE '^(<<<<<<<|=======|>>>>>>>)' package-lock.json; then
+              echo "Lockfile still has markers after regen — leaving for manual review."
+            else
+              git add package-lock.json
+              git commit -m "fix(deps): resolve package-lock.json for safe update [automated]" || true
+              git push origin HEAD || true
+              echo "Resolved + committed package-lock.json."
+            fi
+          else
+            echo "package-lock.json not conflicted; nothing to do."
+          fi
+
       # Cross-run resume: the Premium AI step resolves a different subset of the
       # hard files each run (LLM nondeterminism). Without persisting partial
       # progress, every run restarts from the original conflicts and never
