@@ -18,3 +18,15 @@ export function getSiteBaseUrl(options?: {
 
   return raw ? raw.replace(/\/$/, '') : null;
 }
+
+/**
+ * Join a base URL with a page path into an absolute URL.
+ * Returns the base (without trailing slash) for the homepage path.
+ */
+export function buildAbsolutePageUrl(baseUrl: string, pagePath: string): string {
+  const base = baseUrl.replace(/\/$/, '');
+  if (pagePath === '/' || pagePath === '') {
+    return base;
+  }
+  return `${base}${pagePath.startsWith('/') ? pagePath : '/' + pagePath}`;
+}

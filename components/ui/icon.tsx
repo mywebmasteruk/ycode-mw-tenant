@@ -19,6 +19,7 @@ export interface IconProps extends React.SVGProps<SVGSVGElement> {
     | 'slide-bullets' | 'slide-bullet' | 'slide-navigation' | 'slide-fraction' | 'loop-alternate' | 'loop-repeat' | 'listItem' | 'external-link'
     | 'settings' | 'center-block' | 'code-block' | 'table' | 'table-row' | 'table-cell' | 'add-column' | 'add-row' | 'delete-column' | 'delete-row' | 'delete-table' | 'header' | 'body'
     | 'webflow' | 'figma' | 'space'
+    | 'arrow-left-up' | 'arrow-up' | 'arrow-right-up' | 'arrow-left' | 'arrow-right' | 'arrow-left-down' | 'arrow-down' | 'arrow-right-down' | 'circle'
   );
 }
 
@@ -1050,6 +1051,55 @@ const ICONS: Record<IconProps['name'], React.ReactNode> = {
   space: (
     <g transform="scale(0.5)">
       <path d="M4 9V13H20V9H22V14C22 14.5523 21.5523 15 21 15H3C2.44772 15 2 14.5523 2 14V9H4Z" />
+    </g>
+  ),
+  // Remix line icons (0 0 24 24 source) scaled into the icon's 0 0 12 12 box.
+  'arrow-left-up': (
+    <g transform="scale(0.5)">
+      <path d="M9.41421 8L18.0208 16.6066L16.6066 18.0208L8 9.41421V17H6V6H17V8H9.41421Z" />
+    </g>
+  ),
+  'arrow-up': (
+    <g transform="scale(0.5)">
+      <path d="M13.0001 7.82843V20H11.0001V7.82843L5.63614 13.1924L4.22192 11.7782L12.0001 4L19.7783 11.7782L18.3641 13.1924L13.0001 7.82843Z" />
+    </g>
+  ),
+  'arrow-right-up': (
+    <g transform="scale(0.5)">
+      <path d="M16.0037 9.41421L7.39712 18.0208L5.98291 16.6066L14.5895 8H7.00373V6H18.0037V17H16.0037V9.41421Z" />
+    </g>
+  ),
+  'arrow-left': (
+    <g transform="scale(0.5)">
+      <path d="M7.82843 10.9999H20V12.9999H7.82843L13.1924 18.3638L11.7782 19.778L4 11.9999L11.7782 4.22168L13.1924 5.63589L7.82843 10.9999Z" />
+    </g>
+  ),
+  'arrow-right': (
+    <g transform="scale(0.5)">
+      <path d="M16.1716 10.9999L10.8076 5.63589L12.2218 4.22168L20 11.9999L12.2218 19.778L10.8076 18.3638L16.1716 12.9999H4V10.9999H16.1716Z" />
+    </g>
+  ),
+  'arrow-left-down': (
+    <g transform="scale(0.5)">
+      <path d="M9 13.589L17.6066 4.98242L19.0208 6.39664L10.4142 15.0032H18V17.0032H7V6.00324H9V13.589Z" />
+    </g>
+  ),
+  'arrow-down': (
+    <g transform="scale(0.5)">
+      <path d="M13.0001 16.1716L18.3641 10.8076L19.7783 12.2218L12.0001 20L4.22192 12.2218L5.63614 10.8076L11.0001 16.1716V4H13.0001V16.1716Z" />
+    </g>
+  ),
+  'arrow-right-down': (
+    <g transform="scale(0.5)">
+      <path d="M14.5895 16.0032L5.98291 7.39664L7.39712 5.98242L16.0037 14.589V7.00324H18.0037V18.0032H7.00373V16.0032H14.5895Z" />
+    </g>
+  ),
+  circle: (
+    <g transform="translate(1.8 1.8) scale(0.35)">
+      <path
+        fillRule="evenodd"
+        d="M2 12a10 10 0 1 0 20 0 10 10 0 1 0-20 0ZM5.5 12a6.5 6.5 0 1 1 13 0 6.5 6.5 0 0 1-13 0Z"
+      />
     </g>
   ),
 };

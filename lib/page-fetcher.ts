@@ -34,6 +34,7 @@ import type { LinkResolutionContext } from '@/lib/link-utils';
 import { getLinkSettingsFromMark } from '@/lib/tiptap-extensions/rich-text-link';
 import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
 import { resolveInlineVariables, resolveInlineVariablesFromData } from '@/lib/inline-variables';
+import { buildPaginationNumbers, getPaginationLayerKind, hasPaginationVariables, paginationTextVariableToTemplate, resolvePaginationTextVariable } from '@/lib/pagination-text-utils';
 import { formatFieldValue, resolveFieldFromSources } from '@/lib/cms-variables-utils';
 import { buildLayerTranslationKey, getTranslationByKey, hasValidTranslationValue, getTranslationValue, injectTranslatedText, applyCmsTranslations, translateComponentOverrides } from '@/lib/localisation-utils';
 import { formatDateFieldsInItemValues } from '@/lib/date-format-utils';
@@ -45,9 +46,9 @@ import { generateInitialAnimationCSS } from '@/lib/animation-utils';
 import { getMapIframeProps, DEFAULT_MAP_SETTINGS } from '@/lib/map-utils';
 import { getMapboxAccessToken, getGoogleMapsEmbedApiKey } from '@/lib/map-server';
 import { getAssetsByIds } from '@/lib/repositories/assetRepository';
-import { isVirtualAssetField, findDisplayField, hasDynamicDateRule, isDynamicDateCondition, buildGlobalsMetaMap, buildGlobalsValueMap, mergeGlobalsIntoFieldData, type GlobalFieldMeta } from '@/lib/collection-field-utils';
+import { isVirtualAssetField, findDisplayField, hasDynamicDateRule, isDynamicDateCondition, buildGlobalsMetaMap, buildGlobalsValueMap, mergeGlobalsIntoFieldData, MULTI_ASSET_COLLECTION_ID, type GlobalFieldMeta } from '@/lib/collection-field-utils';
 import { getDefaultFormatId, isFormatValidForFieldType } from '@/lib/variable-format-utils';
-import type { DynamicVisibilityCondition, FieldVariable, AssetVariable, DynamicTextVariable, LinkSettings } from '@/types';
+import type { DynamicVisibilityCondition, FieldVariable, AssetVariable, DynamicTextVariable, DynamicRichTextVariable, LinkSettings } from '@/types';
 import type { DesignColorVariable } from '@/types';
 
 // Cached map provider tokens for synchronous use inside layerToHtml.
@@ -2105,7 +2106,11 @@ function collectBoundFieldIds(layers: Layer[]): { fieldIds: Set<string>; fieldPa
 function collectAllCollectionIds(layers: Layer[]): Set<string> {
   const ids = new Set<string>();
   const scan = (layer: Layer) => {
-    if (layer.variables?.collection?.id) ids.add(layer.variables.collection.id);
+    // Skip the virtual multi-asset collection id — it's not a real DB collection,
+    // and querying it (invalid UUID) errors the whole batch item fetch, which
+    // would leave every real collection on the page with no items.
+    const collectionId = layer.variables?.collection?.id;
+    if (collectionId && collectionId !== MULTI_ASSET_COLLECTION_ID) ids.add(collectionId);
     if (layer.settings?.optionsSource?.collectionId) ids.add(layer.settings.optionsSource.collectionId);
     if (layer.children) layer.children.forEach(scan);
   };
@@ -2486,19 +2491,60 @@ export async function resolveCollectionLayers(
           // Handle multi-asset collections - build virtual items from asset IDs
           if (sourceFieldType === 'multi_asset' && sourceFieldId && itemValues) {
             const fieldValue = itemValues[sourceFieldId];
-            const assetIds = parseMultiAssetFieldValue(fieldValue);
+            let assetIds = parseMultiAssetFieldValue(fieldValue);
 
-            if (assetIds.length === 0) {
+            // Pagination mirrors the regular collection branch below: the asset
+            // ID array is the full result set, so totalItems/maxTotal/page
+            // slicing all operate on it directly.
+            const multiAssetPagination = collectionVariable.pagination;
+            const isMultiAssetPaginated = multiAssetPagination?.enabled
+              && (multiAssetPagination?.mode === 'pages' || multiAssetPagination?.mode === 'load_more');
+
+            let multiAssetLimit: number | undefined;
+            let multiAssetOffset: number | undefined;
+            let multiAssetCurrentPage = 1;
+            if (isMultiAssetPaginated) {
+              const itemsPerPage = multiAssetPagination!.items_per_page || 10;
+              multiAssetCurrentPage = paginationContext?.pageNumbers?.[layer.id]
+                ?? paginationContext?.defaultPage
+                ?? 1;
+              multiAssetLimit = itemsPerPage;
+              multiAssetOffset = (multiAssetCurrentPage - 1) * itemsPerPage;
+            } else {
+              multiAssetLimit = collectionVariable.limit;
+              multiAssetOffset = collectionVariable.offset;
+            }
+
+            // When paginated, `limit` is a hard cap on the total (matches the
+            // regular collection branch); otherwise it acts as a per-page limit.
+            const multiAssetMaxTotal = isMultiAssetPaginated
+              && typeof collectionVariable.limit === 'number' && collectionVariable.limit > 0
+              ? collectionVariable.limit
+              : undefined;
+            if (multiAssetMaxTotal != null && assetIds.length > multiAssetMaxTotal) {
+              assetIds = assetIds.slice(0, multiAssetMaxTotal);
+            }
+
+            const multiAssetTotal = assetIds.length;
+
+            if (multiAssetTotal === 0 && !isMultiAssetPaginated) {
               // No assets - return layer without children
               return { ...layer, children: [] };
             }
 
-            // Fetch all assets at once (returns Record<string, Asset>)
-            const assetsById = await getAssetsByIds(assetIds, isPublished);
+            // Slice to the current page (mirrors DB pagination).
+            let pageAssetIds = assetIds;
+            if (multiAssetLimit || multiAssetOffset) {
+              const start = multiAssetOffset || 0;
+              pageAssetIds = assetIds.slice(start, multiAssetLimit ? start + multiAssetLimit : undefined);
+            }
+
+            // Fetch only the assets shown on this page (returns Record<string, Asset>)
+            const assetsById = await getAssetsByIds(pageAssetIds, isPublished);
 
             // Clone the layer for each asset (like regular collections)
             const clonedLayers: Layer[] = await Promise.all(
-              assetIds.map(async (assetId) => {
+              pageAssetIds.map(async (assetId) => {
                 const asset = assetsById[assetId];
                 if (!asset) return null;
 
@@ -2565,6 +2611,26 @@ export async function resolveCollectionLayers(
               })
             ).then(results => results.filter((item): item is Layer => item !== null));
 
+            // Build pagination metadata so sibling pagination layers ("Total
+            // items", "Page X of Y", Prev/Next) resolve against the asset count.
+            let multiAssetPaginationMeta: CollectionPaginationMeta | undefined;
+            if (isMultiAssetPaginated && multiAssetPagination) {
+              const itemsPerPage = multiAssetPagination.items_per_page || 10;
+              multiAssetPaginationMeta = {
+                currentPage: multiAssetCurrentPage,
+                totalPages: Math.ceil(multiAssetTotal / itemsPerPage),
+                totalItems: multiAssetTotal,
+                itemsPerPage,
+                layerId: layer.id,
+                collectionId: collectionVariable.id,
+                mode: multiAssetPagination.mode,
+                itemIds: assetIds,
+                isPublished,
+                // No sort: multi-asset order is the image order in the field.
+                maxTotal: multiAssetMaxTotal,
+              };
+            }
+
             // Return a fragment layer containing all cloned items
             // _fragment is a special marker that LayerRenderer and layerToHtml handle
             return {
@@ -2579,6 +2645,7 @@ export async function resolveCollectionLayers(
                 ...layer.variables,
                 collection: undefined,
               },
+              _paginationMeta: multiAssetPaginationMeta,
             };
           }
 
@@ -3389,27 +3456,34 @@ function updatePaginationLayerWithMeta(layer: Layer, meta: CollectionPaginationM
       : `${updatedLayer.classes || ''} hidden`.trim();
   }
 
+  const numbers = buildPaginationNumbers(meta);
+
   // Helper to recursively update layers
   function updateLayerRecursive(l: Layer): void {
     if (l.id?.endsWith('-pagination-info')) {
-      l.variables = {
-        ...l.variables,
-        text: {
-          type: 'dynamic_text',
-          data: { content: `Page ${currentPage} of ${totalPages}` }
-        }
-      };
+      // Modern templates embed `pagination` inline variables — stash the numbers
+      // so renderers (and the translated template) resolve them at display time.
+      // Legacy content without chips keeps the hardcoded replacement.
+      if (hasPaginationVariables(l.variables?.text)) {
+        l._paginationNumbers = numbers;
+      } else {
+        l.variables = {
+          ...l.variables,
+          text: { type: 'dynamic_text', data: { content: `Page ${currentPage} of ${totalPages}` } }
+        };
+      }
     }
 
     if (l.id?.endsWith('-pagination-count')) {
-      const shownItems = Math.min(itemsPerPage, totalItems);
-      l.variables = {
-        ...l.variables,
-        text: {
-          type: 'dynamic_text',
-          data: { content: `Showing ${shownItems} of ${totalItems}` }
-        }
-      };
+      if (hasPaginationVariables(l.variables?.text)) {
+        l._paginationNumbers = numbers;
+      } else {
+        const shownItems = Math.min(itemsPerPage, totalItems);
+        l.variables = {
+          ...l.variables,
+          text: { type: 'dynamic_text', data: { content: `Showing ${shownItems} of ${totalItems}` } }
+        };
+      }
     }
 
     // Update previous button state
@@ -3495,8 +3569,10 @@ export function generatePaginationWrapper(
         children: [
           {
             id: `${collectionLayerId}-pagination-prev-text`,
-            name: 'span',
+            name: 'text',
+            settings: { tag: 'span' },
             classes: '',
+            restrictions: { editText: true },
             variables: {
               text: {
                 type: 'dynamic_text',
@@ -3509,8 +3585,10 @@ export function generatePaginationWrapper(
       // Page indicator
       {
         id: `${collectionLayerId}-pagination-info`,
-        name: 'span',
+        name: 'text',
+        settings: { tag: 'span' },
         classes: 'text-sm text-[#4b5563]',
+        restrictions: { editText: true },
         variables: {
           text: {
             type: 'dynamic_text',
@@ -3535,8 +3613,10 @@ export function generatePaginationWrapper(
         children: [
           {
             id: `${collectionLayerId}-pagination-next-text`,
-            name: 'span',
+            name: 'text',
+            settings: { tag: 'span' },
             classes: '',
+            restrictions: { editText: true },
             variables: {
               text: {
                 type: 'dynamic_text',
@@ -5007,6 +5087,13 @@ export function layerToHtml(
     attrs.push('selected');
   }
 
+  // Pagination count/info layers: expose the (translated) template so the
+  // client runtime can re-resolve the numbers after load-more/filter/page nav.
+  if (getPaginationLayerKind(layer.id) && layer._paginationNumbers) {
+    const template = paginationTextVariableToTemplate(layer.variables?.text);
+    if (template) attrs.push(`data-pagination-template="${escapeHtml(template)}"`);
+  }
+
   // For buttons/divs rendered as <a>, resolve link href and add attributes directly
   if ((isButtonWithLink || isDivWithLink) && buttonLinkSettings) {
     let btnLinkHref = '';
@@ -5097,8 +5184,15 @@ export function layerToHtml(
       .join('')
     : '';
 
-  // Get text content from variables.text
-  const textVariable = layer.variables?.text;
+  // Get text content from variables.text. For pagination count/info layers,
+  // resolve the `pagination` inline variables to live numbers first.
+  let textVariable = layer.variables?.text;
+  if (textVariable && layer._paginationNumbers && getPaginationLayerKind(layer.id)) {
+    textVariable = resolvePaginationTextVariable(
+      textVariable as DynamicTextVariable | DynamicRichTextVariable,
+      layer._paginationNumbers,
+    );
+  }
   let textContent = '';
   let isRichText = false;
 
