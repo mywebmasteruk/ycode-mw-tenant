@@ -144,3 +144,27 @@ describe('tenant table set', () => {
     }
   });
 });
+
+describe('recognized scope mechanisms (beyond applyTenantEq)', () => {
+  it('treats applyTenantOrLegacyScope(query, tid) as scoped — inline and assigned', () => {
+    const inline = `async function f(t){ const c={}; const {data}=await applyTenantOrLegacyScope(c.from('api_keys').select('*'), t); return data; }`;
+    const assigned = `async function f(t){ const c={}; let q=c.from('api_keys').select('*'); q=applyTenantOrLegacyScope(q,t); return await q; }`;
+    expect(analyzeTenantIsolation('apiKeyRepository.ts', inline)).toEqual([]);
+    expect(analyzeTenantIsolation('apiKeyRepository.ts', assigned)).toEqual([]);
+  });
+
+  it("treats the Knex direct-PG `.where('tenant_id', tid)` path as scoped", () => {
+    const src = `async function f(t){ const knex=()=>{}; return await knex('translations').select('*').where('tenant_id', t); }`;
+    expect(analyzeTenantIsolation('translationRepository.ts', src)).toEqual([]);
+  });
+
+  it('treats scopeCollectionItemTimestampUpdate(query, itemId, tid) as scoped', () => {
+    const src = `async function f(t,id){ const c={}; const q=c.from('collection_items').update({}); await scopeCollectionItemTimestampUpdate(q,id,t); }`;
+    expect(analyzeTenantIsolation('route.ts', src)).toEqual([]);
+  });
+
+  it('still flags a genuinely bare tenant-table read', () => {
+    const src = `async function f(){ const c={}; const {data}=await c.from('versions').select('*'); return data; }`;
+    expect(analyzeTenantIsolation('versionRepository.ts', src)).toHaveLength(1);
+  });
+});

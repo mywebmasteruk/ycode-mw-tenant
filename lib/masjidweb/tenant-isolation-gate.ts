@@ -242,14 +242,29 @@ function assignedVar(top: ts.Node): string | null {
   return null;
 }
 
-/** Is this chain an argument to a call to `applyTenantEq(...)`? (inline scoping) */
-function isWrappedInApplyTenantEq(top: ts.Node): boolean {
+/**
+ * Helpers that apply a tenant filter to a query, treated as equivalent to an
+ * inline `.eq('tenant_id', …)`:
+ *  - `applyTenantEq(q, tid)`               → `.eq('tenant_id', tid)`
+ *  - `applyTenantOrLegacyScope(q, tid)`    → `tenant_id = tid OR tenant_id IS NULL`
+ *  - `scopeCollectionItemTimestampUpdate(q, itemId, tid)` → `.eq('tenant_id', tid)`
+ * The query chain is always the first argument to each.
+ */
+const SCOPE_HELPERS = new Set([
+  'applyTenantEq',
+  'applyTenantOrLegacyScope',
+  'scopeCollectionItemTimestampUpdate',
+]);
+const SCOPE_HELPER_ALT = '(?:applyTenantEq|applyTenantOrLegacyScope|scopeCollectionItemTimestampUpdate)';
+
+/** Is this chain the first argument to a recognized tenant-scope helper? (inline scoping) */
+function isWrappedInScopeHelper(top: ts.Node): boolean {
   const parent = top.parent;
   return Boolean(
     parent &&
       ts.isCallExpression(parent) &&
       ts.isIdentifier(parent.expression) &&
-      parent.expression.text === 'applyTenantEq' &&
+      SCOPE_HELPERS.has(parent.expression.text) &&
       parent.arguments.includes(top as ts.Expression),
   );
 }
@@ -264,17 +279,18 @@ function isWrappedInApplyTenantEq(top: ts.Node): boolean {
  */
 function readIsScoped(top: ts.Node, sf: ts.SourceFile, scope: ts.Node): boolean {
   const chainText = top.getText(sf);
-  if (/\.eq\(\s*['"]tenant_id['"]/.test(chainText)) return true;
-  if (isWrappedInApplyTenantEq(top)) return true;
+  // Inline supabase-js `.eq('tenant_id', …)` or Knex direct-PG `.where('tenant_id', …)`.
+  if (/\.(?:eq|where)\(\s*['"]tenant_id['"]/.test(chainText)) return true;
+  if (isWrappedInScopeHelper(top)) return true;
 
   const v = assignedVar(top);
   if (!v) return false;
   const id = v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   if (!ID_RE.test(v)) return false;
   const text = scopeText(scope, sf);
-  const passedToHelper = new RegExp(`applyTenantEq\\(\\s*${id}\\b`).test(text);
-  const reassignedEq = new RegExp(`\\b${id}\\s*=\\s*${id}\\.eq\\(\\s*['"]tenant_id['"]`).test(text);
-  const directEq = new RegExp(`\\b${id}\\.eq\\(\\s*['"]tenant_id['"]`).test(text);
+  const passedToHelper = new RegExp(`${SCOPE_HELPER_ALT}\\(\\s*${id}\\b`).test(text);
+  const reassignedEq = new RegExp(`\\b${id}\\s*=\\s*${id}\\.(?:eq|where)\\(\\s*['"]tenant_id['"]`).test(text);
+  const directEq = new RegExp(`\\b${id}\\.(?:eq|where)\\(\\s*['"]tenant_id['"]`).test(text);
   return passedToHelper || reassignedEq || directEq;
 }
 
