@@ -68,6 +68,7 @@ import { getCollectionVariable, canDeleteLayer, findLayerById, findParentCollect
 import { CANVAS_BORDER, CANVAS_PADDING, updateViewportOverrides } from '@/lib/canvas-utils';
 import { BREAKPOINTS } from '@/lib/breakpoint-utils';
 import { buildFieldGroupsForLayer, flattenFieldGroups, filterFieldGroupsByType, SIMPLE_TEXT_FIELD_TYPES } from '@/lib/collection-field-utils';
+import { getPaginationLayerKind, PAGINATION_VARIABLE_LABELS, type PaginationVariableKey } from '@/lib/pagination-text-utils';
 import { buildFieldVariableData } from '@/lib/variable-format-utils';
 import { getRichTextValue } from '@/lib/tiptap-utils';
 import { DropContainerIndicator, DropLineIndicator } from '@/components/DropIndicators';
@@ -79,7 +80,7 @@ import { setDragCursor, clearDragCursor } from '@/lib/drag-cursor';
 import type { Layer, Page, CollectionField, Asset } from '@/types';
 import {
   DropdownMenu,
-  DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuShortcut,
+  DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuShortcut,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu';
 import {
@@ -615,6 +616,12 @@ const CenterCanvas = React.memo(function CenterCanvas({
   // Track whether zoom calculation is ready (prevents flash of wrong zoom on initial load)
   const [isCanvasReady, setIsCanvasReady] = useState(false);
 
+  // Hide the component canvas while its auto-zoom settles. Opening a component
+  // runs several measurement passes (width/height) that each re-fit the zoom;
+  // revealing only after dimensions hold steady avoids a visible size jump.
+  const [isComponentCanvasSettling, setIsComponentCanvasSettling] = useState(false);
+  const componentSettleTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
   // Optimize store subscriptions - use selective selectors (scoped to current page only)
   const currentDraft = usePagesStore((state) => currentPageId ? state.draftsByPageId[currentPageId] : null);
   const addLayerFromTemplate = usePagesStore((state) => state.addLayerFromTemplate);
@@ -719,6 +726,23 @@ const CenterCanvas = React.memo(function CenterCanvas({
   useEffect(() => {
     setReportedContentWidth(0);
   }, [editingComponentId]);
+
+  // On component open, hide the canvas so the initial multi-pass auto-zoom isn't
+  // visible. Only keyed on editingComponentId — NOT on dimensions — so reveals
+  // during normal editing don't re-hide and blink the canvas.
+  useEffect(() => {
+    setIsComponentCanvasSettling(!!editingComponentId);
+  }, [editingComponentId]);
+
+  // While settling (just opened), reveal once measured dimensions hold steady
+  // (debounced). Runs only while settling, so editing-time dimension changes
+  // don't trigger it. Fires even with no change via the settling dependency.
+  useEffect(() => {
+    if (!editingComponentId || !isComponentCanvasSettling) return;
+    clearTimeout(componentSettleTimerRef.current);
+    componentSettleTimerRef.current = setTimeout(() => setIsComponentCanvasSettling(false), 200);
+    return () => clearTimeout(componentSettleTimerRef.current);
+  }, [editingComponentId, isComponentCanvasSettling, reportedContentWidth, reportedContentHeight]);
 
   const collectionItemsFromStore = useCollectionsStore((state) => state.items);
   const collectionsFromStore = useCollectionsStore((state) => state.collections);
@@ -1368,6 +1392,14 @@ const CenterCanvas = React.memo(function CenterCanvas({
     () => filterFieldGroupsByType(fieldGroups, SIMPLE_TEXT_FIELD_TYPES),
     [fieldGroups],
   );
+
+  // Pagination count/info layers expose dynamic number variables to insert.
+  const paginationVariableKeys = useMemo<PaginationVariableKey[]>(() => {
+    const kind = getPaginationLayerKind(editingLayerId);
+    if (kind === 'count') return ['shown', 'total'];
+    if (kind === 'info') return ['current', 'pages'];
+    return [];
+  }, [editingLayerId]);
 
   // Create assets map for Canvas (asset ID -> asset)
   const assetsMap = useMemo(() => {
@@ -2434,7 +2466,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
           </ToggleGroup>
 
           {/* Inline Variable Button */}
-          {textFieldGroups.length > 0 && (
+          {(textFieldGroups.length > 0 || paginationVariableKeys.length > 0) && (
             <ToggleGroup
               type="single"
               size="xs"
@@ -2456,12 +2488,31 @@ const CenterCanvas = React.memo(function CenterCanvas({
                   </ToggleGroupItem>
                 </DropdownMenuTrigger>
 
-                {fieldGroups && (
-                  <DropdownMenuContent
-                    className="w-56 py-1 px-1 max-h-none!"
-                    align="start"
-                    sideOffset={4}
-                  >
+                <DropdownMenuContent
+                  className="w-56 py-1 px-1 max-h-none!"
+                  align="start"
+                  sideOffset={4}
+                >
+                  {paginationVariableKeys.length > 0 && (
+                    <>
+                      <DropdownMenuLabel className="text-xs text-foreground/80">Pagination</DropdownMenuLabel>
+                      {paginationVariableKeys.map((key) => (
+                        <DropdownMenuItem
+                          key={key}
+                          className="gap-2"
+                          onClick={() => {
+                            addFieldVariable({ type: 'pagination', data: { key } });
+                            setTextEditorVariableDropdownOpen(false);
+                          }}
+                        >
+                          <Icon name="hash" className="size-3 text-muted-foreground shrink-0" />
+                          <span className="truncate">{PAGINATION_VARIABLE_LABELS[key]}</span>
+                        </DropdownMenuItem>
+                      ))}
+                      {textFieldGroups.length > 0 && <DropdownMenuSeparator />}
+                    </>
+                  )}
+                  {fieldGroups && textFieldGroups.length > 0 && (
                     <CollectionFieldSelector
                       fieldGroups={textFieldGroups}
                       allFields={collectionFieldsFromStore}
@@ -2477,8 +2528,8 @@ const CenterCanvas = React.memo(function CenterCanvas({
                         setTextEditorVariableDropdownOpen(false);
                       }}
                     />
-                  </DropdownMenuContent>
-                )}
+                  )}
+                </DropdownMenuContent>
               </DropdownMenu>
             </ToggleGroup>
           )}
@@ -2546,7 +2597,8 @@ const CenterCanvas = React.memo(function CenterCanvas({
             elementPicker?.active && 'cursor-crosshair'
           )}
           style={{
-            opacity: isCanvasReady ? 1 : 0,
+            opacity: isCanvasReady && !isComponentCanvasSettling ? 1 : 0,
+            transition: 'opacity 120ms ease-out',
             scrollbarWidth: 'none', // Firefox
             msOverflowStyle: 'none', // IE/Edge
             WebkitOverflowScrolling: 'touch',

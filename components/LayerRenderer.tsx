@@ -7,10 +7,10 @@ import LayerLockIndicator from '@/components/collaboration/LayerLockIndicator';
 import EditingIndicator from '@/components/collaboration/EditingIndicator';
 import { useCollaborationPresenceStore, getResourceLockKey, RESOURCE_TYPES } from '@/stores/useCollaborationPresenceStore';
 import { useAuthStore } from '@/stores/useAuthStore';
-import type { Layer, Locale, ComponentVariable, FormSettings, LinkSettings, Breakpoint, CollectionItemWithValues, CollectionField, Component } from '@/types';
+import type { Layer, Locale, ComponentVariable, FormSettings, LinkSettings, Breakpoint, CollectionItemWithValues, CollectionField, Component, DynamicTextVariable, DynamicRichTextVariable } from '@/types';
 import type { UseLiveLayerUpdatesReturn } from '@/hooks/use-live-layer-updates';
 import type { UseLiveComponentUpdatesReturn } from '@/hooks/use-live-component-updates';
-import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextEditable, isTextContentLayer, isRichTextLayer, getCollectionVariable, evaluateVisibility, findAncestorByName, filterDisabledSliderLayers, getLayerCmsFieldBinding, findLayerById, applyCustomAttributes } from '@/lib/layer-utils';
+import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextEditable, isTextContentLayer, isRichTextLayer, getCollectionVariable, evaluateVisibility, findAncestorByName, filterDisabledSliderLayers, getLayerCmsFieldBinding, findLayerById, applyCustomAttributes, containsLayerId } from '@/lib/layer-utils';
 import { getMapIframeProps, DEFAULT_MAP_SETTINGS, resolveMarkerColor } from '@/lib/map-utils';
 import { HTML_TO_REACT_ATTRS } from '@/lib/parse-head-html';
 import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
@@ -27,6 +27,7 @@ import { buildImageSizes, generateImageSrcset, getOptimizedImageUrl, getSvgAspec
 import { useEditorStore } from '@/stores/useEditorStore';
 import { toast } from 'sonner';
 import { resolveInlineVariablesFromData } from '@/lib/inline-variables';
+import { hasPaginationVariables, paginationTextVariableToTemplate, resolvePaginationTextVariable } from '@/lib/pagination-text-utils';
 import { renderRichText, hasBlockElementsWithInlineVariables, getTextStyleClasses, flattenTiptapParagraphs, type RichTextLinkContext, type RenderComponentBlockFn } from '@/lib/text-format-utils';
 import { hasComponentOrVariable, extractPlainTextFromTiptap } from '@/lib/tiptap-utils';
 import LayerContextMenu from '@/app/(builder)/ycode/components/LayerContextMenu';
@@ -479,6 +480,17 @@ const LayerItemImpl: React.FC<{
   const isEditing = editingLayerId === layer.id;
   const isDragging = activeLayerId === layer.id;
   const textEditable = isTextEditable(layer);
+
+  // Reveal an editor-hidden layer (e.g. an animated dropdown) when it OR a
+  // descendant is selected. Subscribed reactively so a hidden ancestor updates
+  // when a descendant is selected — its own `isSelected` wouldn't change then.
+  // Returns a stable `false` for non-hidden layers, so it never re-renders them.
+  const isEditorHidden = isEditMode && !!editorHiddenLayerIds?.has(layer.id);
+  const revealFromSelection = useEditorStore((state) => {
+    if (!isEditorHidden) return false;
+    const sel = state.selectedLayerId;
+    return sel ? containsLayerId(layer, sel) : false;
+  });
 
   const isEditor = useAuthStore((state) => state.role === 'editor');
 
@@ -1022,17 +1034,33 @@ const LayerItemImpl: React.FC<{
 
   const computedPaginationText = useMemo<string | undefined>(() => {
     if (!paginationContextTarget || paginationContextTarget.kind === 'wrapper') return undefined;
+    // While actively editing, let the text editor render the template (with chips).
+    if (isEditing) return undefined;
+    // Not yet resolved (loading / pagination off): render the layer's own stored
+    // content instead of blanking it, so legacy "Page X of Y" text still shows.
     if (paginationDisplayTotal === undefined) return undefined;
     if (paginationDisplayTotal <= 0) return '';
     const pagination = getCollectionVariable(paginationLinkedCollectionLayer!)?.pagination;
     const itemsPerPage = pagination?.items_per_page || 10;
-    if (paginationContextTarget.kind === 'count') {
-      const shown = Math.min(itemsPerPage, paginationDisplayTotal);
-      return `Showing ${shown} of ${paginationDisplayTotal}`;
+    const numbers = {
+      shown: Math.min(itemsPerPage, paginationDisplayTotal),
+      total: paginationDisplayTotal,
+      current: 1,
+      pages: Math.max(1, Math.ceil(paginationDisplayTotal / itemsPerPage)),
+    };
+    const textVar = layer.variables?.text;
+    // Modern templates embed `pagination` chips — resolve them to numbers.
+    if (hasPaginationVariables(textVar)) {
+      return paginationTextVariableToTemplate(
+        resolvePaginationTextVariable(textVar as DynamicTextVariable | DynamicRichTextVariable, numbers)
+      );
     }
-    const totalPages = Math.max(1, Math.ceil(paginationDisplayTotal / itemsPerPage));
-    return `Page 1 of ${totalPages}`;
-  }, [paginationContextTarget, paginationLinkedCollectionLayer, paginationDisplayTotal]);
+    // Legacy content without chips: keep the hardcoded text.
+    if (paginationContextTarget.kind === 'count') {
+      return `Showing ${numbers.shown} of ${numbers.total}`;
+    }
+    return `Page ${numbers.current} of ${numbers.pages}`;
+  }, [paginationContextTarget, paginationLinkedCollectionLayer, paginationDisplayTotal, isEditing, layer.variables?.text]);
 
   // Resolve text and image URLs with field binding support
   const textContent = (() => {
@@ -1364,6 +1392,7 @@ const LayerItemImpl: React.FC<{
   const layerData = useCollectionLayerStore((state) => state.layerData[layer.id]);
   const isLoadingLayerData = useCollectionLayerStore((state) => state.loading[layer.id]);
   const fetchLayerData = useCollectionLayerStore((state) => state.fetchLayerData);
+  const setLayerTotal = useCollectionLayerStore((state) => state.setLayerTotal);
   const fieldsByCollectionId = useCollectionsStore((state) => state.fields);
   const itemsByCollectionId = useCollectionsStore((state) => state.items);
   const referencedItemsByCollectionId = useCollectionLayerStore((state) => state.referencedItems);
@@ -1506,14 +1535,16 @@ const LayerItemImpl: React.FC<{
     // `limit`/`offset`. We slice unconditionally for paginated layers, and
     // when static filters are present for non-paginated ones (the API
     // returns the configured limit when there are no static filters, so no
-    // re-slicing is needed there).
+    // re-slicing is needed there). Multi-asset items are always built
+    // client-side (never fetched with limit/offset), so they must be sliced
+    // here too.
     const pagination = collectionVariable?.pagination;
     const isPaginated = !!pagination?.enabled && (pagination.mode === 'pages' || pagination.mode === 'load_more');
 
     if (isPaginated) {
       const itemsPerPage = pagination!.items_per_page || 10;
       items = items.slice(0, itemsPerPage);
-    } else if (hasStaticFilters) {
+    } else if (hasStaticFilters || sourceFieldType === 'multi_asset') {
       const offset = collectionVariable?.offset ?? 0;
       const limit = collectionVariable?.limit;
       if (offset || limit) {
@@ -1642,6 +1673,23 @@ const LayerItemImpl: React.FC<{
     layer.id,
   ]);
 
+  // Multi-asset layers build virtual items client-side, so fetchLayerData skips
+  // them and layerTotal stays empty — meaning sibling pagination layers ("Total
+  // items", "Page X of Y") can't resolve. Mirror SSR by publishing the asset
+  // count (uncapped; paginationDisplayTotal applies the maxTotal limit) here.
+  const multiAssetTotalCount = useMemo<number | null>(() => {
+    if (sourceFieldType !== 'multi_asset' || !sourceFieldId) return null;
+    const fieldValue = sourceFieldSource === 'page'
+      ? pageCollectionItemData?.[sourceFieldId]
+      : collectionLayerData?.[sourceFieldId];
+    return parseMultiAssetFieldValue(fieldValue).length;
+  }, [sourceFieldType, sourceFieldId, sourceFieldSource, pageCollectionItemData, collectionLayerData]);
+
+  useEffect(() => {
+    if (!isEditMode || multiAssetTotalCount === null) return;
+    setLayerTotal(layer.id, multiAssetTotalCount);
+  }, [isEditMode, multiAssetTotalCount, setLayerTotal, layer.id]);
+
   // For component instances in edit mode, use the component's layers as children
   // For published pages, children are already resolved server-side
   const baseChildren = (isEditMode && component && component.layers) ? component.layers : layer.children;
@@ -1682,30 +1730,51 @@ const LayerItemImpl: React.FC<{
     return filterDisabledSliderLayers(children, layer.settings);
   }, [layer.name, layer.settings, children]);
 
-  const subtreeHasInteractiveDescendants = useMemo(() => {
-    const interactiveTags = new Set(['a', 'button', 'input', 'select', 'textarea']);
+  // Detect descendants that can't live inside an <a> and can't be safely
+  // downgraded: real anchors, form controls, or anything with its own link.
+  // Plain <button>s are excluded — styling is class-driven, so inside a link we
+  // render them as <div> (see the isInsideLink downgrade below) instead of
+  // breaking the wrapping link.
+  const subtreeHasHardInteractive = useMemo(() => {
+    const hardTags = new Set(['a', 'input', 'select', 'textarea']);
 
     const visit = (nodes?: Layer[]): boolean => {
       if (!nodes?.length) return false;
-
       return nodes.some((node) => {
         if (!node) return false;
-
         const childTag = node.settings?.tag || node.name || 'div';
         const childHasLink = isValidLinkSettings(node.variables?.link);
-
-        return interactiveTags.has(childTag) || childHasLink || visit(node.children);
+        return hardTags.has(childTag) || childHasLink || visit(node.children);
       });
     };
 
     return visit(effectiveChildren);
   }, [effectiveChildren]);
 
-  // Browsers repair invalid interactive nesting (<a><button>, <a><a>, etc.)
-  // differently during SSR, which can cause hydration mismatches.
-  if (!isEditMode && htmlTag === 'a' && subtreeHasInteractiveDescendants) {
+  // <a><button>/<a><a>/etc. is invalid HTML; browsers repair it differently
+  // during SSR, causing hydration mismatches. Plain buttons are downgraded to
+  // <div> (below), so we only fall back to a non-link <div> when the subtree
+  // contains hard interactive content that can't be downgraded.
+  if (!isEditMode && htmlTag === 'a' && subtreeHasHardInteractive) {
     htmlTag = 'div';
   }
+
+  // Inside a link, render <button> as a styled <div> to keep the wrapping <a>
+  // valid (its appearance is driven by classes, not the button element).
+  if (!isEditMode && isInsideLink && htmlTag === 'button') {
+    htmlTag = 'div';
+  }
+
+  // Container layers that aren't a div/button/<a> (e.g. an <article> or <section>
+  // with a link) wrap their content in <a class="contents">. Soft buttons inside
+  // are downgraded (children receive isInsideLink), so only hard interactive
+  // content blocks the wrap. Computed early so children render as inside-a-link.
+  const willWrapWithLink = !isButtonWithLink
+    && !isDivWithLink
+    && !isInsideLink
+    && htmlTag !== 'a'
+    && !subtreeHasHardInteractive
+    && isValidLinkSettings(layer.variables?.link);
 
   // Use sortable for drag and drop
   const {
@@ -2209,21 +2278,10 @@ const LayerItemImpl: React.FC<{
         (editorBreakpoint && hiddenBreakpoints.includes(editorBreakpoint));
 
       if (shouldHideOnBreakpoint) {
-        const shouldHide = parentComponentLayerId || (() => {
-          const storeSelectedId = useEditorStore.getState().selectedLayerId;
-          const isSelectedOrChildSelected = isSelected || (storeSelectedId && (() => {
-            const checkDescendants = (children: Layer[] | undefined): boolean => {
-              if (!children) return false;
-              for (const child of children) {
-                if (child.id === storeSelectedId) return true;
-                if (checkDescendants(child.children)) return true;
-              }
-              return false;
-            };
-            return checkDescendants(layer.children);
-          })());
-          return !isSelectedOrChildSelected;
-        })();
+        // Inside component instances internal layers can't be individually
+        // selected, so always hide. Otherwise reveal when this layer or a
+        // descendant is selected (subscribed reactively above).
+        const shouldHide = parentComponentLayerId ? true : !revealFromSelection;
 
         if (shouldHide) {
           const existingStyle = typeof elementProps.style === 'object' ? elementProps.style : {};
@@ -3374,7 +3432,7 @@ const LayerItemImpl: React.FC<{
                     parentComponentVariables={parentComponentVariables}
                     editingComponentVariables={editingComponentVariables}
                     isInsideForm={isInsideForm || htmlTag === 'form'}
-                    isInsideLink={isInsideLink || htmlTag === 'a'}
+                    isInsideLink={isInsideLink || htmlTag === 'a' || willWrapWithLink}
                     parentFormSettings={htmlTag === 'form' ? layer.settings?.form : parentFormSettings}
                     pages={pages}
                     folders={folders}
@@ -3453,7 +3511,7 @@ const LayerItemImpl: React.FC<{
               parentComponentVariables={parentComponentVariables}
               editingComponentVariables={editingComponentVariables}
               isInsideForm={isInsideForm || htmlTag === 'form'}
-              isInsideLink={isInsideLink || htmlTag === 'a'}
+              isInsideLink={isInsideLink || htmlTag === 'a' || willWrapWithLink}
               parentFormSettings={htmlTag === 'form' ? layer.settings?.form : parentFormSettings}
               components={componentsProp}
               ancestorComponentIds={effectiveAncestorIds}
@@ -3522,7 +3580,7 @@ const LayerItemImpl: React.FC<{
             parentComponentVariables={parentComponentVariables}
             editingComponentVariables={editingComponentVariables}
             isInsideForm={isInsideForm || htmlTag === 'form'}
-            isInsideLink={isInsideLink || htmlTag === 'a'}
+            isInsideLink={isInsideLink || htmlTag === 'a' || willWrapWithLink}
             parentFormSettings={htmlTag === 'form' ? layer.settings?.form : parentFormSettings}
             pages={pages}
             folders={folders}
@@ -3564,12 +3622,7 @@ const LayerItemImpl: React.FC<{
   // Skip for buttons/divs — they render as <a> directly (see isButtonWithLink, isDivWithLink)
   // Skip for <a> layers — they already render as <a> and nesting <a> inside <a> is invalid HTML
   const linkSettings = layer.variables?.link;
-  const shouldWrapWithLink = !isButtonWithLink
-    && !isDivWithLink
-    && !isInsideLink
-    && htmlTag !== 'a'
-    && !subtreeHasInteractiveDescendants
-    && isValidLinkSettings(linkSettings);
+  const shouldWrapWithLink = willWrapWithLink;
 
   if (shouldWrapWithLink && linkSettings) {
     if (isEditMode) {
