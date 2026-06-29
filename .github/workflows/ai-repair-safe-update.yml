@@ -423,7 +423,26 @@ jobs:
           && steps.build.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh pr ready "${{ inputs.pr_number }}" --repo "$GITHUB_REPOSITORY"
+        run: |
+          PR_NUMBER="${{ inputs.pr_number }}"
+          gh pr ready "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"
+          # The repair resolved all conflicts and the branch passed the isolation
+          # gate + tenant tests + production build above, so the autopilot
+          # "Status: blocked" in the PR body is now stale. The admin dashboard
+          # derives its status from that line, so rewrite it to "ready" —
+          # otherwise the dashboard keeps showing "blocked / Fix with AI" and the
+          # Approve button never appears. (ci-build-check carries the same fix, but
+          # it is action_required on bot-authored PRs and may not run; this step
+          # always runs after a verified repair.)
+          BODY=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body --jq '.body')
+          if printf '%s' "$BODY" | grep -qE '^Status:[[:space:]]*blocked'; then
+            printf '%s' "$BODY" \
+              | sed -E 's/^Status:[[:space:]]*blocked.*/Status: ready (AI repair verified; isolation gate + build green)/' \
+              | sed -E 's/^Legacy status:[[:space:]]*blocked.*/Legacy status: ready/' \
+              | grep -vE '^-?[[:space:]]*Autopilot blocked this update' > /tmp/repair_pr_body.md
+            gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/repair_pr_body.md
+            echo "Rewrote PR #$PR_NUMBER body status: blocked -> ready."
+          fi
 
       - name: Comment on pull request
         if: always()
