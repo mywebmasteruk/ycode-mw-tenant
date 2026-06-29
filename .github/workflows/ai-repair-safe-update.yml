@@ -205,8 +205,14 @@ jobs:
           PREMIUM_AI_REPAIR_MAX_BAD_RESPONSES: "5"
           PREMIUM_AI_REPAIR_MAX_CALL_MS: "300000"
           PREMIUM_AI_REPAIR_MAX_TOTAL_MS: "2700000"
+          # Large repo files (e.g. pageRepository.ts ~44k chars) overflowed the
+          # 24k full-file reply budget → finish_reason=length → invalid_json.
+          PREMIUM_AI_REPAIR_MAX_TOKENS: "32000"
           PREMIUM_AI_REPAIR_MAX_HUNKS_PER_FILE: "2"
-          PREMIUM_AI_REPAIR_ENABLE_HUNK_FALLBACK: "false"
+          # Enable hunk fallback: if the whole-file repair still truncates, resolve
+          # the conflict hunk-by-hunk (tiny output, cannot truncate). The tenant-
+          # isolation gate verifies the result regardless, so this stays fail-closed.
+          PREMIUM_AI_REPAIR_ENABLE_HUNK_FALLBACK: "true"
         timeout-minutes: 50
         run: npx --yes tsx scripts/core-update/run-premium-ai-repair.ts
 
