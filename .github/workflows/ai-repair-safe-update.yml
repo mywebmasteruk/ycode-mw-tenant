@@ -93,6 +93,7 @@ jobs:
             scripts/core-update/run-tenant-codemod-resolver.ts \
             scripts/core-update/run-tenant-codemod-resolver.test.ts \
             scripts/core-update/run-tenant-isolation-gate.ts \
+            scripts/core-update/absolute-isolation-audit.ts \
             scripts/core-update/create-copilot-escalation.ts \
             scripts/reapply-tier2-seams.ts \
             scripts/check-autopilot-guard.ts \
@@ -370,6 +371,16 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin main || git fetch --no-tags origin main
           npx --yes tsx scripts/core-update/run-tenant-isolation-gate.ts
+
+      # Absolute scan of ALL lib/ + app/ files (not just the TIER2 set the
+      # differential gate above checks). Fails the repair on any unscoped
+      # tenant-table query that isn't marked `// isolation-ok:`. This is the same
+      # whole-codebase backstop ci-build-check runs — but ci-build-check is
+      # action_required on bot-authored PRs and may not auto-run, so we run it
+      # here too. No new credentials needed; the verification install above
+      # already provisioned node_modules.
+      - name: Tenant isolation audit (whole codebase)
+        run: npm run updates:isolation-audit
 
       - name: Type-check repaired branch
         run: npm run type-check
