@@ -27,37 +27,17 @@
 import ts from 'typescript';
 
 /**
- * Tables with a `tenant_id` column that MUST be tenant-scoped. Keep in sync with
- * masjidweb-backend TENANT_SCOPED_CONTENT_TABLES and public.delete_tenant_scoped_data.
+ * Tables with a `tenant_id` column that MUST be tenant-scoped.
+ *
+ * MASJIDWEB_SEAM: schema-driven-isolation — this set is GENERATED from the live
+ * production schema (tenant-scoped-tables.generated.ts), not hand-curated, so a
+ * new tenant_id table from a Ycode core update is auto-required to be scoped once
+ * the generated file is refreshed. Regenerate with
+ * `scripts/core-update/generate-tenant-scoped-tables.ts`. See
+ * docs/masjidweb-core-seams.md#tier-0.
  */
-export const TENANT_SCOPED_TABLES: ReadonlySet<string> = new Set([
-  'global_variables',
-  'webhook_deliveries',
-  'webhooks',
-  'versions',
-  'collection_imports',
-  'api_keys',
-  'mcp_tokens',
-  'app_settings',
-  'form_submissions',
-  'collection_item_values',
-  'collection_items',
-  'page_layers',
-  'collection_fields',
-  'pages',
-  'page_folders',
-  'collections',
-  'components',
-  'layer_styles',
-  'color_variables',
-  'assets',
-  'asset_folders',
-  'fonts',
-  'translations',
-  'locales',
-  'settings',
-  'tenant_homepage_content',
-]);
+export { TENANT_SCOPED_TABLES, GLOBAL_TABLES } from './tenant-scoped-tables.generated';
+import { TENANT_SCOPED_TABLES } from './tenant-scoped-tables.generated';
 
 /**
  * The Tier-2 repository files that follow the mechanical tenant pattern

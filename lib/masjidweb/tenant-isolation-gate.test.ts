@@ -2,8 +2,37 @@ import { describe, expect, it } from 'vitest';
 import {
   analyzeTenantIsolation,
   isolationRegressions,
+  GLOBAL_TABLES,
   TENANT_SCOPED_TABLES,
 } from './tenant-isolation-gate';
+
+// Phase 3: the scoped-table set is GENERATED from the live schema
+// (tenant-scoped-tables.generated.ts). These guards catch a broken/empty
+// regeneration and the historical hand-curated drift (provisioning_audit_log
+// was missing from the old hardcoded Set).
+describe('schema-generated tenant-scoped tables', () => {
+  it('is populated and covers the core tenant tables', () => {
+    expect(TENANT_SCOPED_TABLES.size).toBeGreaterThanOrEqual(20);
+    for (const t of ['pages', 'collections', 'collection_item_values', 'assets', 'settings']) {
+      expect(TENANT_SCOPED_TABLES.has(t)).toBe(true);
+    }
+  });
+
+  it('includes provisioning_audit_log (the gap the hardcoded list had)', () => {
+    expect(TENANT_SCOPED_TABLES.has('provisioning_audit_log')).toBe(true);
+  });
+
+  it('classifies genuinely-global tables as global, never tenant-scoped', () => {
+    for (const t of ['tenant_registry', 'migrations', 'mw_table_policy', 'mcp_oauth_clients']) {
+      expect(GLOBAL_TABLES.has(t)).toBe(true);
+      expect(TENANT_SCOPED_TABLES.has(t)).toBe(false);
+    }
+  });
+
+  it('keeps the two sets disjoint', () => {
+    for (const t of TENANT_SCOPED_TABLES) expect(GLOBAL_TABLES.has(t)).toBe(false);
+  });
+});
 
 const scopedRead = `
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';

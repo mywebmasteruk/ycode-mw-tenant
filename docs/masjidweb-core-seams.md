@@ -46,6 +46,7 @@ Upstream rarely touches these. **No Ycode merge** for tenant behavior here.
 | Session alignment | `lib/masjidweb/tenant-session-alignment.ts` |
 | Auth user scope | `lib/masjidweb/auth-users-tenant-scope.ts` |
 | Update gates | `lib/masjidweb/update-tenant-access.ts` |
+| Isolation gate table list | `lib/masjidweb/tenant-scoped-tables.generated.ts` (generated from the live schema by `scripts/core-update/generate-tenant-scoped-tables.ts`) — the gate's tenant-table set is schema-derived, so a new `tenant_id` table is auto-required to be scoped after a regenerate; no hand-edited list. Refresh: `SUPABASE_ACCESS_TOKEN=<pat> npx tsx scripts/core-update/generate-tenant-scoped-tables.ts` |
 | Tests | `lib/masjidweb/*.test.ts`, `lib/tenant/middleware-utils.test.ts` |
 | Schema | `database/migrations/20260325*_tenant_*.ts` |
 
