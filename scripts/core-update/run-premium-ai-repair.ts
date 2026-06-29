@@ -37,7 +37,7 @@ const MAX_FILE_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_FILE_C
 const MAX_RETRY_FILE_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_RETRY_MAX_FILE_CHARS, 160_000);
 const MAX_HUNK_CONTEXT_LINES = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_HUNK_CONTEXT_LINES, 80);
 const MAX_DOC_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_DOC_CHARS, 12_000);
-const MAX_REPLY_TOKENS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_TOKENS, 24_000);
+const MAX_REPLY_TOKENS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_TOKENS, 32_000);
 // A single upstream Ycode update can conflict with more tenant-seam files than
 // the old 4-file cap allowed (this update had 7), leaving the repair permanently
 // blocked on the unattended files. Raise the per-run ceiling to 12 so one click

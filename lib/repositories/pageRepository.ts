@@ -257,11 +257,6 @@ async function transferIndexPage(
     // If the existing index page already has a slug (shouldn't happen but might in edge cases),
     // we don't need to generate a new one - just unset is_index
     if (existingIndex.slug && existingIndex.slug.trim() !== '') {
-<<<<<<< HEAD
-      let upd = client
-||||||| 2a29483
-      const { error: updateError } = await client
-=======
       // Recompute content_hash so publish detects the demotion (is_index changed)
       const demotedHash = generatePageMetadataHash({
         name: existingIndex.name,
@@ -272,8 +267,7 @@ async function transferIndexPage(
         error_page: existingIndex.error_page ?? null,
       });
 
-      const { error: updateError } = await client
->>>>>>> upstream/main
+      let upd = client
         .from('pages')
         .update({
           is_index: false,
