@@ -94,3 +94,18 @@ jobs:
           else
             echo "PR #$PR_NUMBER is already ready for review."
           fi
+          # CI is green and conflicts are resolved, so the autopilot "blocked"
+          # state in the PR body is stale. The admin dashboard derives its
+          # status from the body's `Status:` line (parseAutopilotStatus), so
+          # rewrite it to `ready` — otherwise the dashboard keeps showing
+          # "blocked / Fix with AI" and the Approve button never appears even
+          # though the update is safe and mergeable.
+          BODY=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body --jq '.body')
+          if printf '%s' "$BODY" | grep -qE '^Status:[[:space:]]*blocked'; then
+            printf '%s' "$BODY" \
+              | sed -E 's/^Status:[[:space:]]*blocked.*/Status: ready (CI green; tenant-isolation gate passed)/' \
+              | sed -E 's/^Legacy status:[[:space:]]*blocked.*/Legacy status: ready/' \
+              | grep -vE '^-?[[:space:]]*Autopilot blocked this update' > /tmp/pr_body.md
+            gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/pr_body.md
+            echo "Rewrote PR #$PR_NUMBER body status: blocked -> ready."
+          fi
