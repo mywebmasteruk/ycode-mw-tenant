@@ -153,14 +153,36 @@ describe('recognized scope mechanisms (beyond applyTenantEq)', () => {
     expect(analyzeTenantIsolation('apiKeyRepository.ts', assigned)).toEqual([]);
   });
 
-  it("treats the Knex direct-PG `.where('tenant_id', tid)` path as scoped", () => {
-    const src = `async function f(t){ const knex=()=>{}; return await knex('translations').select('*').where('tenant_id', t); }`;
+  it("recognizes a supabase-js chain carrying a literal .where('tenant_id') as scoped", () => {
+    const src = `async function f(t){ const c={}; const {data}=await c.from('translations').select('*').where('tenant_id', t); return data; }`;
     expect(analyzeTenantIsolation('translationRepository.ts', src)).toEqual([]);
+  });
+
+  it("does NOT analyze the Knex knex('table') entrypoint (no .from()) — known limitation, covered file-level by the autopilot guard", () => {
+    // A bare, totally-unscoped Knex query yields 0 findings because the analyzer
+    // only sees `<expr>.from('<table>')`, not `knex('<table>')`. Documents the gap.
+    const bareKnex = `async function f(){ const knex=()=>{}; return await knex('translations').select('*'); }`;
+    expect(analyzeTenantIsolation('translationRepository.ts', bareKnex)).toEqual([]);
   });
 
   it('treats scopeCollectionItemTimestampUpdate(query, itemId, tid) as scoped', () => {
     const src = `async function f(t,id){ const c={}; const q=c.from('collection_items').update({}); await scopeCollectionItemTimestampUpdate(q,id,t); }`;
     expect(analyzeTenantIsolation('route.ts', src)).toEqual([]);
+  });
+
+  it('FLAGS a tenant-table chain passed in a non-first argument to a scope helper', () => {
+    const src = `async function f(t){ const c={}; const other={}; return await applyTenantOrLegacyScope(other, c.from('api_keys').select('*')); }`;
+    expect(analyzeTenantIsolation('apiKeyRepository.ts', src)).toHaveLength(1);
+  });
+
+  it('a commented-out scope call does NOT satisfy the assigned-var evidence', () => {
+    const src = `async function f(t){ const c={};\n  // applyTenantEq(q, t)\n  let q=c.from('api_keys').select('*'); return await q; }`;
+    expect(analyzeTenantIsolation('apiKeyRepository.ts', src)).toHaveLength(1);
+  });
+
+  it('a suffix-named non-helper (xapplyTenantEq) does NOT count as scoping', () => {
+    const src = `async function f(t){ const c={}; let q=c.from('api_keys').select('*'); q=xapplyTenantEq(q,t); return await q; }`;
+    expect(analyzeTenantIsolation('apiKeyRepository.ts', src)).toHaveLength(1);
   });
 
   it('still flags a genuinely bare tenant-table read', () => {

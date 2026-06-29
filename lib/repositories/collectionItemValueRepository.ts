@@ -101,6 +101,10 @@ export async function insertValuesDirectPg(
   const knex = await getKnexClient();
   const tenantId = await getTenantIdFromHeaders();
   const now = new Date().toISOString();
+  // Stamp tenant_id directly on each row. (An earlier version relied on a
+  // `set_tenant_context()` GUC + a DB trigger to populate it, but neither the
+  // function nor the trigger exists on prod — that path threw and would have
+  // orphaned rows. Stamping the column is robust and needs no DB-side helper.)
   const rows = values.map(v => ({
     id: randomUUID(),
     item_id: v.item_id,
@@ -109,13 +113,11 @@ export async function insertValuesDirectPg(
     is_published: v.is_published ?? false,
     created_at: now,
     updated_at: now,
+    ...(tenantId ? { tenant_id: tenantId } : {}),
   }));
 
   await knex.transaction(async (trx) => {
     await trx.raw("SET LOCAL statement_timeout = '60s'");
-    if (tenantId) {
-      await trx.raw('SELECT set_tenant_context(?::uuid)', [tenantId]);
-    }
     await trx('collection_item_values').insert(rows);
   });
 }

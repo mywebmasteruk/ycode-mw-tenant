@@ -11,7 +11,7 @@
  * constraint. The static isolation gate enforces this.
  */
 
-import { getSupabaseAdmin, getTenantIdFromHeaders } from '@/lib/supabase-server';
+import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { fetchAllRows } from '@/lib/supabase-constants';
 import { getKnexClient } from '@/lib/knex-client';
 import type { Translation, CreateTranslationData, UpdateTranslationData } from '@/types';
@@ -36,10 +36,11 @@ export async function getAllTranslationRows<T = Translation>(
   columns: string[] = ['*'],
   tenantId?: string,
 ): Promise<T[]> {
-  const effectiveTenantId = await resolveEffectiveTenantId();
+  // One tenant id for both paths: explicit arg wins, else the full resolver
+  // (AsyncLocalStorage override → x-tenant-id header → env fallback).
+  const resolvedTenantId = tenantId ?? (await resolveEffectiveTenantId());
   try {
     const knex = await getKnexClient();
-    const resolvedTenantId = tenantId ?? await getTenantIdFromHeaders();
     let query = knex('translations').select(columns).where('is_published', isPublished);
     if (resolvedTenantId) {
       query = query.where('tenant_id', resolvedTenantId);
@@ -50,7 +51,7 @@ export async function getAllTranslationRows<T = Translation>(
     if (!client) return [];
     const select = columns.includes('*') ? '*' : columns.join(', ');
     return await fetchAllRows<T>((from, to) =>
-      applyTenantEq(client.from('translations').select(select).eq('is_published', isPublished).order('id', { ascending: true }).range(from, to), effectiveTenantId) as unknown as PromiseLike<{ data: T[] | null; error: unknown }>,
+      applyTenantEq(client.from('translations').select(select).eq('is_published', isPublished).order('id', { ascending: true }).range(from, to), resolvedTenantId) as unknown as PromiseLike<{ data: T[] | null; error: unknown }>,
     );
   }
 }

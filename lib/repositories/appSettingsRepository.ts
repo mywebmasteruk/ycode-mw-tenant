@@ -144,6 +144,13 @@ export async function setAppSetting(
     throw new Error('Supabase client not configured');
   }
 
+  // The conflict target is (tenant_id, app_id, key); Postgres treats NULL as
+  // distinct in a unique index, so a null tenant would never match an existing
+  // row and would silently insert duplicates. Require a real tenant context.
+  if (!tenantId) {
+    throw new Error('setAppSetting requires a tenant context (resolveEffectiveTenantId returned null)');
+  }
+
   const { data, error } = await client
     .from('app_settings')
     .upsert(

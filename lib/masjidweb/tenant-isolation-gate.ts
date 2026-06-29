@@ -16,6 +16,13 @@
  * rare legitimately-global query.
  *
  * Pure (string in → findings out) so it is unit-testable without a live Supabase.
+ *
+ * SCOPE LIMITATION: this analyzer only sees supabase-js `<expr>.from('<table>')`
+ * chains. It does NOT parse the Knex direct-PG path (`knex('<table>')…`), which
+ * has no `.from()` entrypoint — those queries are covered file-level by
+ * `autopilot-tenant-invariants.ts` ("knex tenant filter present"). The
+ * `.where('tenant_id')` recognition below applies only if a Knex chain is ever
+ * routed through here; it is not a claim that Knex queries are gate-analyzed.
  */
 import ts from 'typescript';
 
@@ -269,7 +276,9 @@ const SCOPE_HELPERS = new Set([
 ]);
 const SCOPE_HELPER_ALT = '(?:applyTenantEq|applyTenantOrLegacyScope|scopeCollectionItemTimestampUpdate)';
 
-/** Is this chain the first argument to a recognized tenant-scope helper? (inline scoping) */
+/** Is this chain the FIRST argument to a recognized tenant-scope helper? (inline scoping)
+ *  Must be arg[0] — the helpers only scope their first argument, so a chain passed
+ *  in any other position (e.g. `applyTenantEq(other, <chain>)`) is NOT scoped. */
 function isWrappedInScopeHelper(top: ts.Node): boolean {
   const parent = top.parent;
   return Boolean(
@@ -277,8 +286,16 @@ function isWrappedInScopeHelper(top: ts.Node): boolean {
       ts.isCallExpression(parent) &&
       ts.isIdentifier(parent.expression) &&
       SCOPE_HELPERS.has(parent.expression.text) &&
-      parent.arguments.includes(top as ts.Expression),
+      parent.arguments[0] === top,
   );
+}
+
+/** Strip line/block comments so commented-out scope calls can't satisfy the
+ *  assigned-var evidence regexes below. String literals are preserved (the
+ *  regexes need the literal `'tenant_id'`); a string that merely *mentions* a
+ *  helper is a negligible vector. */
+function stripComments(s: string): string {
+  return s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
 }
 
 /**
@@ -299,8 +316,9 @@ function readIsScoped(top: ts.Node, sf: ts.SourceFile, scope: ts.Node): boolean 
   if (!v) return false;
   const id = v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   if (!ID_RE.test(v)) return false;
-  const text = scopeText(scope, sf);
-  const passedToHelper = new RegExp(`${SCOPE_HELPER_ALT}\\(\\s*${id}\\b`).test(text);
+  const text = stripComments(scopeText(scope, sf));
+  // Helper name must not be a suffix of a longer identifier (e.g. `xapplyTenantEq`).
+  const passedToHelper = new RegExp(`(?<![\\w$])${SCOPE_HELPER_ALT}\\(\\s*${id}\\b`).test(text);
   const reassignedEq = new RegExp(`\\b${id}\\s*=\\s*${id}\\.(?:eq|where)\\(\\s*['"]tenant_id['"]`).test(text);
   const directEq = new RegExp(`\\b${id}\\.(?:eq|where)\\(\\s*['"]tenant_id['"]`).test(text);
   return passedToHelper || reassignedEq || directEq;

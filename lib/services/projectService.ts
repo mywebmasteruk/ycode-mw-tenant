@@ -9,6 +9,7 @@ import { gzipSync, gunzipSync } from 'zlib';
 import type { Knex } from 'knex';
 import { getKnexClient, closeKnexClient, testKnexConnection } from '../knex-client';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { addTenantFilter } from '@/lib/knex-helpers';
 import { STORAGE_BUCKET, STORAGE_FOLDERS } from '@/lib/asset-constants';
 import { migrations } from '../migrations-loader';
 import { guardKnexForMigrationReplay } from '@/lib/migration-replay-guard';
@@ -285,9 +286,11 @@ export async function getProjectName(
     const hasSettings = await knex.schema.hasTable('settings');
     if (!hasSettings) return DEFAULT_PROJECT_NAME;
 
-    const row = await knex('settings')
-      .where('key', 'site_name')
-      .first('value');
+    // settings is tenant-scoped — without this filter `.first()` returns an
+    // arbitrary tenant's site_name into the export manifest.
+    let query = knex('settings').where('key', 'site_name');
+    query = await addTenantFilter(knex, query, 'settings');
+    const row = await query.first('value');
 
     if (row?.value) {
       const parsed = typeof row.value === 'string' ? JSON.parse(row.value) : row.value;

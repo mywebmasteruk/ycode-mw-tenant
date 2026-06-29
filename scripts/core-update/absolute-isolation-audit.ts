@@ -1,8 +1,15 @@
 /**
- * ABSOLUTE tenant-isolation audit — scans EVERY .ts/.tsx file in the codebase
- * (not just the TIER2 files the differential gate checks) and reports every
+ * ABSOLUTE tenant-isolation audit — scans the RUNTIME app code (lib/ + app/),
+ * not just the TIER2 files the differential gate checks, and reports every
  * unscoped query against a tenant-scoped table. Finds existing leaks, not just
  * regressions vs a baseline.
+ *
+ * SCOPE: lib/ + app/ — i.e. every file that runs in a tenant request. It does
+ * NOT scan `database/` (migrations + manual maintenance scripts like
+ * backfill-content-hashes.ts) or top-level `scripts/`: those are admin/cron
+ * tools that operate cross-tenant by design, not request-path code. Also does
+ * NOT parse the Knex `knex('<table>')` path (no `.from()` entrypoint) — that is
+ * covered file-level by autopilot-tenant-invariants.ts.
  *
  * Exit 1 if any unscoped access is found (so CI blocks the merge); exit 0 when
  * every tenant-table query is scoped or carries an `// isolation-ok:` reason.

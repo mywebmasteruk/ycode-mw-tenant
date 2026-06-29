@@ -53,7 +53,6 @@ const getTenantCacheContext = cache(async () => {
  * Includes both default locale paths and translated paths for all locales
  */
 export async function generateStaticParams() {
-  const effectiveTenantId = await resolveEffectiveTenantId();
   try {
     const supabase = await getSupabaseAdmin();
 
@@ -97,7 +96,7 @@ export async function generateStaticParams() {
           .select('*')
           .eq('is_published', true)
           .is('deleted_at', null)
-          .in('locale_id', localeIds), effectiveTenantId)
+          .in('locale_id', localeIds), tenantId)
         : { data: null };
 
     if (!pages || !folders) {
