@@ -110,6 +110,7 @@ Each layer's \`design\` object controls its appearance. Use update_layer_design 
 - maxWidth: "1280px"
 - aspectRatio: "16/9", "1/1"
 - objectFit: "cover" | "contain" (for images)
+- objectPosition: "center" | "top" | "bottom" | "left" | "right" | "left-top" | "right-top" | "left-bottom" | "right-bottom" (focal point for cropped images)
 
 **borders** — Borders and radius
 - borderWidth: "1px"

@@ -227,7 +227,7 @@ async function transferIndexPage(
   // This prevents draft pages from being modified when creating published index pages
   let query = client
     .from('pages')
-    .select('id, name, slug')
+    .select('id, name, slug, settings, is_dynamic, error_page')
     .eq('is_index', true)
     .eq('is_published', isPublished)
     .is('deleted_at', null)
@@ -257,10 +257,21 @@ async function transferIndexPage(
     // If the existing index page already has a slug (shouldn't happen but might in edge cases),
     // we don't need to generate a new one - just unset is_index
     if (existingIndex.slug && existingIndex.slug.trim() !== '') {
+      // Recompute content_hash so publish detects the demotion (is_index changed)
+      const demotedHash = generatePageMetadataHash({
+        name: existingIndex.name,
+        slug: existingIndex.slug,
+        settings: existingIndex.settings,
+        is_index: false,
+        is_dynamic: existingIndex.is_dynamic ?? false,
+        error_page: existingIndex.error_page ?? null,
+      });
+
       let upd = client
         .from('pages')
         .update({
           is_index: false,
+          content_hash: demotedHash,
           updated_at: new Date().toISOString()
         })
         .eq('id', existingIndex.id)
@@ -317,12 +328,23 @@ async function transferIndexPage(
       }
     }
 
+    // Recompute content_hash so publish detects the demotion (is_index + slug changed)
+    const demotedHash = generatePageMetadataHash({
+      name: existingIndex.name,
+      slug: newSlug,
+      settings: existingIndex.settings,
+      is_index: false,
+      is_dynamic: existingIndex.is_dynamic ?? false,
+      error_page: existingIndex.error_page ?? null,
+    });
+
     // Update the old index page: unset is_index and set slug
     let upd2 = client
       .from('pages')
       .update({
         is_index: false,
         slug: newSlug,
+        content_hash: demotedHash,
         updated_at: new Date().toISOString()
       })
       .eq('id', existingIndex.id)
