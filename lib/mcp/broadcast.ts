@@ -9,6 +9,10 @@
 import type { RealtimeChannel } from '@supabase/supabase-js';
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+// MASJIDWEB_SEAM: realtime-tenant-isolation — see docs/masjidweb-core-seams.md#tier-6
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { tenantChannelName } from '@/lib/masjidweb/realtime-tenant-channel';
+// MASJIDWEB_SEAM_END
 import type { Component, Layer, Page } from '@/types';
 
 const MCP_USER_ID = '__mcp_agent__';
@@ -61,12 +65,22 @@ async function broadcast(
   event: string,
   payload: Record<string, unknown>,
 ): Promise<void> {
+  // MASJIDWEB_SEAM: realtime-tenant-isolation — see docs/masjidweb-core-seams.md#tier-6
+  // Tenant-scope the channel so MCP changes only reach the originating tenant's
+  // editor — must match the prefixing the browser hooks apply (realtime-tenant-channel.ts).
+  const tenantId = await resolveEffectiveTenantId();
+  if (!tenantId) {
+    console.warn(`[MCP-BROADCAST] No tenant id resolved; skipping ${event} to avoid a cross-tenant leak`);
+    return;
+  }
+  const scopedName = tenantChannelName(tenantId, channelName);
+  // MASJIDWEB_SEAM_END
   try {
-    const channel = await getOrCreateChannel(channelName);
+    const channel = await getOrCreateChannel(scopedName);
     await channel.send({ type: 'broadcast', event, payload });
   } catch (error) {
     console.error(`[MCP-BROADCAST] Failed to broadcast ${event}:`, error);
-    channelCache.delete(channelName);
+    channelCache.delete(scopedName);
   }
 }
 

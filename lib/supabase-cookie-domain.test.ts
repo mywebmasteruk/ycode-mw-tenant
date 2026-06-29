@@ -5,6 +5,7 @@ import {
   supabaseCookieOptionsForHost,
   supabaseCookieOptionsForRequestHeaders,
   tenantDomainSuffixFromEnv,
+  tenantScopedAuthCookieName,
 } from '@/lib/supabase-cookie-domain';
 
 const PROJECT_URL = 'https://abc123.supabase.co';
@@ -51,25 +52,44 @@ describe('requestHostname', () => {
 });
 
 describe('supabaseAuthCookieName', () => {
-  it('derives the Supabase auth cookie name from the project ref', () => {
+  it('derives the legacy Supabase auth cookie name from the project ref', () => {
     expect(supabaseAuthCookieName(PROJECT_URL)).toBe('sb-abc123-auth-token');
   });
 });
 
+describe('tenantScopedAuthCookieName', () => {
+  it('keys the cookie name on the full host so it is unique per subdomain', () => {
+    expect(tenantScopedAuthCookieName(PROJECT_URL, 'tenant-a.masjidweb.com')).toBe(
+      'sb-abc123-tenant-a-masjidweb-com-auth-token',
+    );
+    expect(tenantScopedAuthCookieName(PROJECT_URL, 'tenant-b.masjidweb.com')).toBe(
+      'sb-abc123-tenant-b-masjidweb-com-auth-token',
+    );
+  });
+
+  it('strips the port and never collides with the legacy shared cookie name', () => {
+    const name = tenantScopedAuthCookieName(PROJECT_URL, 'tenant.masjidweb.com:443');
+    expect(name).toBe('sb-abc123-tenant-masjidweb-com-auth-token');
+    expect(name).not.toBe(supabaseAuthCookieName(PROJECT_URL));
+  });
+});
+
 describe('supabaseCookieOptionsForHost', () => {
-  it('sets a shared domain cookie for tenant subdomains', () => {
+  it('returns a host-only (no domain) per-host cookie for tenant subdomains', () => {
     expect(
-      supabaseCookieOptionsForHost('tenant.masjidweb.com', 'masjidweb.com', PROJECT_URL),
-    ).toEqual({ domain: '.masjidweb.com', name: 'sb-abc123-auth-token' });
+      supabaseCookieOptionsForHost('tenant-a.masjidweb.com', 'masjidweb.com', PROJECT_URL),
+    ).toEqual({ name: 'sb-abc123-tenant-a-masjidweb-com-auth-token' });
   });
 
-  it('sets a shared domain cookie for the apex host', () => {
-    expect(
-      supabaseCookieOptionsForHost('masjidweb.com', 'masjidweb.com', PROJECT_URL),
-    ).toEqual({ domain: '.masjidweb.com', name: 'sb-abc123-auth-token' });
+  it('gives different subdomains different cookie names so sessions stay independent', () => {
+    const a = supabaseCookieOptionsForHost('tenant-a.masjidweb.com', 'masjidweb.com', PROJECT_URL);
+    const b = supabaseCookieOptionsForHost('tenant-b.masjidweb.com', 'masjidweb.com', PROJECT_URL);
+    expect(a).not.toEqual(b);
+    expect(a?.domain).toBeUndefined();
+    expect(b?.domain).toBeUndefined();
   });
 
-  it('does not set shared domain cookies for localhost or dot-localhost hosts', () => {
+  it('does not scope cookies for localhost or dot-localhost hosts', () => {
     expect(
       supabaseCookieOptionsForHost('localhost', 'localhost', PROJECT_URL),
     ).toBeUndefined();
@@ -78,25 +98,19 @@ describe('supabaseCookieOptionsForHost', () => {
     ).toBeUndefined();
   });
 
-  it('keeps only the cookie name for unrelated hosts', () => {
-    expect(
-      supabaseCookieOptionsForHost('other.example', 'masjidweb.com', PROJECT_URL),
-    ).toEqual({ name: 'sb-abc123-auth-token' });
-  });
-
-  it('returns undefined when no suffix is configured and no project URL is available', () => {
-    expect(supabaseCookieOptionsForHost('tenant.masjidweb.com', undefined)).toBeUndefined();
+  it('returns undefined when no project URL is available (cannot name the cookie)', () => {
+    expect(supabaseCookieOptionsForHost('tenant.masjidweb.com', 'masjidweb.com')).toBeUndefined();
   });
 });
 
 describe('supabaseCookieOptionsForRequestHeaders', () => {
-  it('uses the request hostname when deriving cookie options', () => {
+  it('uses the request hostname when deriving the per-host cookie name', () => {
     const headers = new Headers({
       'x-forwarded-host': 'tenant.masjidweb.com:443, internal.local',
     });
 
     expect(
       supabaseCookieOptionsForRequestHeaders(headers, 'masjidweb.com', PROJECT_URL),
-    ).toEqual({ domain: '.masjidweb.com', name: 'sb-abc123-auth-token' });
+    ).toEqual({ name: 'sb-abc123-tenant-masjidweb-com-auth-token' });
   });
 });

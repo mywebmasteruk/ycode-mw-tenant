@@ -13,6 +13,9 @@ import { useCollaborationPresenceStore } from '../stores/useCollaborationPresenc
 import { usePagesStore } from '../stores/usePagesStore';
 import { createClient } from '@/lib/supabase-browser';
 import { createChannelLifecycle } from '@/lib/realtime-channel';
+// MASJIDWEB_SEAM: realtime-tenant-isolation — see docs/masjidweb-core-seams.md#tier-6
+import { clientTenantId, tenantChannelName } from '@/lib/masjidweb/realtime-tenant-channel';
+// MASJIDWEB_SEAM_END
 import type { Component, Layer } from '../types';
 
 // Types for component updates
@@ -41,16 +44,19 @@ export function useLiveComponentUpdates(): UseLiveComponentUpdatesReturn {
   
   // Initialize Supabase channel for component updates
   useEffect(() => {
-    if (!user) {
+    // MASJIDWEB_SEAM: realtime-tenant-isolation — fail closed without a tenant id
+    const tenantId = clientTenantId(user);
+    if (!user || !tenantId) {
       return;
     }
-    
+    // MASJIDWEB_SEAM_END
+
     const lifecycle = createChannelLifecycle();
 
     const initializeChannel = async () => {
       try {
         const supabase = await createClient();
-        const channel = supabase.channel('components:updates');
+        const channel = supabase.channel(tenantChannelName(tenantId, 'components:updates')); // MASJIDWEB_SEAM: realtime-tenant-isolation
         if (!lifecycle.track(channel, supabase)) return;
 
         channel.on('broadcast', { event: 'component_created' }, (payload) => {

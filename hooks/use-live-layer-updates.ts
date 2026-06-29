@@ -12,6 +12,9 @@ import { useEditorStore } from '../stores/useEditorStore';
 import { createClient } from '@/lib/supabase-browser';
 import { debounce } from '../lib/collaboration-utils';
 import { createChannelLifecycle } from '@/lib/realtime-channel';
+// MASJIDWEB_SEAM: realtime-tenant-isolation — see docs/masjidweb-core-seams.md#tier-6
+import { clientTenantId, tenantChannelName } from '@/lib/masjidweb/realtime-tenant-channel';
+// MASJIDWEB_SEAM_END
 import type { Layer, LayerUpdate } from '../types';
 
 // Helper function to find layer in draft
@@ -81,16 +84,19 @@ export function useLiveLayerUpdates(
 
   // Initialize Supabase channel
   useEffect(() => {
-    if (!pageId || !user) {
+    // MASJIDWEB_SEAM: realtime-tenant-isolation — fail closed without a tenant id
+    const tenantId = clientTenantId(user);
+    if (!pageId || !user || !tenantId) {
       return;
     }
+    // MASJIDWEB_SEAM_END
 
     const lifecycle = createChannelLifecycle();
 
     const initializeChannel = async () => {
       try {
         const supabase = await createClient();
-        const channel = supabase.channel(`page:${pageId}:updates`);
+        const channel = supabase.channel(tenantChannelName(tenantId, `page:${pageId}:updates`)); // MASJIDWEB_SEAM: realtime-tenant-isolation
         if (!lifecycle.track(channel, supabase)) return;
 
         channel.on('broadcast', { event: 'layer_update' }, (payload) => {

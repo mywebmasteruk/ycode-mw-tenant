@@ -35,7 +35,9 @@ export async function getAuthUser(): Promise<AuthResult | null> {
     const parsed = parseSupabaseConfig(config);
     const cookieStore = await cookies();
     const h = await headers();
-    const cookieOpts = supabaseCookieOptionsForRequestHeaders(h);
+    // Pass projectUrl so the per-host auth cookie name matches every other client
+    // (browser, proxy, session route). See lib/supabase-cookie-domain.ts.
+    const cookieOpts = supabaseCookieOptionsForRequestHeaders(h, undefined, parsed.projectUrl);
 
     const client = createServerClient(parsed.projectUrl, parsed.anonKey, {
       cookies: {

@@ -59,8 +59,8 @@ Upstream rarely touches these. **No Ycode merge** for tenant behavior here.
 |------|---------------------|----------------------|
 | `proxy.ts` | Strip client `x-tenant-id`; subdomain → registry; builder auth; JWT vs header alignment; provisioning publish headers | Keep MasjidWeb blocks; take upstream routing/API changes around them |
 | `lib/supabase-server.ts` | Service-role admin client (upstream shape) | Preserve any MasjidWeb session/tenant comments; do not reintroduce unscoped helpers |
-| `lib/supabase-browser.ts` | Cookie domain for `*.tenant` suffix | Merge upstream client options; keep cookie domain helper |
-| `lib/supabase-cookie-domain.ts` | Shared cookie options | Keep file (fork-only) |
+| `lib/supabase-browser.ts` | Per-host auth cookie options (via cookie-domain helper) | Merge upstream client options; keep cookie helper wiring |
+| `lib/supabase-cookie-domain.ts` | **Host-only, per-host** auth cookie name (`tenantScopedAuthCookieName`) so each tenant subdomain keeps an independent session — a shared `.suffix` domain made all tenants share one cookie and log each other out. Every @supabase/ssr client must pass `projectUrl`. | Keep file (fork-only); do **not** reintroduce a shared cookie `domain` |
 | `lib/auth-invite-redirect.ts` | Invite/magic-link URLs for tenant hosts | Keep file (fork-only) |
 | `next.config.ts` | `Cache-Control: private` on `/`; font preconnect | Merge both header blocks |
 | `netlify.toml` | Netlify Next plugin / build | Keep MasjidWeb deploy settings |
@@ -152,6 +152,36 @@ Documented in workspace rules — preserve behavior, add regression tests:
 - `app/(builder)/ycode/api/auth/session/route.ts`
 - `lib/supabase-cookie-domain.ts`, `lib/supabase-browser.ts`
 - `app/(builder)/ycode/YCodeLayoutClient.tsx` — standalone route exclusion for accept-invite
+
+---
+
+## Tier 6 — Realtime collaboration channels
+
+Supabase Realtime keys subscriptions off the channel **name**, which is global across all
+tenants. The builder's live-update hooks and the MCP broadcaster used generically-named
+channels (`pages:updates`, `components:updates`, `collections:updates`, `layer-styles:updates`,
+`page:<id>:updates`), so one tenant's editor received another tenant's live edits. There is
+**no non-core way** to isolate a globally-named channel, so these are core edits.
+
+**Fix:** prefix every channel with the tenant id via `lib/masjidweb/realtime-tenant-channel.ts`
+(Tier 0). Sender and receiver must use the **same** prefixed name. Hooks fail **closed** (skip
+realtime entirely) when no tenant id is present rather than fall back to a shared channel.
+
+| File | What MasjidWeb adds | On upstream conflict |
+|------|---------------------|----------------------|
+| `lib/masjidweb/realtime-tenant-channel.ts` | `clientTenantId` + `tenantChannelName` helpers | Keep file (Tier 0) |
+| `hooks/use-live-page-updates.ts` | tenant guard + `tenantChannelName(...)` wrap | Re-apply `MASJIDWEB_SEAM: realtime-tenant-isolation` blocks |
+| `hooks/use-live-component-updates.ts` | same | same |
+| `hooks/use-live-collection-updates.ts` | same | same |
+| `hooks/use-live-layer-style-updates.ts` | same | same |
+| `hooks/use-live-layer-updates.ts` | same (channel already `page:<id>` scoped; prefixed for defense-in-depth) | same |
+| `lib/mcp/broadcast.ts` | `resolveEffectiveTenantId()` → `tenantChannelName(...)`, skip if no tenant | same |
+
+**Not yet scoped (id-keyed, safe only while ids are globally-unique UUIDs):** cursor presence
+rooms (`YCodeBuilderMain.tsx` `cursorRoomName`) and resource locks (`use-layer-locks.ts`,
+`CollectionItemSheet.tsx`/`CMS.tsx` `collection:<id>:item_locks`). These embed a page/collection/
+component UUID, so they cannot collide across tenants today. Prefix them too if ids ever stop
+being globally unique.
 
 ---
 
