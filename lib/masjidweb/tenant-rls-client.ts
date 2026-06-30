@@ -29,6 +29,9 @@ const TOKEN_TTL_SECONDS = 600; // 10 min; clients re-minted ~1 min before expiry
 
 /** Only the literal 'true' enables enforcement; anything else (unset/false) = OFF. */
 export function tenantRlsEnforceEnabled(): boolean {
+  // Never enforce at build time (generateStaticParams etc. run with no tenant request
+  // context) — keep build-time DB reads on service-role.
+  if (process.env.NEXT_PHASE === 'phase-production-build') return false;
   return process.env.MW_TENANT_RLS_ENFORCE === 'true';
 }
 

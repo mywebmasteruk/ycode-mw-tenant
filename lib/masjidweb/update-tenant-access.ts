@@ -1,6 +1,6 @@
 import { noCache } from '@/lib/api-response';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
-import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSupabaseServiceRole } from '@/lib/supabase-server';
 
 type TenantKind = 'template' | 'client';
 
@@ -32,7 +32,7 @@ export async function getUpdateTenantContext(): Promise<UpdateTenantContext> {
   }
 
   try {
-    const supabase = await getSupabaseAdmin();
+    const supabase = await getSupabaseServiceRole();
 
     if (!supabase) {
       return {

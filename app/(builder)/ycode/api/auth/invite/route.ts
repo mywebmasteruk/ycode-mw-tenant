@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import { resolveInviteRedirectUrl } from '@/lib/auth-invite-redirect';
-import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSupabaseServiceRole } from '@/lib/supabase-server';
 import { noCache } from '@/lib/api-response';
 import { requireManageMembers } from '@/lib/roles-server';
 import { ASSIGNABLE_ROLES } from '@/lib/roles';
@@ -40,7 +40,7 @@ export async function POST(request: NextRequest) {
 
     const assignRole = ASSIGNABLE_ROLES.includes(role) ? role : 'designer';
 
-    const client = await getSupabaseAdmin();
+    const client = await getSupabaseServiceRole();
     if (!client) {
       return noCache({ error: 'Supabase not configured' }, 500);
     }

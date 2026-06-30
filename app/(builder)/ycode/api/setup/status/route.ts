@@ -1,7 +1,7 @@
 import { credentials } from '@/lib/credentials';
 import { noCache } from '@/lib/api-response';
 import { validateConnectionUrl } from '@/lib/supabase-config-parser';
-import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSupabaseServiceRole } from '@/lib/supabase-server';
 import type { SupabaseConfig } from '@/types';
 
 // Disable caching for this route
@@ -13,7 +13,7 @@ export const revalidate = 0;
  */
 async function hasAuthUsers(): Promise<boolean> {
   try {
-    const client = await getSupabaseAdmin();
+    const client = await getSupabaseServiceRole();
     if (!client) return false;
 
     const { data, error } = await client.auth.admin.listUsers({

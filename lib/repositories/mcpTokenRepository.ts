@@ -1,4 +1,4 @@
-import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSupabaseAdmin, getSupabaseServiceRole } from '@/lib/supabase-server';
 import { applyTenantOrLegacyScope } from '@/lib/masjidweb/tenant-or-legacy-scope';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { createHash, randomBytes } from 'crypto';
@@ -120,7 +120,9 @@ export async function createToken(
  * Updates last_used_at in the background.
  */
 export async function validateToken(token: string): Promise<McpToken | null> {
-  const client = await getSupabaseAdmin();
+  // Service-role: global lookup by token to DISCOVER the tenant, runs before any tenant
+  // context exists. A tenant-scoped client would RLS-filter this and break MCP auth.
+  const client = await getSupabaseServiceRole();
 
   if (!client) {
     throw new Error('Supabase not configured');
@@ -272,7 +274,8 @@ export async function rotateRefreshToken(
   refreshToken: string,
   options?: { access_token_ttl_seconds?: number; refresh_token_ttl_seconds?: number },
 ): Promise<OAuthTokenPair | null> {
-  const client = await getSupabaseAdmin();
+  // Service-role: global lookup by refresh-token hash (the auth mechanism), no tenant context.
+  const client = await getSupabaseServiceRole();
 
   if (!client) {
     throw new Error('Supabase not configured');

@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSupabaseServiceRole } from '@/lib/supabase-server';
 import { noCache } from '@/lib/api-response';
 import { getCallerInfo, requireManageMembers } from '@/lib/roles-server';
 import { resolveRole, ASSIGNABLE_ROLES } from '@/lib/roles';
@@ -25,7 +25,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const client = await getSupabaseAdmin();
+    const client = await getSupabaseServiceRole();
     if (!client) {
       return noCache({ error: 'Supabase not configured' }, 500);
     }
@@ -138,7 +138,7 @@ export async function PATCH(request: NextRequest) {
       return noCache({ error: 'Only the owner can assign the admin role' }, 403);
     }
 
-    const client = await getSupabaseAdmin();
+    const client = await getSupabaseServiceRole();
     if (!client) {
       return noCache({ error: 'Supabase not configured' }, 500);
     }
@@ -195,7 +195,7 @@ export async function DELETE(request: NextRequest) {
       return noCache({ error: 'Cannot remove yourself' }, 400);
     }
 
-    const client = await getSupabaseAdmin();
+    const client = await getSupabaseServiceRole();
     if (!client) {
       return noCache({ error: 'Supabase not configured' }, 500);
     }

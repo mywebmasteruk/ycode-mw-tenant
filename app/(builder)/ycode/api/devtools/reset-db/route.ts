@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getKnexClient } from '@/lib/knex-client';
-import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSupabaseServiceRole } from '@/lib/supabase-server';
 import { STORAGE_BUCKET } from '@/lib/asset-constants';
 import { clearAllCache } from '@/lib/services/cacheService';
 
@@ -18,7 +18,7 @@ export async function POST() {
     console.log('[POST /ycode/api/devtools/reset-db] Starting database reset...');
 
     const knex = await getKnexClient();
-    const supabase = await getSupabaseAdmin();
+    const supabase = await getSupabaseServiceRole();
 
     // Get all tables in the public schema
     const tables = await knex.raw(`

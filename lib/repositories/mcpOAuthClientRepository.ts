@@ -1,4 +1,4 @@
-import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSupabaseServiceRole } from '@/lib/supabase-server';
 import { randomBytes } from 'crypto';
 
 /**
@@ -28,7 +28,7 @@ function generateClientId(): string {
 }
 
 export async function registerClient(data: RegisterClientData): Promise<McpOAuthClient> {
-  const client = await getSupabaseAdmin();
+  const client = await getSupabaseServiceRole();
 
   if (!client) {
     throw new Error('Supabase not configured');
@@ -55,7 +55,7 @@ export async function registerClient(data: RegisterClientData): Promise<McpOAuth
 }
 
 export async function getClient(clientId: string): Promise<McpOAuthClient | null> {
-  const client = await getSupabaseAdmin();
+  const client = await getSupabaseServiceRole();
 
   if (!client) {
     throw new Error('Supabase not configured');

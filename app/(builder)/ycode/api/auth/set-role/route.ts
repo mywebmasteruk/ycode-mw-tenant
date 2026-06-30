@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSupabaseServiceRole } from '@/lib/supabase-server';
 import { noCache } from '@/lib/api-response';
 import { requireManageMembers } from '@/lib/roles-server';
 import { ALL_ROLES } from '@/lib/roles';
@@ -33,7 +33,7 @@ export async function POST(request: NextRequest) {
       return noCache({ error: 'Only the owner can assign the owner role' }, 403);
     }
 
-    const client = await getSupabaseAdmin();
+    const client = await getSupabaseServiceRole();
     if (!client) {
       return noCache({ error: 'Supabase not configured' }, 500);
     }

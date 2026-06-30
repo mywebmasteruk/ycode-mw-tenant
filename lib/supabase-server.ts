@@ -69,7 +69,14 @@ let loggedMissingAdminCreds = false;
  * Module-level variables get reset on each hot reload, which would
  * orphan any in-flight requests on the old client.
  */
-export async function getSupabaseAdmin(_tenantId?: string): Promise<SupabaseClient | null> {
+/**
+ * Always-service-role client (admin access, bypasses RLS). Use for operations that
+ * genuinely need service-role and must NOT be tenant-scoped: GoTrue admin API
+ * (`auth.admin.*`), global / cross-tenant tables (tenant_registry, mcp_oauth_*, the
+ * mcp_tokens auth lookup), `exec_sql`, and bucket-level storage admin. Unaffected by
+ * MW_TENANT_RLS_ENFORCE — this is the pre-flag behaviour of getSupabaseAdmin.
+ */
+export async function getSupabaseServiceRole(): Promise<SupabaseClient | null> {
   const creds = await getSupabaseCredentials();
 
   if (!creds) {
@@ -77,30 +84,19 @@ export async function getSupabaseAdmin(_tenantId?: string): Promise<SupabaseClie
     if (!duringNextBuild && !loggedMissingAdminCreds) {
       loggedMissingAdminCreds = true;
       console.warn(
-        '[getSupabaseAdmin] No stored Supabase credentials yet (complete setup in /ycode or configure storage).',
+        '[getSupabaseServiceRole] No stored Supabase credentials yet (complete setup in /ycode or configure storage).',
       );
     }
     return null;
   }
 
-  const limitedFetch: typeof globalThis.fetch = (input, init) =>
-    withLimit(() => globalThis.fetch(input, init));
-
-  // MASJIDWEB_SEAM: tenant-rls-enforcement — flag-gated (MW_TENANT_RLS_ENFORCE).
-  // OFF (default) → skip entirely; the unchanged service_role path below runs.
-  // ON → per-tenant RLS-enforced client; returns null (→ service_role fallback) on any
-  // problem, so enabling can only add isolation, never break the builder. Rollback =
-  // unset the flag + redeploy. See lib/masjidweb/tenant-rls-client.ts.
-  if (tenantRlsEnforceEnabled()) {
-    const tenantClient = await maybeGetTenantScopedClient(creds.projectUrl, creds.anonKey, limitedFetch);
-    if (tenantClient) return tenantClient;
-  }
-  // MASJIDWEB_SEAM_END
-
   const credKey = `${creds.projectUrl}:${creds.serviceRoleKey}`;
   if (globalForSupabase.__supabaseClient && globalForSupabase.__supabaseCredKey === credKey) {
     return globalForSupabase.__supabaseClient;
   }
+
+  const limitedFetch: typeof globalThis.fetch = (input, init) =>
+    withLimit(() => globalThis.fetch(input, init));
 
   globalForSupabase.__supabaseClient = createClient(creds.projectUrl, creds.serviceRoleKey, {
     auth: {
@@ -114,6 +110,31 @@ export async function getSupabaseAdmin(_tenantId?: string): Promise<SupabaseClie
   globalForSupabase.__supabaseCredKey = credKey;
 
   return globalForSupabase.__supabaseClient;
+}
+
+/**
+ * Default client for TENANT-DATA access. With MW_TENANT_RLS_ENFORCE on, returns a
+ * per-tenant RLS-enforced client (falling back to service-role on any mint problem);
+ * otherwise the service-role client. Admin/privileged/cross-tenant callers must use
+ * {@link getSupabaseServiceRole} — those break under a tenant-scoped client.
+ */
+export async function getSupabaseAdmin(_tenantId?: string): Promise<SupabaseClient | null> {
+  // MASJIDWEB_SEAM: tenant-rls-enforcement — flag-gated (MW_TENANT_RLS_ENFORCE).
+  // OFF (default) → service-role (getSupabaseServiceRole), unchanged behaviour.
+  // ON → per-tenant RLS client; returns null (→ service-role fallback) on any problem.
+  // Rollback = unset the flag + redeploy. See lib/masjidweb/tenant-rls-client.ts.
+  if (tenantRlsEnforceEnabled()) {
+    const creds = await getSupabaseCredentials();
+    if (creds) {
+      const tenantFetch: typeof globalThis.fetch = (input, init) =>
+        withLimit(() => globalThis.fetch(input, init));
+      const tenantClient = await maybeGetTenantScopedClient(creds.projectUrl, creds.anonKey, tenantFetch);
+      if (tenantClient) return tenantClient;
+    }
+  }
+  // MASJIDWEB_SEAM_END
+
+  return getSupabaseServiceRole();
 }
 
 /**
@@ -164,7 +185,8 @@ export async function getTenantIdFromHeaders(): Promise<string | null> {
  * Execute raw SQL query
  */
 export async function executeSql(sql: string): Promise<{ success: boolean; error?: string }> {
-  const client = await getSupabaseAdmin();
+  // Service-role: exec_sql is a privileged RPC; a tenant-scoped client can't run it.
+  const client = await getSupabaseServiceRole();
 
   if (!client) {
     return { success: false, error: 'Supabase not configured' };

@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import { noCache } from '@/lib/api-response';
 import { getAuthUser } from '@/lib/supabase-auth';
-import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSupabaseServiceRole } from '@/lib/supabase-server';
 
 /**
  * DELETE /ycode/api/profile
@@ -16,7 +16,7 @@ export async function DELETE(request: NextRequest) {
     }
 
     // Use admin client to delete user
-    const adminClient = await getSupabaseAdmin();
+    const adminClient = await getSupabaseServiceRole();
 
     if (!adminClient) {
       return noCache({ error: 'Server configuration error' }, 500);

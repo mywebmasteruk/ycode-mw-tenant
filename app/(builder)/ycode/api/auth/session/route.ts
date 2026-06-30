@@ -7,7 +7,7 @@ import { parseSupabaseConfig } from '@/lib/supabase-config-parser';
 import { supabaseCookieOptionsForRequestHeaders } from '@/lib/supabase-cookie-domain';
 import type { SupabaseConfig } from '@/types';
 import { supabaseServerRealtimeOptions } from '@/lib/supabase-server-options';
-import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSupabaseServiceRole } from '@/lib/supabase-server';
 import { bootstrapTenantOwnerIfNeeded } from '@/lib/masjidweb/bootstrap-tenant-owner';
 import { authUserTenantId } from '@/lib/masjidweb/auth-users-tenant-scope';
 
@@ -143,7 +143,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const adminClient = await getSupabaseAdmin();
+    const adminClient = await getSupabaseServiceRole();
     const tenantId = authUserTenantId(data.session.user);
     if (adminClient && tenantId) {
       await bootstrapTenantOwnerIfNeeded(
