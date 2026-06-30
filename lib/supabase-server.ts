@@ -7,6 +7,9 @@ import { parseSupabaseConfig } from './supabase-config-parser';
 import type { SupabaseConfig, SupabaseCredentials } from '@/types';
 import { withLimit } from './supabase-limiter';
 import { supabaseServerRealtimeOptions } from './supabase-server-options';
+// MASJIDWEB_SEAM: tenant-rls-enforcement — see docs/masjidweb-core-seams.md#tier-1
+import { maybeGetTenantScopedClient, tenantRlsEnforceEnabled } from '@/lib/masjidweb/tenant-rls-client';
+// MASJIDWEB_SEAM_END
 
 /**
  * Supabase Server Client
@@ -80,13 +83,24 @@ export async function getSupabaseAdmin(_tenantId?: string): Promise<SupabaseClie
     return null;
   }
 
+  const limitedFetch: typeof globalThis.fetch = (input, init) =>
+    withLimit(() => globalThis.fetch(input, init));
+
+  // MASJIDWEB_SEAM: tenant-rls-enforcement — flag-gated (MW_TENANT_RLS_ENFORCE).
+  // OFF (default) → skip entirely; the unchanged service_role path below runs.
+  // ON → per-tenant RLS-enforced client; returns null (→ service_role fallback) on any
+  // problem, so enabling can only add isolation, never break the builder. Rollback =
+  // unset the flag + redeploy. See lib/masjidweb/tenant-rls-client.ts.
+  if (tenantRlsEnforceEnabled()) {
+    const tenantClient = await maybeGetTenantScopedClient(creds.projectUrl, creds.anonKey, limitedFetch);
+    if (tenantClient) return tenantClient;
+  }
+  // MASJIDWEB_SEAM_END
+
   const credKey = `${creds.projectUrl}:${creds.serviceRoleKey}`;
   if (globalForSupabase.__supabaseClient && globalForSupabase.__supabaseCredKey === credKey) {
     return globalForSupabase.__supabaseClient;
   }
-
-  const limitedFetch: typeof globalThis.fetch = (input, init) =>
-    withLimit(() => globalThis.fetch(input, init));
 
   globalForSupabase.__supabaseClient = createClient(creds.projectUrl, creds.serviceRoleKey, {
     auth: {
