@@ -273,6 +273,9 @@ interface TranslationLoadContext {
   isPublished: boolean;
   tenantId?: string;
   loadedItemIds: Set<string>;
+  // In-flight loads keyed by item id. Concurrent resolutions of the same item
+  // await the same fetch instead of skipping it before rows are merged.
+  inFlight: Map<string, Promise<void>>;
 }
 
 const translationLoadContexts = new WeakMap<object, TranslationLoadContext>();
@@ -289,6 +292,7 @@ function registerTranslationContext(
     isPublished,
     tenantId,
     loadedItemIds: new Set(),
+    inFlight: new Map(),
   });
 }
 
@@ -309,22 +313,46 @@ export async function ensureCmsTranslations(
   const ctx = translationLoadContexts.get(translations);
   if (!ctx) return;
 
-  const missing: string[] = [];
+  // Partition requested ids: those needing a fresh fetch vs. those already
+  // being fetched by a concurrent caller (whose promise we must await).
+  const toFetch: string[] = [];
+  const waits: Promise<void>[] = [];
   for (const id of itemIds) {
-    if (id && !ctx.loadedItemIds.has(id)) {
-      ctx.loadedItemIds.add(id);
-      missing.push(id);
+    if (!id || ctx.loadedItemIds.has(id)) continue;
+    const existing = ctx.inFlight.get(id);
+    if (existing) {
+      waits.push(existing);
+    } else {
+      toFetch.push(id);
     }
   }
-  if (missing.length === 0) return;
 
-  try {
-    const rows = await getCmsTranslationsForItems(ctx.localeId, ctx.isPublished, missing, ctx.tenantId);
-    for (const row of rows) {
-      translations[getTranslatableKey(row)] = row;
+  if (toFetch.length > 0) {
+    // Mark loaded ids only AFTER rows are merged, so concurrent callers don't
+    // run applyCmsTranslations against a map that hasn't received the rows yet.
+    const loadPromise = (async () => {
+      try {
+        const rows = await getCmsTranslationsForItems(ctx.localeId, ctx.isPublished, toFetch, ctx.tenantId);
+        for (const row of rows) {
+          translations[getTranslatableKey(row)] = row;
+        }
+      } catch (error) {
+        console.error('Failed to load scoped CMS translations:', error);
+      } finally {
+        for (const id of toFetch) {
+          ctx.loadedItemIds.add(id);
+          ctx.inFlight.delete(id);
+        }
+      }
+    })();
+    for (const id of toFetch) {
+      ctx.inFlight.set(id, loadPromise);
     }
-  } catch (error) {
-    console.error('Failed to load scoped CMS translations:', error);
+    waits.push(loadPromise);
+  }
+
+  if (waits.length > 0) {
+    await Promise.all(waits);
   }
 }
 
