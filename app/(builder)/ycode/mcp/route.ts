@@ -8,6 +8,7 @@ import {
   buildWwwAuthenticateHeader,
 } from '@/lib/mcp/handler';
 import { getBaseUrl } from '@/lib/oauth/metadata';
+import { runWithEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
@@ -43,36 +44,57 @@ function unauthorizedWithChallenge(request: NextRequest, message: string): Respo
   return addCorsHeaders(response);
 }
 
-async function authorize(request: NextRequest): Promise<Response | null> {
+/**
+ * Authenticate the Bearer token. Returns the validated MCP token (which carries
+ * its tenant_id) or a 401 challenge Response. The tenant_id MUST then scope the
+ * handler — same contract the URL-token route enforces.
+ */
+async function authorize(
+  request: NextRequest,
+): Promise<{ mcpToken: NonNullable<Awaited<ReturnType<typeof authenticateToken>>> } | { denied: Response }> {
   const token = extractBearerToken(request);
   if (!token) {
-    return unauthorizedWithChallenge(request, 'Authorization required');
+    return { denied: unauthorizedWithChallenge(request, 'Authorization required') };
   }
 
   const mcpToken = await authenticateToken(token);
   if (!mcpToken) {
-    return unauthorizedWithChallenge(request, 'Invalid or expired access token');
+    return { denied: unauthorizedWithChallenge(request, 'Invalid or expired access token') };
   }
 
-  return null;
+  return { mcpToken };
 }
 
 export async function POST(request: NextRequest) {
-  const denied = await authorize(request);
-  if (denied) return denied;
-  return handleMcpPost(request);
+  const auth = await authorize(request);
+  if ('denied' in auth) return auth.denied;
+  // MASJIDWEB_SEAM: MCP tenant context — see docs/masjidweb-core-seams.md#tier-4
+  // Bearer (OAuth) requests must run under the token's tenant, exactly like the
+  // URL-token route; without this they fall back to the env-default tenant.
+  return auth.mcpToken.tenant_id
+    ? await runWithEffectiveTenantId(auth.mcpToken.tenant_id, () => handleMcpPost(request))
+    : await handleMcpPost(request);
+  // MASJIDWEB_SEAM_END
 }
 
 export async function GET(request: NextRequest) {
-  const denied = await authorize(request);
-  if (denied) return denied;
-  return handleMcpGet(request);
+  const auth = await authorize(request);
+  if ('denied' in auth) return auth.denied;
+  // MASJIDWEB_SEAM: MCP tenant context — see docs/masjidweb-core-seams.md#tier-4
+  return auth.mcpToken.tenant_id
+    ? await runWithEffectiveTenantId(auth.mcpToken.tenant_id, () => handleMcpGet(request))
+    : await handleMcpGet(request);
+  // MASJIDWEB_SEAM_END
 }
 
 export async function DELETE(request: NextRequest) {
-  const denied = await authorize(request);
-  if (denied) return denied;
-  return handleMcpDelete(request);
+  const auth = await authorize(request);
+  if ('denied' in auth) return auth.denied;
+  // MASJIDWEB_SEAM: MCP tenant context — see docs/masjidweb-core-seams.md#tier-4
+  return auth.mcpToken.tenant_id
+    ? await runWithEffectiveTenantId(auth.mcpToken.tenant_id, () => handleMcpDelete(request))
+    : await handleMcpDelete(request);
+  // MASJIDWEB_SEAM_END
 }
 
 export async function OPTIONS() {

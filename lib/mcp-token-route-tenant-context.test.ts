@@ -36,6 +36,11 @@ vi.mock('@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js', () => (
 }));
 
 import { GET, POST } from '@/app/(builder)/ycode/mcp/[token]/route';
+import { POST as oauthPOST } from '@/app/(builder)/ycode/mcp/route';
+
+vi.mock('@/lib/oauth/metadata', () => ({
+  getBaseUrl: () => 'https://tenant.example.com',
+}));
 
 describe('MCP token route tenant context', () => {
   beforeEach(() => {
@@ -71,6 +76,23 @@ describe('MCP token route tenant context', () => {
     await POST(request as never, { params: Promise.resolve({ token: 'ymc_plain' }) });
 
     expect(mocks.validateToken).toHaveBeenCalledWith('ymc_plain');
+    expect(mocks.runWithEffectiveTenantId).toHaveBeenCalledWith('tenant-1', expect.any(Function));
+  });
+
+  it('OAuth Bearer route also runs MCP requests under the token tenant_id', async () => {
+    const request = new Request('https://tenant.example.com/ycode/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer access-token-123',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
+    });
+
+    await oauthPOST(request as never);
+
+    expect(mocks.validateToken).toHaveBeenCalledWith('access-token-123');
     expect(mocks.runWithEffectiveTenantId).toHaveBeenCalledWith('tenant-1', expect.any(Function));
   });
 
