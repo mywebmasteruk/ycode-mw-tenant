@@ -3,7 +3,8 @@ import { publishValues } from '@/lib/repositories/collectionItemValueRepository'
 import { hardDeleteItem, getItemById } from '@/lib/repositories/collectionItemRepository';
 import { getCollectionById } from '@/lib/repositories/collectionRepository';
 import { cleanupDeletedCollections } from '@/lib/services/collectionService';
-import { invalidateForCollectionChange } from '@/lib/services/cacheService';
+import { invalidateForCollectionChange, clearAllCache } from '@/lib/services/cacheService';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { noCache } from '@/lib/api-response';
 
 // Disable caching for this route
@@ -92,6 +93,26 @@ export async function POST(request: NextRequest) {
         }
       } catch (cacheError) {
         console.error(`[Cache] item publish: invalidation failed for collection ${collectionId}:`, cacheError);
+      }
+    }
+
+    // invalidateForCollectionChange() above only calls revalidateTag/revalidatePath
+    // (the Vercel/self-hosted path in invalidatePages()) — it does NOT call the
+    // explicit Netlify REST-API purge (purgeNetlifyEdgeCache). That distinction
+    // didn't matter while public pages were force-dynamic (nothing was ever
+    // cached, so there was nothing to fail to invalidate), but now that they're
+    // cacheable, relying on revalidateTag alone reproduces the exact "stale HTML
+    // after publish on Netlify" failure mode that force-dynamic was originally
+    // added to work around (see git history on app/(site)/page.tsx, 2026-03-31).
+    // clearAllCache() calls the proven, explicit purgeNetlifyEdgeCache() REST/tag
+    // purge unconditionally — broader than one collection's affected pages
+    // (whole-tenant), which is an acceptable over-invalidation, not a
+    // correctness risk. Non-fatal, same as above.
+    if (changedCollectionIds.size > 0) {
+      try {
+        await clearAllCache(await resolveEffectiveTenantId());
+      } catch (cacheError) {
+        console.error('[Cache] item publish: clearAllCache failed:', cacheError);
       }
     }
 

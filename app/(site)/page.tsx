@@ -22,10 +22,18 @@ import { getSiteBaseUrl } from '@/lib/url-utils';
 import type { Redirect as RedirectType } from '@/types';
 import type { Metadata } from 'next';
 
-// Avoid ISR full-route caching on Netlify (stale HTML after publish). Data uses
-// unstable_cache + tenant-scoped revalidateTag on publish.
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
+// MASJIDWEB_SEAM: public-page-cache-enable — see docs/masjidweb-core-seams.md
+// Was force-dynamic (never cache) since 2026-03-31 — an emergency fix for
+// stale ISR HTML after publish, back when Netlify's edge purge wasn't
+// reliable. clearAllCache()/purgeNetlifyEdgeCache() (lib/services/cacheService.ts)
+// is now confirmed working with valid credentials, and every publish path
+// (site-wide + item-level) unconditionally calls it (2026-07-01). revalidate
+// lets Netlify's CDN cache the response for up to 60s; the tag-based purge on
+// publish (unchanged) invalidates it immediately in the normal case — this is
+// a bounded safety-net window, not the primary freshness mechanism. See
+// TENANT-ISOLATION-AND-CLONE-PLAN.md for the incident this replaces.
+export const revalidate = 60;
+// MASJIDWEB_SEAM_END
 
 const getTenantCacheContext = cache(async () => {
   const effectiveTid = await resolveEffectiveTenantId();
