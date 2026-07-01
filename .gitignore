@@ -73,3 +73,9 @@ release.sh
 
 # netlify local artifacts
 .netlify/
+
+# tenant-isolation-live-check.ts runtime output (workflow/local-run artifacts)
+live-check-results.json
+live-check-output.txt
+live-check-payload.json
+tenant-isolation-live-check-results.json

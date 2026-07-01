@@ -1,0 +1,179 @@
+# Daily LIVE cross-tenant isolation canary — real HTTP requests against
+# PRODUCTION as two real authenticated tenants (not unit tests, not DB
+# impersonation). Runs after tenant-isolation-daily.yml (07:00 UTC unit tests)
+# so a live-only regression (e.g. an RLS/claim mismatch that unit tests can't
+# see) is still caught the same morning.
+#
+# What it does: logs in as the two permanent canary tenants (high900, assasx7
+# — see TENANT-ISOLATION-AND-CLONE-PLAN.md; never real customers, marked in
+# tenant_registry.description), exercises full content CRUD + user management
+# + API keys/MCP tokens/webhooks + publish, then attacks every created
+# resource from the OTHER tenant's session and verifies via the VICTIM'S OWN
+# data (not just HTTP status) that nothing leaked. Always cleans up created
+# content, win or lose. See scripts/tenant-isolation-live-check.ts for the
+# full test and TENANT-ISOLATION-AND-CLONE-PLAN.md "EXHAUSTIVE LIVE API TEST"
+# for the incident history that motivated this (two real bugs found + fixed
+# by a manual run of this same test on 2026-06-30/07-01).
+#
+# On failure: this is a P0 signal — see the GO-BACK PROTOCOL in
+# TENANT-ISOLATION-AND-CLONE-PLAN.md. By design this job only ALERTS; it does
+# NOT auto-rollback (a human reviews and runs the one-command rollback if the
+# leak is confirmed real, per user decision 2026-07-01).
+#
+# Reuses existing infra (see TENANT_ISOLATION_DAILY_CHECK.md): same
+# tenant_isolation_check_log table + admin dashboard "Isolation checks" tab as
+# the unit-test daily check (tagged details.testType=live-api-e2e to tell them
+# apart), same CORE_UPDATE_NOTIFY_SECRET / RESEND_API_KEY / alert-email
+# secrets. Only new secret: SUPABASE_SERVICE_ROLE_KEY (used solely to mint a
+# fresh throwaway password for the two canary owners each run — never stored,
+# never reused, rotated again next run).
+
+name: Daily live tenant isolation check
+
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tenant-isolation-live-check-daily
+  cancel-in-progress: false
+
+jobs:
+  live-isolation-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run live cross-tenant isolation canary
+        id: live_check
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ vars.PROD_SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ vars.PROD_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          RESULTS_JSON_PATH: live-check-results.json
+        run: |
+          set -o pipefail
+          START_MS=$(($(date +%s) * 1000))
+          echo "start_ms=$START_MS" >> "$GITHUB_OUTPUT"
+          npx tsx scripts/tenant-isolation-live-check.ts 2>&1 | tee live-check-output.txt
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Write job summary
+        if: always()
+        run: |
+          {
+            echo "## Daily live tenant isolation check"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Workflow | \`${{ github.workflow }}\` |"
+            echo "| Run | [\`${{ github.run_id }}\`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+            echo "| Branch | \`${{ github.ref_name }}\` |"
+            echo "| Commit | \`${{ github.sha }}\` |"
+            echo "| Canaries | high900, assasx7 (permanent test fixtures) |"
+            if [ -f live-check-results.json ]; then
+              STATUS=$(python3 -c "import json; print(json.load(open('live-check-results.json'))['status'])")
+              echo "| Result | \`$STATUS\` |"
+              echo ""
+              python3 -c "import json; print(json.load(open('live-check-results.json'))['summary'])"
+            else
+              echo "| Result | \`no results file — script crashed before writing output\` |"
+            fi
+            echo ""
+            if [ "${{ steps.live_check.outcome }}" != "success" ]; then
+              echo "**⚠️ P0: this is a live cross-tenant isolation signal, not a unit test.**"
+              echo ""
+              echo "1. Read \`TENANT-ISOLATION-AND-CLONE-PLAN.md\` → **GO-BACK PROTOCOL** before doing anything else."
+              echo "2. Reproduce locally: \`cd ycode-mw-tenant && SUPABASE_URL=... SUPABASE_ANON_KEY=... SUPABASE_SERVICE_ROLE_KEY=... npx tsx scripts/tenant-isolation-live-check.ts\`"
+              echo "3. If a cross-tenant check shows \"real leak\" and it reproduces, treat as a security incident: consider the immediate rollback in the GO-BACK PROTOCOL."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report result to admin dashboard
+        if: always() && vars.ADMIN_DASHBOARD_ISOLATION_LOG_URL != ''
+        env:
+          LOG_URL: ${{ vars.ADMIN_DASHBOARD_ISOLATION_LOG_URL }}
+          NOTIFY_SECRET: ${{ secrets.CORE_UPDATE_NOTIFY_SECRET }}
+        run: |
+          if [ -z "$NOTIFY_SECRET" ]; then
+            echo "CORE_UPDATE_NOTIFY_SECRET not set — skip isolation log ingest"
+            exit 0
+          fi
+          if [ -f live-check-results.json ]; then
+            STATUS=$(python3 -c "import json; print(json.load(open('live-check-results.json'))['status'])")
+            DURATION_MS=$(python3 -c "import json; print(json.load(open('live-check-results.json'))['durationMs'])")
+            SUMMARY=$(python3 -c "import json; print(json.load(open('live-check-results.json'))['summary'])")
+            FAILURE_OUTPUT=$(python3 -c "import json; d=json.load(open('live-check-results.json')); print(d['failureOutput'] or '')")
+            TOTAL=$(python3 -c "import json; print(json.load(open('live-check-results.json'))['totalChecks'])")
+            FAILED=$(python3 -c "import json; print(json.load(open('live-check-results.json'))['failedChecks'])")
+          else
+            STATUS="fail"
+            DURATION_MS=0
+            SUMMARY="Live isolation check script crashed before writing results (see workflow logs)"
+            FAILURE_OUTPUT=$(cat live-check-output.txt 2>/dev/null | tail -c 100000 || echo "(no output captured)")
+            TOTAL=0
+            FAILED=0
+          fi
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          jq -n \
+            --arg status "$STATUS" \
+            --argjson durationMs "$DURATION_MS" \
+            --arg repository "${{ github.repository }}" \
+            --arg branch "${{ github.ref_name }}" \
+            --arg commitSha "${{ github.sha }}" \
+            --arg workflowRunId "${{ github.run_id }}" \
+            --arg workflowRunUrl "$RUN_URL" \
+            --arg workflowName "${{ github.workflow }}" \
+            --arg summary "$SUMMARY" \
+            --arg failureOutput "$FAILURE_OUTPUT" \
+            --argjson totalChecks "$TOTAL" \
+            --argjson failedChecks "$FAILED" \
+            '{
+              status: $status,
+              durationMs: $durationMs,
+              repository: $repository,
+              branch: $branch,
+              commitSha: $commitSha,
+              workflowRunId: $workflowRunId,
+              workflowRunUrl: $workflowRunUrl,
+              workflowName: $workflowName,
+              summary: $summary,
+              failureOutput: (if $failureOutput == "" then null else $failureOutput end),
+              details: { testType: "live-api-e2e", canaryTenants: ["high900", "assasx7"], totalChecks: $totalChecks, failedChecks: $failedChecks }
+            }' > live-check-payload.json
+          curl -fsS -X POST "$LOG_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-Core-Update-Notify-Secret: $NOTIFY_SECRET" \
+            -d @live-check-payload.json
+
+      - name: Send failure email alert
+        if: always() && steps.live_check.outcome != 'success'
+        env:
+          NOTIFY_URL: ${{ vars.ADMIN_DASHBOARD_NOTIFY_URL }}
+          NOTIFY_SECRET: ${{ secrets.CORE_UPDATE_NOTIFY_SECRET }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          CORE_UPDATE_ALERT_EMAIL: ${{ secrets.CORE_UPDATE_ALERT_EMAIL }}
+          TENANT_ISOLATION_ALERT_EMAIL: ${{ secrets.TENANT_ISOLATION_ALERT_EMAIL }}
+          CORE_UPDATE_EMAIL_FROM: ${{ secrets.CORE_UPDATE_EMAIL_FROM }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: bash scripts/send-tenant-isolation-failure-alert.sh live-check-output.txt
+
+      - name: Fail the job if the check failed
+        if: steps.live_check.outcome != 'success'
+        run: exit 1
