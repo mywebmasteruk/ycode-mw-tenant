@@ -35,6 +35,8 @@ interface UploadedAsset {
 
 /** Encode a URL that may contain unencoded characters like spaces. */
 function sanitizeUrl(url: string): string {
+  // Data URIs are already self-contained and can be huge — never re-parse them.
+  if (url.startsWith('data:')) return url;
   try {
     return new URL(url).href;
   } catch {
@@ -44,6 +46,7 @@ function sanitizeUrl(url: string): string {
 
 /** Extract a decoded filename from a URL, or empty string if none found. */
 function extractFilenameFromUrl(url: string): string {
+  if (url.startsWith('data:')) return '';
   try {
     const segment = new URL(sanitizeUrl(url)).pathname.split('/').pop();
     if (segment && segment.includes('.')) {

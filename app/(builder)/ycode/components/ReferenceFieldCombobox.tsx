@@ -6,7 +6,7 @@
  */
 'use client';
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -18,6 +18,7 @@ import {
   DropdownMenuCheckboxItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { useDebounce } from '@/hooks/use-debounce';
 import { collectionsApi } from '@/lib/api';
 import { findDisplayField, getItemDisplayName } from '@/lib/collection-field-utils';
 import { parseMultiReferenceValue } from '@/lib/collection-utils';
@@ -51,7 +52,11 @@ export default function ReferenceFieldCombobox({
 }: ReferenceFieldComboboxProps) {
   const [open, setOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearch = useDebounce(searchQuery, 300);
   const [items, setItems] = useState<CollectionItemWithValues[]>([]);
+  // Selected items resolved by ID, so their labels render even when they fall
+  // outside the current search results or the first page of items.
+  const [selectedItemsCache, setSelectedItemsCache] = useState<Record<string, CollectionItemWithValues>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -79,9 +84,17 @@ export default function ReferenceFieldCombobox({
     [displayField]
   );
 
+  // Resolve an item by ID from the current results or the selected cache
+  const resolveItem = useCallback(
+    (id: string) => items.find(item => item.id === id) || selectedItemsCache[id],
+    [items, selectedItemsCache]
+  );
+
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
-  // Load items eagerly on mount and refresh when dropdown opens
+  // Load items eagerly on mount and refresh when the dropdown opens or the
+  // (debounced) search changes. Search is pushed to the server so collections
+  // larger than the page limit still surface matches beyond the first page.
   useEffect(() => {
     if (!collectionId) return;
     if (hasLoadedOnce && !open) return;
@@ -92,6 +105,7 @@ export default function ReferenceFieldCombobox({
       try {
         const response = await collectionsApi.getItems(collectionId, {
           limit: 100,
+          search: debouncedSearch.trim() || undefined,
         });
         if (response.error) {
           throw new Error(response.error);
@@ -106,20 +120,35 @@ export default function ReferenceFieldCombobox({
     };
     fetchItems();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, collectionId]);
+  }, [open, collectionId, debouncedSearch]);
 
-  // Filter items based on search query
-  const filteredItems = useMemo(() => {
-    if (!searchQuery.trim()) return items;
+  // Fetch labels for selected items missing from the current results
+  const fetchingRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const missing = selectedIds.filter(
+      id => id
+        && !items.some(item => item.id === id)
+        && !selectedItemsCache[id]
+        && !fetchingRef.current.has(id)
+    );
+    if (missing.length === 0) return;
 
-    const query = searchQuery.toLowerCase();
-    return items.filter(item => {
-      // Search across all text values
-      return Object.values(item.values).some(val =>
-        val && String(val).toLowerCase().includes(query)
-      );
-    });
-  }, [items, searchQuery]);
+    missing.forEach(id => fetchingRef.current.add(id));
+    Promise.all(missing.map(id => collectionsApi.getItemById(collectionId, id)))
+      .then(responses => {
+        const resolved: Record<string, CollectionItemWithValues> = {};
+        responses.forEach(res => {
+          if (res.data) resolved[res.data.id] = res.data;
+        });
+        if (Object.keys(resolved).length > 0) {
+          setSelectedItemsCache(prev => ({ ...prev, ...resolved }));
+        }
+      })
+      .finally(() => {
+        missing.forEach(id => fetchingRef.current.delete(id));
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIds, items, collectionId]);
 
   // Handle single selection with toggle (can deselect)
   const handleSingleSelect = (itemId: string) => {
@@ -153,7 +182,7 @@ export default function ReferenceFieldCombobox({
 
     if (isMulti) {
       const names = selectedIds
-        .map((id) => items.find((item) => item.id === id))
+        .map((id) => resolveItem(id))
         .filter((item): item is CollectionItemWithValues => !!item)
         .map((item) => getDisplayName(item));
 
@@ -163,7 +192,7 @@ export default function ReferenceFieldCombobox({
     }
 
     // For single reference, find the item name
-    const selectedItem = items.find(item => item.id === selectedIds[0]);
+    const selectedItem = resolveItem(selectedIds[0]);
     if (selectedItem) {
       return getDisplayName(selectedItem);
     }
@@ -203,7 +232,11 @@ export default function ReferenceFieldCombobox({
             placeholder={`Search ${collection?.name || 'items'}...`}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
+            // Stop keystrokes from reaching the menu's typeahead, which would
+            // otherwise focus matching options and steal focus from the input.
+            onKeyDown={(e) => e.stopPropagation()}
             size="xs"
+            autoFocus
           />
         </div>
 
@@ -217,14 +250,14 @@ export default function ReferenceFieldCombobox({
             <div className="text-center py-4 text-sm text-destructive">
               {error}
             </div>
-          ) : filteredItems.length === 0 ? (
+          ) : items.length === 0 ? (
             <div className="text-center py-4 text-sm text-muted-foreground">
               <Empty>
                 <EmptyTitle>{searchQuery ? 'No items found' : 'No items in this collection'}</EmptyTitle>
               </Empty>
             </div>
           ) : (
-            filteredItems.map((item) => {
+            items.map((item) => {
               const isSelected = selectedIds.includes(item.id);
               const displayName = getDisplayName(item);
 

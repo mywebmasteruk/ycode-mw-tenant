@@ -38,6 +38,31 @@ export function isValidUrl(value: string): boolean {
   }
 }
 
+/** Check if a value is a base64-encoded data image URI (e.g. `data:image/png;base64,...`) */
+export function isDataImageUrl(value: string): boolean {
+  return /^data:image\/[^;,]+;base64,/i.test(value.trim());
+}
+
+/** Decoded parts of a base64 data image URI */
+export interface ParsedDataImage {
+  mimeType: string;
+  base64: string;
+  extension: string;
+}
+
+/**
+ * Decode a base64 data image URI into its mime type, base64 payload and file extension.
+ * Returns null when the value is not a valid base64 data image.
+ */
+export function parseDataImageUri(value: string): ParsedDataImage | null {
+  const match = value.trim().match(/^data:(image\/[^;,]+);base64,([\s\S]*)$/);
+  if (!match) return null;
+  const mimeType = match[1];
+  const base64 = match[2];
+  if (!base64) return null;
+  return { mimeType, base64, extension: mimeType.split('/')[1]?.split('+')[0] || 'bin' };
+}
+
 // ============================================================================
 // Helper utilities
 // ============================================================================
@@ -695,8 +720,11 @@ export function extractRichTextImageUrls(json: string): RichTextImageRef[] {
     const refs: RichTextImageRef[] = [];
     walkTipTapNodes(doc, (node) => {
       const attrs = node.attrs as Record<string, unknown> | undefined;
-      if (node.type === 'richTextImage' && attrs?.src && isValidUrl(attrs.src as string)) {
-        refs.push({ src: attrs.src as string });
+      const src = attrs?.src as string | undefined;
+      // Remote URLs (downloaded) and inline base64 data images (decoded) are both
+      // uploaded to the asset manager so they never get stored inline in content.
+      if (node.type === 'richTextImage' && src && (isValidUrl(src) || isDataImageUrl(src))) {
+        refs.push({ src });
       }
     });
     return refs;

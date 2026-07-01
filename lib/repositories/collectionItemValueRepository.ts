@@ -4,7 +4,7 @@ import { SUPABASE_QUERY_LIMIT } from '@/lib/supabase-constants';
 import { getKnexClient } from '@/lib/knex-client';
 import type { CollectionItemValue, CollectionFieldType } from '@/types';
 import { isValidUUID } from '@/lib/utils';
-import { castValue, valueToString } from '../collection-utils';
+import { castValue, valueToString, slugify } from '../collection-utils';
 import { generateCollectionItemContentHash } from '../hash-utils';
 import { randomUUID } from 'crypto';
 import { deleteTranslationsInBulk, markTranslationsIncomplete } from '@/lib/repositories/translationRepository';
@@ -647,7 +647,13 @@ export async function setValuesByFieldName(
 
   for (const [fieldId, value] of Object.entries(values)) {
     const type = fieldMap[fieldId] || fieldType[fieldId] || 'text';
-    valuesToSet[fieldId] = valueToString(value, type);
+    let stringValue = valueToString(value, type);
+    // Normalize slug values to a valid URL segment so a stray leading slash,
+    // spaces or invalid chars can't break dynamic page routing.
+    if (stringValue && fieldKeyMap[fieldId] === 'slug') {
+      stringValue = slugify(stringValue);
+    }
+    valuesToSet[fieldId] = stringValue;
   }
 
   // Auto-bump the virtual `updated_at` field whenever values are being set,
