@@ -850,6 +850,22 @@ export async function publishValues(item_id: string): Promise<number> {
     return 0;
   }
 
+  // The upsert below targets ON CONFLICT (id, is_published) — the table's real
+  // primary key — but `id` is freshly generated per row, so a draft value's id
+  // never matches its own existing PUBLISHED counterpart's id. That leaves the
+  // PK conflict target unmatched, so Postgres falls through to a plain INSERT,
+  // which then collides with the separate partial unique index
+  // idx_collection_item_values_unique (item_id, field_id, is_published) WHERE
+  // deleted_at IS NULL — a "duplicate key" error that republishing an
+  // already-published item hits every time (first-ever publish works fine
+  // since no published row exists yet to collide with). Postgres can't target
+  // a partial unique index via a plain column-list ON CONFLICT without also
+  // restating its WHERE clause, which supabase-js's upsert() has no way to
+  // express — so the fix is to look up each field's existing published row id
+  // and reuse it, making the upsert a genuine update instead of an insert.
+  const existingPublished = await getValuesByItemId(item_id, true);
+  const existingPublishedIdByField = new Map(existingPublished.map(v => [v.field_id, v.id]));
+
   // Prepare values for batch upsert
   const now = new Date().toISOString();
   const valuesToUpsert = draftValues.map(value => {
@@ -859,7 +875,7 @@ export async function publishValues(item_id: string): Promise<number> {
       undefined;
 
     const row: Record<string, unknown> = {
-      id: value.id,
+      id: existingPublishedIdByField.get(value.field_id) ?? value.id,
       item_id: value.item_id,
       field_id: value.field_id,
       value: value.value,
