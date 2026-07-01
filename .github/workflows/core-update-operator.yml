@@ -36,11 +36,42 @@ jobs:
     runs-on: ubuntu-latest
     # ai-repair-safe-update.yml itself allows up to 70 minutes (LLM repair +
     # verification). Worst case here is mechanical (fast) then a full LLM
-    # escalation run, plus polling overhead to locate each dispatched run.
-    timeout-minutes: 100
+    # escalation run, plus polling overhead to locate each dispatched run —
+    # padded above the theoretical 2x70min+overhead worst case so a slow
+    # mechanical run can't cause a silent hard-cancel that skips the "Notify
+    # MasjidWeb admin" step (no email at all is worse than a late one).
+    timeout-minutes: 160
     steps:
+      # sync-upstream.yml's own conclusion is "success" even when its
+      # create-update-pr job was skipped by check-existing (an existing PR was
+      # already open) — a skipped JOB does not make the workflow RUN's overall
+      # conclusion "skipped", only a fully-skipped run does (e.g. no trigger
+      # matched at all). The `if:` above only catches that latter case. Without
+      # this check, this operator re-runs every single day the same stuck PR
+      # sits open, re-dispatching mechanical repair and — since a PR that's
+      # been stuck long enough to still be draft here will fail identically
+      # every time — escalating to a real, paid repair_mode=premium_ai call
+      # daily, indefinitely, until a human intervenes. That's the opposite of
+      # what check-existing exists to do (stop pointless repeated work on an
+      # already-open PR).
+      - name: Check whether sync-upstream actually acted this run
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          conclusion="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/${{ github.event.workflow_run.id }}/jobs" \
+            --jq '[.jobs[] | select(.name == "create-update-pr")] | .[0].conclusion // "not_found"')"
+          echo "create-update-pr job conclusion: $conclusion"
+          if [ "$conclusion" = "skipped" ]; then
+            echo "sync-upstream skipped PR creation this run (an unresolved PR is already open) — nothing new to operate on."
+            echo "should_operate=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_operate=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Resolve latest safe-update PR
         id: pr
+        if: steps.sync.outputs.should_operate == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -62,7 +93,7 @@ jobs:
             core.setOutput('mergeable', pr.mergeable === false ? 'false' : 'true');
 
       - name: Repair with escalation (mechanical, then LLM-assisted if needed)
-        if: steps.pr.outputs.found == 'true' && steps.pr.outputs.draft == 'true'
+        if: steps.sync.outputs.should_operate == 'true' && steps.pr.outputs.found == 'true' && steps.pr.outputs.draft == 'true'
         id: repair
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -127,7 +158,7 @@ jobs:
           exit 0
 
       - name: Notify MasjidWeb admin
-        if: steps.pr.outputs.found == 'true' && vars.ADMIN_DASHBOARD_NOTIFY_URL != ''
+        if: steps.sync.outputs.should_operate == 'true' && steps.pr.outputs.found == 'true' && vars.ADMIN_DASHBOARD_NOTIFY_URL != ''
         env:
           NOTIFY_URL: ${{ vars.ADMIN_DASHBOARD_NOTIFY_URL }}
           NOTIFY_SECRET: ${{ secrets.CORE_UPDATE_NOTIFY_SECRET }}
@@ -175,5 +206,5 @@ jobs:
               '{event: $event, message: $message, prNumber: $prNumber, prUrl: $prUrl}')"
 
       - name: No open safe-update PR
-        if: steps.pr.outputs.found != 'true'
+        if: steps.sync.outputs.should_operate == 'true' && steps.pr.outputs.found != 'true'
         run: echo "No open safe-ycode-update PR — nothing to operate on."
