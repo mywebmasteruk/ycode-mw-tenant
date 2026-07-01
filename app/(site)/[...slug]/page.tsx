@@ -28,11 +28,17 @@ import type { Page, PageFolder, Translation, Redirect as RedirectType } from '@/
 // stale ISR HTML after publish, back when Netlify's edge purge wasn't
 // reliable. clearAllCache()/purgeNetlifyEdgeCache() (lib/services/cacheService.ts)
 // is now confirmed working with valid credentials, and every publish path
-// (site-wide + item-level) unconditionally calls it (2026-07-01). revalidate
-// lets Netlify's CDN cache the response for up to 60s; the tag-based purge on
-// publish (unchanged) invalidates it immediately in the normal case — this is
-// a bounded safety-net window, not the primary freshness mechanism. See
-// TENANT-ISOLATION-AND-CLONE-PLAN.md for the incident this replaces.
+// (site-wide + item-level) unconditionally calls it (2026-07-01).
+//
+// KNOWN LIMITATION — same root cause as app/(site)/page.tsx (see its comment
+// for the full explanation): getTenantCacheContext() below unconditionally
+// calls resolveEffectiveTenantId() -> headers() to resolve the tenant from
+// the Host header, which forces per-request dynamic rendering regardless of
+// this export. This route's generateStaticParams() below makes the build
+// report show it as prerendered ("SSG"), but that reflects build-time seed
+// params only — verified live that actual requests still show
+// fwd=miss/fwd=bypass, same as the homepage. Left in place pending a real
+// fix (see app/(site)/page.tsx for the options considered).
 export const revalidate = 60;
 export const dynamicParams = true;
 // MASJIDWEB_SEAM_END

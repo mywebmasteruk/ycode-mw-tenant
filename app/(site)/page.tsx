@@ -27,11 +27,23 @@ import type { Metadata } from 'next';
 // stale ISR HTML after publish, back when Netlify's edge purge wasn't
 // reliable. clearAllCache()/purgeNetlifyEdgeCache() (lib/services/cacheService.ts)
 // is now confirmed working with valid credentials, and every publish path
-// (site-wide + item-level) unconditionally calls it (2026-07-01). revalidate
-// lets Netlify's CDN cache the response for up to 60s; the tag-based purge on
-// publish (unchanged) invalidates it immediately in the normal case — this is
-// a bounded safety-net window, not the primary freshness mechanism. See
-// TENANT-ISOLATION-AND-CLONE-PLAN.md for the incident this replaces.
+// (site-wide + item-level) unconditionally calls it (2026-07-01).
+//
+// KNOWN LIMITATION (confirmed via production testing 2026-07-01): this
+// `revalidate` alone does NOT currently make the route cacheable at
+// Netlify's CDN layer. getTenantCacheContext() below unconditionally calls
+// resolveEffectiveTenantId() -> headers() (lib/masjidweb/effective-tenant-id.ts)
+// to resolve which tenant is being requested from the Host header — headers()
+// is a Next.js Dynamic API, and calling it unconditionally forces per-request
+// dynamic rendering regardless of this export, exactly as force-dynamic did.
+// Verified live: cache-status still reports fwd=miss/fwd=bypass after this
+// change. Left in place (harmless, matches intent) pending a real fix, which
+// needs one of: (a) Partial Prerendering / Suspense boundaries around the
+// headers()-dependent part so the rest of the shell can be cached, or (b) a
+// tenant-resolution path that doesn't require headers() (e.g. a route param
+// instead of a Host-header read), or (c) a caching layer outside Next.js's
+// own route cache entirely. Not attempted here — each is a bigger, riskier
+// change than this session's other core-file edits.
 export const revalidate = 60;
 // MASJIDWEB_SEAM_END
 
