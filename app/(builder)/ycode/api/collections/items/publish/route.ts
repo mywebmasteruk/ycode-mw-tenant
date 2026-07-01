@@ -25,17 +25,19 @@ export async function POST(request: NextRequest) {
     }
     
     let publishedCount = 0;
-    
+    const skipped: { itemId: string; reason: string }[] = [];
+
     // Publish each item
     for (const itemId of item_ids) {
       try {
         // Check if item is marked as deleted
         const item = await getItemById(itemId);
-        
+
         if (!item) {
+          skipped.push({ itemId, reason: 'item not found' });
           continue; // Item doesn't exist
         }
-        
+
         if (item.deleted_at) {
           // Hard delete the item and all its values (CASCADE)
           await hardDeleteItem(itemId);
@@ -44,24 +46,32 @@ export async function POST(request: NextRequest) {
           // Block publishing if the collection hasn't been published
           const publishedCollection = await getCollectionById(item.collection_id, true);
           if (!publishedCollection) {
-            console.warn(`Skipping item ${itemId}: collection ${item.collection_id} is not published`);
+            const reason = `collection ${item.collection_id} is not published`;
+            console.warn(`Skipping item ${itemId}: ${reason}`);
+            skipped.push({ itemId, reason });
             continue;
           }
           // Normal publish: copy draft values to published
-          await publishValues(itemId);
+          const valuesPublished = await publishValues(itemId);
+          if (valuesPublished === 0) {
+            skipped.push({ itemId, reason: 'no draft values found to publish' });
+            continue;
+          }
           publishedCount++;
         }
       } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
         console.error(`Error publishing item ${itemId}:`, error);
+        skipped.push({ itemId, reason });
         // Continue with other items
       }
     }
-    
+
     // Clean up any soft-deleted collections
     await cleanupDeletedCollections();
-    
-    return noCache({ 
-      data: { count: publishedCount } 
+
+    return noCache({
+      data: { count: publishedCount, skipped }
     });
   } catch (error) {
     console.error('Error publishing collection items:', error);
