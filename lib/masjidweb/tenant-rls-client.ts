@@ -64,9 +64,16 @@ function mintTenantJwt(tenantId: string, key: crypto.KeyObject, kid: string, now
   const payload = {
     role: 'authenticated',
     aud: 'authenticated',
-    sub: tenantId, // valid UUID so policies calling auth.uid() don't error; tenant checks use user_metadata
+    sub: tenantId, // valid UUID so policies calling auth.uid() don't error
     iat: now,
     exp: now + TOKEN_TTL_SECONDS,
+    // Most RLS policies read user_metadata.tenant_id (current_tenant_id()/jwt_tenant_id()),
+    // but api_keys and form_submissions read app_metadata.tenant_id directly — the same two
+    // locations a real provisioned user's JWT carries (see
+    // masjidweb-backend/admin-dashboard-v2/src/lib/provision-auth-metadata.ts). Found by the
+    // 2026-07-01 exhaustive API test: api_keys writes failed RLS because only user_metadata
+    // was set here. Set both so every policy shape resolves the tenant correctly.
+    app_metadata: { tenant_id: tenantId },
     user_metadata: { tenant_id: tenantId },
   };
   const signingInput = `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(payload))}`;
