@@ -7,6 +7,8 @@
 
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { SUPABASE_QUERY_LIMIT, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 
 /** Direction of the sync operation */
 export type SyncDirection = 'publish' | 'revert';
@@ -20,13 +22,26 @@ export type SyncDirection = 'publish' | 'revert';
  * (via the naturalKey lookup below) causes false "no existing row" misses
  * that re-trigger the exact duplicate-key failure the naturalKey fix exists
  * to prevent.
+ *
+ * Orders by `id` so page boundaries are stable across the multiple round-trip
+ * queries this makes — `.range()` (LIMIT/OFFSET) has no guaranteed row order
+ * without an explicit sort, so two pages fetched moments apart could silently
+ * skip or duplicate rows under concurrent writes (exactly the condition
+ * revert/publish run under) if left unordered.
+ *
+ * Tenant-scoped via `applyTenantEq`: this is the only defense-in-depth layer
+ * here when `getSupabaseAdmin()` falls back to the service-role client (RLS
+ * bypassed) — e.g. if MW_TENANT_RLS_ENFORCE is ever off, which has happened
+ * multiple times this session during incident response. Without this, a
+ * revert/publish call would sync/revert every tenant's rows in one table, not
+ * just the caller's.
  */
 async function fetchAllRows(
   client: Awaited<ReturnType<typeof getSupabaseAdmin>>,
   tableName: string,
   columns: string,
   isPublished: boolean,
-  options?: { ids?: string[]; excludeDeleted?: boolean },
+  options?: { ids?: string[]; excludeDeleted?: boolean; tenantId?: string | null },
 ): Promise<Record<string, unknown>[]> {
   const all: Record<string, unknown>[] = [];
   let offset = 0;
@@ -35,6 +50,7 @@ async function fetchAllRows(
       .from(tableName)
       .select(columns)
       .eq('is_published', isPublished)
+      .order('id')
       .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
     if (options?.excludeDeleted !== false) {
       query = query.is('deleted_at', null);
@@ -42,6 +58,7 @@ async function fetchAllRows(
     if (options?.ids && options.ids.length > 0) {
       query = query.in('id', options.ids);
     }
+    query = applyTenantEq(query, options?.tenantId);
     const { data, error } = await query;
     if (error) {
       throw new Error(`Failed to fetch ${tableName} rows: ${error.message}`);
@@ -97,8 +114,9 @@ export async function syncTableRows(
   }
 
   const { source, target } = getSyncFlags(direction);
+  const tenantId = await resolveEffectiveTenantId();
 
-  const sourceRows = await fetchAllRows(client, tableName, '*', source, { ids: options?.ids });
+  const sourceRows = await fetchAllRows(client, tableName, '*', source, { ids: options?.ids, tenantId });
 
   if (sourceRows.length === 0) {
     return 0;
@@ -107,7 +125,7 @@ export async function syncTableRows(
   const naturalKey = options?.naturalKey;
   let existingIdByKey: Map<string, string> | null = null;
   if (naturalKey && naturalKey.length > 0) {
-    const existingTargetRows = await fetchAllRows(client, tableName, ['id', ...naturalKey].join(','), target);
+    const existingTargetRows = await fetchAllRows(client, tableName, ['id', ...naturalKey].join(','), target, { tenantId });
     existingIdByKey = new Map(
       existingTargetRows.map((r) => [naturalKey.map(k => r[k]).join(' '), r.id as string])
     );
@@ -177,17 +195,18 @@ export async function cleanupOrphanedRows(
   }
 
   const { source, target } = getSyncFlags(direction);
+  const tenantId = await resolveEffectiveTenantId();
   const naturalKey = options?.naturalKey;
   const keyOf = (r: Record<string, unknown>): string =>
     naturalKey ? naturalKey.map(k => r[k]).join(' ') : (r.id as string);
 
   // Get all source keys (id, or the natural key columns for tables that don't share ids)
-  const sourceRows = await fetchAllRows(client, tableName, naturalKey ? naturalKey.join(',') : 'id', source);
+  const sourceRows = await fetchAllRows(client, tableName, naturalKey ? naturalKey.join(',') : 'id', source, { tenantId });
   const sourceKeys = new Set(sourceRows.map((r) => keyOf(r)));
 
   // Get all target rows (matches the original query's scope: no deleted_at filter,
   // since an already soft-deleted target row re-attempting delete is a harmless no-op)
-  const targetRows = await fetchAllRows(client, tableName, '*', target, { excludeDeleted: false });
+  const targetRows = await fetchAllRows(client, tableName, '*', target, { excludeDeleted: false, tenantId });
 
   const orphanedIds: string[] = [];
   const preservedIds: string[] = [];
@@ -225,15 +244,21 @@ export async function cleanupOrphanedRows(
     return { deleted: 0, preservedIds, collected };
   }
 
-  // Delete orphaned rows in batches
+  // Delete orphaned rows in batches. orphanedIds is derived entirely from
+  // targetRows above (already tenant-scoped), so this delete only ever
+  // targets the caller's own tenant's rows by construction — the explicit
+  // applyTenantEq here is a second, independent layer of defense-in-depth,
+  // not the only thing preventing a cross-tenant delete.
   let deletedCount = 0;
   for (let i = 0; i < orphanedIds.length; i += SUPABASE_WRITE_BATCH_SIZE) {
     const batch = orphanedIds.slice(i, i + SUPABASE_WRITE_BATCH_SIZE);
-    const { error: deleteError } = await client
+    let deleteQuery = client
       .from(tableName)
       .delete()
       .eq('is_published', target)
       .in('id', batch);
+    deleteQuery = applyTenantEq(deleteQuery, tenantId);
+    const { error: deleteError } = await deleteQuery;
 
     if (deleteError) {
       throw new Error(`Failed to cleanup orphaned ${tableName}: ${deleteError.message}`);

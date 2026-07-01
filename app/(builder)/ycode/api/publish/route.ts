@@ -890,21 +890,25 @@ export async function POST(request: NextRequest) {
         }
 
         // The selective path above (invalidatePages -> revalidateTag/revalidatePath)
-        // is the ONLY invalidation that ran for a normal (non-global) publish —
+        // was the ONLY invalidation that ran for a normal (non-global) publish —
         // clearAllCache()'s explicit, proven purgeNetlifyEdgeCache() REST/tag purge
-        // was previously reserved for global-change escalations and the catch
-        // fallback below. That was fine while public pages were force-dynamic
-        // (nothing was cached, so nothing could go stale), but now that they're
-        // cacheable, relying solely on revalidateTag/revalidatePath here would
-        // reproduce the exact "stale HTML after publish on Netlify" incident that
-        // force-dynamic was originally added to fix (2026-03-31, see
-        // app/(site)/page.tsx history). Always also run the proven purge — broader
-        // than the selective set (whole-tenant), which is a safe over-invalidation,
-        // not a correctness risk.
-        try {
-          await clearAllCache(await resolveEffectiveTenantId());
-        } catch {
-        // Non-fatal
+        // was previously reserved for global-change escalations (selectiveInvalidation
+        // already calls it internally when strategy is 'full' — see
+        // lib/services/cacheService.ts) and the catch fallback below. That was fine
+        // while public pages were force-dynamic (nothing was cached, so nothing
+        // could go stale), but now that they're cacheable, relying solely on
+        // revalidateTag/revalidatePath for the selective case would reproduce the
+        // exact "stale HTML after publish on Netlify" incident that force-dynamic
+        // was originally added to fix (2026-03-31, see app/(site)/page.tsx
+        // history). Only run it here for 'selective' — 'full' already ran it
+        // inside selectiveInvalidation(), and calling it again would just double
+        // the Netlify purge API calls for no benefit.
+        if (invalidationResult.strategy === 'selective') {
+          try {
+            await clearAllCache(await resolveEffectiveTenantId());
+          } catch {
+            // Non-fatal
+          }
         }
       } catch {
       // Fallback: if selective invalidation fails, nuke everything

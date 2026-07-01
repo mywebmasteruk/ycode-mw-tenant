@@ -667,15 +667,45 @@ export async function invalidateForCollectionChange(
   collectionId: string,
   options: { removedSlugs?: string[] } = {},
 ): Promise<{ invalidatedRoutes: string[] }> {
+  return invalidateForCollectionsChange(
+    [collectionId],
+    options.removedSlugs && options.removedSlugs.length > 0
+      ? new Map([[collectionId, options.removedSlugs]])
+      : undefined,
+  );
+}
+
+/**
+ * Batched form of invalidateForCollectionChange — invalidate routes affected
+ * by changes across MULTIPLE collections in one pass.
+ *
+ * findAffectedPages/getRoutePathsForPages/getRoutePathsForDeletedCollectionItems
+ * each do several unpaginated whole-tenant table scans (components,
+ * page_layers, pages, locales, translations) per call — calling
+ * invalidateForCollectionChange() once per collection in a loop repeats all
+ * of that scanning N times over data that didn't change between iterations.
+ * Found during self-review of the item-level publish route (2026-07-01),
+ * which published items across several distinct collections in one batch
+ * before this existed. Callers with multiple collectionIds from one publish
+ * batch should use this instead of looping the singular form.
+ */
+export async function invalidateForCollectionsChange(
+  collectionIds: string[],
+  removedSlugsByCollection?: Map<string, string[]>,
+): Promise<{ invalidatedRoutes: string[] }> {
+  if (collectionIds.length === 0) {
+    return { invalidatedRoutes: [] };
+  }
+
   const { findAffectedPages } = await import('@/lib/repositories/pageLayersRepository');
 
-  const affected = await findAffectedPages([], [], [collectionId]);
+  const affected = await findAffectedPages([], [], collectionIds);
   const pageIds = affected.collectionPageIds;
 
   const liveRoutes = pageIds.length > 0 ? await getRoutePathsForPages(pageIds) : [];
 
-  const removedRoutes = (options.removedSlugs && options.removedSlugs.length > 0)
-    ? await getRoutePathsForDeletedCollectionItems(new Map([[collectionId, options.removedSlugs]]))
+  const removedRoutes = (removedSlugsByCollection && removedSlugsByCollection.size > 0)
+    ? await getRoutePathsForDeletedCollectionItems(removedSlugsByCollection)
     : [];
 
   const routes = [...new Set([...liveRoutes, ...removedRoutes])];

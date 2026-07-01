@@ -3,7 +3,7 @@ import { publishValues } from '@/lib/repositories/collectionItemValueRepository'
 import { hardDeleteItem, getItemById } from '@/lib/repositories/collectionItemRepository';
 import { getCollectionById } from '@/lib/repositories/collectionRepository';
 import { cleanupDeletedCollections } from '@/lib/services/collectionService';
-import { invalidateForCollectionChange, clearAllCache } from '@/lib/services/cacheService';
+import { invalidateForCollectionsChange, clearAllCache } from '@/lib/services/cacheService';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { noCache } from '@/lib/api-response';
 
@@ -82,21 +82,28 @@ export async function POST(request: NextRequest) {
     await cleanupDeletedCollections();
 
     // Invalidate cached routes for every page that renders one of the
-    // collections we touched. Non-fatal: a cache-invalidation failure
-    // shouldn't turn a successful publish into an error response — the
-    // route will still serve fresh content on its next natural revalidation.
-    for (const collectionId of changedCollectionIds) {
+    // collections we touched, in a single batched call — not once per
+    // collection in a loop. invalidateForCollectionChange (the singular form)
+    // does several unpaginated whole-tenant table scans per call; looping it
+    // over N distinct collections in one publish batch repeated all of that
+    // scanning N times over data that hadn't changed between iterations
+    // (found during self-review, given this codebase has already hit an 8s
+    // PostgREST statement_timeout in production once before). Non-fatal: a
+    // cache-invalidation failure shouldn't turn a successful publish into an
+    // error response — the route will still serve fresh content on its next
+    // natural revalidation.
+    if (changedCollectionIds.size > 0) {
       try {
-        const result = await invalidateForCollectionChange(collectionId);
+        const result = await invalidateForCollectionsChange([...changedCollectionIds]);
         if (result.invalidatedRoutes.length > 0) {
-          console.log(`[Cache] item publish: invalidated ${result.invalidatedRoutes.length} route(s) for collection ${collectionId}`);
+          console.log(`[Cache] item publish: invalidated ${result.invalidatedRoutes.length} route(s) across ${changedCollectionIds.size} collection(s)`);
         }
       } catch (cacheError) {
-        console.error(`[Cache] item publish: invalidation failed for collection ${collectionId}:`, cacheError);
+        console.error('[Cache] item publish: invalidation failed:', cacheError);
       }
     }
 
-    // invalidateForCollectionChange() above only calls revalidateTag/revalidatePath
+    // invalidateForCollectionsChange() above only calls revalidateTag/revalidatePath
     // (the Vercel/self-hosted path in invalidatePages()) — it does NOT call the
     // explicit Netlify REST-API purge (purgeNetlifyEdgeCache). That distinction
     // didn't matter while public pages were force-dynamic (nothing was ever
