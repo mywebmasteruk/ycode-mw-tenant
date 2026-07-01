@@ -64,6 +64,17 @@ function record(area: string, step: string, ok: boolean, status?: number, detail
   console.log(`[${ok ? 'PASS' : 'FAIL'}] ${area} :: ${step}${status ? ` (${status})` : ''}${detail ? ` — ${detail}` : ''}`);
 }
 
+/**
+ * Records an api() result against a set of acceptable statuses, auto-attaching the
+ * response body as diagnostic detail WHENEVER IT FAILS — so a future failure always
+ * shows what actually went wrong instead of a bare status code. Found necessary
+ * after the first real CI run recorded a failure with no detail at all.
+ */
+function recordApi(area: string, step: string, r: { status: number; json: any; text: string }, okStatuses: number[]): void {
+  const ok = okStatuses.includes(r.status);
+  record(area, step, ok, r.status, ok ? undefined : JSON.stringify(r.json ?? r.text)?.slice(0, 300));
+}
+
 async function resetPasswordAndLogin(host: string, userId: string, email: string): Promise<{ cookie: string }> {
   const freshPassword = crypto.randomBytes(24).toString('base64');
   const resetRes = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${userId}`, {
@@ -105,20 +116,37 @@ function tenantScopedCookieOptions(hostname: string, projectUrl: string): { name
 
 type Tenant = { label: string; host: string; cookie: string; tenantId: string };
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * A one-off 5xx (cold start, transient infra blip) shouldn't page anyone — only a
+ * REPRODUCIBLE failure should. Retry once after a short delay before recording a
+ * result; a genuine bug fails the same way twice, a blip clears on retry. Found
+ * necessary in production: the first real CI run of this canary hit exactly this
+ * (a single transient 500 on an otherwise-passing endpoint, confirmed non-reproducing
+ * moments later) — see TENANT-ISOLATION-AND-CLONE-PLAN.md.
+ */
 async function api(tenant: Tenant, method: string, path: string, body?: unknown): Promise<{ status: number; json: any; text: string }> {
-  const res = await fetch(`https://${tenant.host}${path}`, {
-    method,
-    headers: { Cookie: tenant.cookie, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  const text = await res.text();
-  let json: any = null;
-  try {
-    json = JSON.parse(text);
-  } catch {
-    /* not json */
-  }
-  return { status: res.status, json, text };
+  const attempt = async () => {
+    const res = await fetch(`https://${tenant.host}${path}`, {
+      method,
+      headers: { Cookie: tenant.cookie, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    const text = await res.text();
+    let json: any = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      /* not json */
+    }
+    return { status: res.status, json, text };
+  };
+
+  const first = await attempt();
+  if (first.status < 500) return first;
+  await sleep(1500);
+  return attempt();
 }
 
 const createdA: Record<string, string> = {};
@@ -129,121 +157,132 @@ async function contentCrud(t: Tenant, created: Record<string, string>) {
 
   {
     const c = await api(t, 'POST', '/ycode/api/folders', { name: 'Canary Folder', slug: `canary-folder-${Date.now()}` });
-    record(area, 'create page folder', c.status === 200 || c.status === 201, c.status);
+    recordApi(area, 'create page folder', c, [200, 201]);
     if (c.json?.data?.id) created.pageFolderId = c.json.data.id;
   }
   {
     const c = await api(t, 'POST', '/ycode/api/pages', { name: 'Canary Page', slug: `canary-page-${Date.now()}` });
-    record(area, 'create page', c.status === 200 || c.status === 201, c.status);
+    recordApi(area, 'create page', c, [200, 201]);
     if (c.json?.data?.id) created.pageId = c.json.data.id;
   }
   if (created.pageId) {
-    record(area, 'get page', (await api(t, 'GET', `/ycode/api/pages/${created.pageId}`)).status === 200);
-    record(area, 'list pages', (await api(t, 'GET', '/ycode/api/pages')).status === 200);
-    record(area, 'update page', (await api(t, 'PUT', `/ycode/api/pages/${created.pageId}`, { name: 'Canary Page Renamed' })).status === 200);
+    recordApi(area, 'get page', await api(t, 'GET', `/ycode/api/pages/${created.pageId}`), [200]);
+    recordApi(area, 'list pages', await api(t, 'GET', '/ycode/api/pages'), [200]);
+    recordApi(area, 'update page', await api(t, 'PUT', `/ycode/api/pages/${created.pageId}`, { name: 'Canary Page Renamed' }), [200]);
     const dup = await api(t, 'POST', `/ycode/api/pages/${created.pageId}/duplicate`);
-    record(area, 'duplicate page', dup.status === 200 || dup.status === 201, dup.status);
+    recordApi(area, 'duplicate page', dup, [200, 201]);
     if (dup.json?.data?.id) created.pageIdDup = dup.json.data.id;
-    record(area, 'get layers', (await api(t, 'GET', `/ycode/api/layers?page_id=${created.pageId}`)).status === 200);
+    recordApi(area, 'get layers', await api(t, 'GET', `/ycode/api/layers?page_id=${created.pageId}`), [200]);
   }
 
   {
     const c = await api(t, 'POST', '/ycode/api/collections', { name: 'Canary Collection' });
-    record(area, 'create collection', c.status === 200 || c.status === 201, c.status);
+    recordApi(area, 'create collection', c, [200, 201]);
     if (c.json?.data?.id) created.collectionId = c.json.data.id;
   }
   if (created.collectionId) {
-    record(area, 'get collection', (await api(t, 'GET', `/ycode/api/collections/${created.collectionId}`)).status === 200);
-    record(area, 'list collections', (await api(t, 'GET', '/ycode/api/collections')).status === 200);
-    record(area, 'update collection', (await api(t, 'PUT', `/ycode/api/collections/${created.collectionId}`, { name: 'Canary Collection Renamed' })).status === 200);
+    recordApi(area, 'get collection', await api(t, 'GET', `/ycode/api/collections/${created.collectionId}`), [200]);
+    recordApi(area, 'list collections', await api(t, 'GET', '/ycode/api/collections'), [200]);
+    recordApi(area, 'update collection', await api(t, 'PUT', `/ycode/api/collections/${created.collectionId}`, { name: 'Canary Collection Renamed' }), [200]);
 
     const f = await api(t, 'POST', `/ycode/api/collections/${created.collectionId}/fields`, { name: 'Title', type: 'text' });
-    record(area, 'create collection field', f.status === 200 || f.status === 201, f.status);
+    recordApi(area, 'create collection field', f, [200, 201]);
     const fieldId = f.json?.data?.id;
     if (fieldId) created.fieldId = fieldId;
     if (fieldId) {
-      record(area, 'update collection field', (await api(t, 'PUT', `/ycode/api/collections/${created.collectionId}/fields/${fieldId}`, { name: 'Title Updated' })).status === 200);
+      recordApi(area, 'update collection field', await api(t, 'PUT', `/ycode/api/collections/${created.collectionId}/fields/${fieldId}`, { name: 'Title Updated' }), [200]);
     }
 
     const itemBody: Record<string, unknown> = { name: 'Canary Item' };
     if (fieldId) itemBody[fieldId] = 'canary value';
     const it = await api(t, 'POST', `/ycode/api/collections/${created.collectionId}/items`, itemBody);
-    record(area, 'create collection item', it.status === 200 || it.status === 201, it.status);
+    recordApi(area, 'create collection item', it, [200, 201]);
     const itemId = it.json?.data?.id;
     if (itemId) created.itemId = itemId;
     if (itemId) {
-      record(area, 'get collection item', (await api(t, 'GET', `/ycode/api/collections/${created.collectionId}/items/${itemId}`)).status === 200);
-      record(area, 'list collection items', (await api(t, 'GET', `/ycode/api/collections/${created.collectionId}/items`)).status === 200);
+      recordApi(area, 'get collection item', await api(t, 'GET', `/ycode/api/collections/${created.collectionId}/items/${itemId}`), [200]);
+      recordApi(area, 'list collection items', await api(t, 'GET', `/ycode/api/collections/${created.collectionId}/items`), [200]);
       const iu = await api(t, 'PUT', `/ycode/api/collections/${created.collectionId}/items/${itemId}`, fieldId ? { values: { [fieldId]: 'updated value' } } : {});
-      record(area, 'update collection item', iu.status === 200, iu.status);
+      recordApi(area, 'update collection item', iu, [200]);
     }
   }
 
   {
     const c = await api(t, 'POST', '/ycode/api/components', { name: 'Canary Component', layers: [] });
-    record(area, 'create component', c.status === 200 || c.status === 201, c.status);
+    recordApi(area, 'create component', c, [200, 201]);
     if (c.json?.data?.id) created.componentId = c.json.data.id;
   }
   if (created.componentId) {
-    record(area, 'get component', (await api(t, 'GET', `/ycode/api/components/${created.componentId}`)).status === 200);
-    record(area, 'list components', (await api(t, 'GET', '/ycode/api/components')).status === 200);
+    recordApi(area, 'get component', await api(t, 'GET', `/ycode/api/components/${created.componentId}`), [200]);
+    recordApi(area, 'list components', await api(t, 'GET', '/ycode/api/components'), [200]);
   }
 
   {
-    const c = await api(t, 'POST', '/ycode/api/layer-styles', { name: 'Canary Style', classes: 'text-red-500' });
-    record(area, 'create layer style', c.status === 200 || c.status === 201, c.status);
+    // Name must be unique per run: layer_styles has a UNIQUE index on
+    // (tenant_id, name, is_published) that does NOT exclude soft-deleted rows
+    // (deleted_at IS NOT NULL), so a fixed name collides with yesterday's
+    // soft-deleted canary row and the insert 500s. (This is itself a real, if
+    // narrow, app-level quirk independent of tenant isolation — see
+    // TENANT-ISOLATION-AND-CLONE-PLAN.md — but the canary's own fix is simply
+    // to use a unique name, same as pages/folders already do.)
+    const c = await api(t, 'POST', '/ycode/api/layer-styles', { name: `Canary Style ${Date.now()}`, classes: 'text-red-500' });
+    recordApi(area, 'create layer style', c, [200, 201]);
     if (c.json?.data?.id) created.layerStyleId = c.json.data.id;
   }
 
   {
     const c = await api(t, 'POST', '/ycode/api/color-variables', { name: 'canaryColor', value: '#123456' });
-    record(area, 'create color variable', c.status === 200 || c.status === 201, c.status);
+    recordApi(area, 'create color variable', c, [200, 201]);
     if (c.json?.data?.id) created.colorVarId = c.json.data.id;
   }
   if (created.colorVarId) {
-    record(area, 'update color variable', (await api(t, 'PUT', `/ycode/api/color-variables/${created.colorVarId}`, { value: '#654321' })).status === 200);
+    recordApi(area, 'update color variable', await api(t, 'PUT', `/ycode/api/color-variables/${created.colorVarId}`, { value: '#654321' }), [200]);
   }
 
   {
-    const c = await api(t, 'POST', '/ycode/api/locales', { code: 'te', label: 'Canary Locale' });
-    record(area, 'create locale', c.status === 200 || c.status === 201, c.status);
+    // Code must be unique per run: locales has a UNIQUE index on
+    // (tenant_id, code, is_published) that does NOT exclude soft-deleted rows
+    // — same latent quirk as layer_styles (see the comment above). code is
+    // varchar(10), no ISO-format check constraint, so a short unique suffix fits.
+    const c = await api(t, 'POST', '/ycode/api/locales', { code: `t${Date.now().toString().slice(-6)}`, label: 'Canary Locale' });
+    recordApi(area, 'create locale', c, [200, 201]);
     if (c.json?.data?.locale?.id) created.localeId = c.json.data.locale.id;
   }
 
   {
     const c = await api(t, 'POST', '/ycode/api/asset-folders', { name: 'Canary Asset Folder' });
-    record(area, 'create asset folder', c.status === 200 || c.status === 201, c.status);
+    recordApi(area, 'create asset folder', c, [200, 201]);
     if (c.json?.data?.id) created.assetFolderId = c.json.data.id;
   }
   {
     const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10"/></svg>';
     const c = await api(t, 'POST', '/ycode/api/assets', { filename: 'canary.svg', content: svg, asset_folder_id: created.assetFolderId });
-    record(area, 'create asset (svg)', c.status === 200 || c.status === 201, c.status);
+    recordApi(area, 'create asset (svg)', c, [200, 201]);
     if (c.json?.data?.id) created.assetId = c.json.data.id;
   }
-  record(area, 'list assets', (await api(t, 'GET', '/ycode/api/assets')).status === 200);
+  recordApi(area, 'list assets', await api(t, 'GET', '/ycode/api/assets'), [200]);
 
-  record(area, 'update setting', (await api(t, 'PUT', '/ycode/api/settings/site_name', { value: 'Canary Site Name' })).status === 200);
+  recordApi(area, 'update setting', await api(t, 'PUT', '/ycode/api/settings/site_name', { value: 'Canary Site Name' }), [200]);
 
   {
     const c = await api(t, 'POST', '/ycode/api/globals', { name: 'canaryGlobal', type: 'text', value: 'hello' });
-    record(area, 'create global variable', c.status === 200 || c.status === 201, c.status);
+    recordApi(area, 'create global variable', c, [200, 201]);
     if (c.json?.data?.id) created.globalId = c.json.data.id;
   }
 
-  record(area, 'editor init (aggregate read)', (await api(t, 'GET', '/ycode/api/editor/init')).status === 200);
+  recordApi(area, 'editor init (aggregate read)', await api(t, 'GET', '/ycode/api/editor/init'), [200]);
 }
 
 async function keysAndTokens(t: Tenant, created: Record<string, string>) {
   const area = `${t.label}:keys`;
 
   const ak = await api(t, 'POST', '/ycode/api/api-keys', { name: 'Canary Key' });
-  record(area, 'create api key', ak.status === 200 || ak.status === 201, ak.status, JSON.stringify(ak.json)?.slice(0, 150));
+  recordApi(area, 'create api key', ak, [200, 201]);
   if (ak.json?.data?.id) created.apiKeyId = ak.json.data.id;
-  record(area, 'list api keys', (await api(t, 'GET', '/ycode/api/api-keys')).status === 200);
+  recordApi(area, 'list api keys', await api(t, 'GET', '/ycode/api/api-keys'), [200]);
 
   const mt = await api(t, 'POST', '/ycode/api/mcp-tokens', { name: 'Canary MCP Token' });
-  record(area, 'create mcp token', mt.status === 200 || mt.status === 201, mt.status);
+  recordApi(area, 'create mcp token', mt, [200, 201]);
   if (mt.json?.data?.id) created.mcpTokenId = mt.json.data.id;
   const mtToken = mt.json?.data?.token;
 
@@ -253,29 +292,28 @@ async function keysAndTokens(t: Tenant, created: Record<string, string>) {
       headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'canary', version: '1' } } }),
     });
-    record(area, 'MCP token authenticates + initializes', mcpRes.status === 200, mcpRes.status);
+    record(area, 'MCP token authenticates + initializes', mcpRes.status === 200, mcpRes.status, mcpRes.status === 200 ? undefined : await mcpRes.text().catch(() => undefined));
   }
 
   const wh = await api(t, 'POST', '/ycode/api/webhooks', { name: 'Canary Webhook', url: 'https://example.com/webhook-canary', events: ['page.published'] });
-  record(area, 'create webhook', wh.status === 200 || wh.status === 201, wh.status);
+  recordApi(area, 'create webhook', wh, [200, 201]);
   if (wh.json?.data?.id) created.webhookId = wh.json.data.id;
 }
 
 async function authAndUsers(t: Tenant) {
   const area = `${t.label}:auth`;
   const list = await api(t, 'GET', '/ycode/api/auth/users');
-  record(area, 'list users (owner present)', list.status === 200 && Array.isArray(list.json?.data?.activeUsers) && list.json.data.activeUsers.length >= 1, list.status);
+  const ok = list.status === 200 && Array.isArray(list.json?.data?.activeUsers) && list.json.data.activeUsers.length >= 1;
+  record(area, 'list users (owner present)', ok, list.status, ok ? undefined : JSON.stringify(list.json)?.slice(0, 300));
 
-  const nameUpd = await api(t, 'PUT', '/ycode/api/profile/name', { name: `${t.label}-canary` });
-  record(area, 'update own profile name', nameUpd.status === 200, nameUpd.status);
-  const nameRevert = await api(t, 'PUT', '/ycode/api/profile/name', { name: t.label });
-  record(area, 'revert own profile name', nameRevert.status === 200, nameRevert.status);
+  recordApi(area, 'update own profile name', await api(t, 'PUT', '/ycode/api/profile/name', { name: `${t.label}-canary` }), [200]);
+  recordApi(area, 'revert own profile name', await api(t, 'PUT', '/ycode/api/profile/name', { name: t.label }), [200]);
 }
 
 async function publishFlow(t: Tenant) {
   const area = `${t.label}:publish`;
-  record(area, 'publish preview', (await api(t, 'GET', '/ycode/api/publish/preview')).status === 200);
-  record(area, 'publish', (await api(t, 'POST', '/ycode/api/publish')).status === 200);
+  recordApi(area, 'publish preview', await api(t, 'GET', '/ycode/api/publish/preview'), [200]);
+  recordApi(area, 'publish', await api(t, 'POST', '/ycode/api/publish'), [200]);
 }
 
 async function crossTenantChecks(attacker: Tenant, victim: Tenant, victimIds: Record<string, string>, victimSnapshot: Record<string, string>) {
