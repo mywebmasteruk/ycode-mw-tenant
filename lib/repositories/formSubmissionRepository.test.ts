@@ -30,6 +30,7 @@ function queryMock(result: unknown = { data: [], error: null }) {
     in: vi.fn().mockReturnThis(),
     or: vi.fn().mockReturnThis(),
     order: vi.fn().mockReturnThis(),
+    limit: vi.fn().mockReturnThis(),
     single: vi.fn().mockResolvedValue(result),
     then: (resolve: (value: unknown) => unknown, reject: (reason?: unknown) => unknown) =>
       Promise.resolve(result).then(resolve, reject),

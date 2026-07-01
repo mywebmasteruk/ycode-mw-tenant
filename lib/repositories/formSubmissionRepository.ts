@@ -1,4 +1,5 @@
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { SUPABASE_QUERY_LIMIT } from '@/lib/supabase-constants';
 import {
   applyTenantOrLegacyScope,
   isMissingTenantScopeColumnError,
@@ -32,10 +33,19 @@ export async function getAllFormSubmissions(
     throw new Error('Supabase client not configured');
   }
 
+  // Unbounded before this fix — a form's full submission history (large JSONB
+  // payload/metadata per row) was fetched on every Forms-tab load with no cap.
+  // Currently harmless (this environment has 3 total rows across all tenants)
+  // but would slow down every load as a real tenant's submissions grow. Cap at
+  // the same SUPABASE_QUERY_LIMIT used elsewhere in this codebase rather than
+  // adding real pagination here — the callers (builder Forms tab, v1 API,
+  // MCP tool) don't currently accept a page cursor, and a full pagination
+  // redesign is a bigger change than this fix is scoped for.
   let query = client
     .from('form_submissions')
     .select('*')
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .limit(SUPABASE_QUERY_LIMIT);
 
   if (formId) {
     query = query.eq('form_id', formId);
@@ -58,7 +68,8 @@ export async function getAllFormSubmissions(
       let legacyQuery = client
         .from('form_submissions')
         .select('*')
-        .order('created_at', { ascending: false });
+        .order('created_at', { ascending: false })
+        .limit(SUPABASE_QUERY_LIMIT);
 
       if (formId) {
         legacyQuery = legacyQuery.eq('form_id', formId);
@@ -116,11 +127,14 @@ export async function getFormSummaries(tenantId?: string | null): Promise<FormSu
     throw new Error('Supabase client not configured');
   }
 
-  // Get all submissions grouped by form_id
+  // Get all submissions grouped by form_id. Grouping/counting happens in JS
+  // below rather than SQL GROUP BY (would need a Postgres RPC function, out
+  // of scope for this fix) — same SUPABASE_QUERY_LIMIT safety cap as above.
   let query = client
     .from('form_submissions')
     .select('form_id, status, created_at')
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .limit(SUPABASE_QUERY_LIMIT);
 
   query = applyTenantOrLegacyScope(query, tenantId);
 
