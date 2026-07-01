@@ -1,5 +1,22 @@
 # MasjidWeb CTO bot — runs after weekly (or manual) safe-update PR creation.
-# Dispatches mechanical conflict repair and emails the platform admin.
+# Dispatches conflict repair (escalating from mechanical to LLM-assisted when
+# needed) and emails the platform admin.
+#
+# Root cause this file fixes: previously this always dispatched
+# ai-repair-safe-update.yml with mechanical_only=true and never escalated.
+# Deterministic repair is, by design, incapable of resolving conflicts that
+# need real judgment — it correctly refuses and exits non-zero every time it
+# hits one. With no escalation path, every PR that needed real conflict
+# resolution died blocked (see PR #27: "8 conflicts in tenant-sensitive
+# files", never resolved, closed unmerged). Now: try mechanical-only first
+# (cheap, fast, no LLM cost), and only escalate to repair_mode=premium_ai if
+# that doesn't fully clear the conflicts. premium_ai is required (not the
+# plain autopilot LLM mode) because ai-repair-safe-update.yml's "Run AI
+# conflict repair" step only fires when deterministic status is exactly
+# 'failed' — a deterministic status of 'blocked' (Autopilot protecting
+# tenant-sensitive files, e.g. PR #27's actual case) skips straight past it
+# and only the premium_ai path (isolation-gate-verified, handles both
+# 'failed' and 'blocked') can attempt it.
 
 name: Core update operator
 
@@ -17,6 +34,10 @@ jobs:
   operate:
     if: ${{ github.event.workflow_run.conclusion != 'skipped' }}
     runs-on: ubuntu-latest
+    # ai-repair-safe-update.yml itself allows up to 70 minutes (LLM repair +
+    # verification). Worst case here is mechanical (fast) then a full LLM
+    # escalation run, plus polling overhead to locate each dispatched run.
+    timeout-minutes: 100
     steps:
       - name: Resolve latest safe-update PR
         id: pr
@@ -40,15 +61,70 @@ jobs:
             core.setOutput('draft', pr.draft ? 'true' : 'false');
             core.setOutput('mergeable', pr.mergeable === false ? 'false' : 'true');
 
-      - name: Dispatch mechanical repair
+      - name: Repair with escalation (mechanical, then LLM-assisted if needed)
         if: steps.pr.outputs.found == 'true' && steps.pr.outputs.draft == 'true'
+        id: repair
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
         run: |
-          gh workflow run ai-repair-safe-update.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            -f "pr_number=${{ steps.pr.outputs.number }}" \
-            -f "mechanical_only=true"
+          set -uo pipefail
+
+          find_and_watch_run() {
+            local mechanical_only="$1"
+            local repair_mode="$2"
+            local before
+            before="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+            gh workflow run ai-repair-safe-update.yml \
+              --repo "$GITHUB_REPOSITORY" \
+              -f "pr_number=${PR_NUMBER}" \
+              -f "mechanical_only=${mechanical_only}" \
+              -f "repair_mode=${repair_mode}" >&2
+
+            local run_id=""
+            for _ in $(seq 1 24); do
+              sleep 5
+              run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ai-repair-safe-update.yml \
+                --json databaseId,createdAt,event \
+                --jq "[.[] | select(.event==\"workflow_dispatch\" and .createdAt > \"$before\")] | sort_by(.createdAt) | .[0].databaseId // empty")"
+              if [ -n "$run_id" ]; then
+                break
+              fi
+            done
+
+            if [ -z "$run_id" ]; then
+              echo "Could not locate the dispatched ai-repair run (mechanical_only=$mechanical_only, repair_mode=$repair_mode)." >&2
+              return 1
+            fi
+
+            echo "Watching ai-repair run $run_id (mechanical_only=$mechanical_only, repair_mode=$repair_mode)..." >&2
+            gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status >&2
+            local watch_status=$?
+            echo "$run_id"
+            return $watch_status
+          }
+
+          mech_run_id="$(find_and_watch_run true autopilot)"
+          mech_status=$?
+          echo "mechanical_run_id=${mech_run_id:-unknown}" >> "$GITHUB_OUTPUT"
+
+          if [ "$mech_status" -eq 0 ]; then
+            echo "outcome=mechanical_succeeded" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Mechanical-only repair did not fully resolve conflicts (exit $mech_status) — escalating to premium_ai repair." >&2
+          llm_run_id="$(find_and_watch_run false premium_ai)"
+          llm_status=$?
+          echo "llm_run_id=${llm_run_id:-unknown}" >> "$GITHUB_OUTPUT"
+
+          if [ "$llm_status" -eq 0 ]; then
+            echo "outcome=llm_succeeded" >> "$GITHUB_OUTPUT"
+          else
+            echo "outcome=still_blocked" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0
 
       - name: Notify MasjidWeb admin
         if: steps.pr.outputs.found == 'true' && vars.ADMIN_DASHBOARD_NOTIFY_URL != ''
@@ -59,19 +135,33 @@ jobs:
           PR_URL: ${{ steps.pr.outputs.url }}
           WF_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           IS_DRAFT: ${{ steps.pr.outputs.draft }}
+          REPAIR_OUTCOME: ${{ steps.repair.outputs.outcome }}
         run: |
           if [ -z "$NOTIFY_SECRET" ]; then
             echo "CORE_UPDATE_NOTIFY_SECRET not set — skip email notify"
             exit 0
           fi
           if [ "$WF_CONCLUSION" != "success" ]; then
-            MSG="The weekly core update workflow finished with status: ${WF_CONCLUSION}. Check GitHub Actions."
+            MSG="The core update workflow finished with status: ${WF_CONCLUSION}. Check GitHub Actions."
             EVENT="update_failed"
           elif [ "$IS_DRAFT" = "true" ]; then
-            MSG="A new safe-update PR was opened (draft). The operator started mechanical repair. You will get another email when checks are green."
+            case "$REPAIR_OUTCOME" in
+              mechanical_succeeded)
+                MSG="A new safe-update PR was opened with conflicts. Mechanical repair resolved them and pushed the fix — checks are running now. You'll see it on the admin dashboard once green."
+                ;;
+              llm_succeeded)
+                MSG="A new safe-update PR was opened with conflicts too complex for mechanical repair. LLM-assisted repair resolved them and pushed the fix — checks are running now."
+                ;;
+              still_blocked)
+                MSG="A new safe-update PR has conflicts that automated repair (mechanical + LLM-assisted) could NOT resolve. This needs a developer to look at it directly — see the PR for details."
+                ;;
+              *)
+                MSG="A new safe-update PR was opened (draft). Automated repair ran — check the PR for the outcome."
+                ;;
+            esac
             EVENT="update_prepared"
           else
-            MSG="A new safe-update PR was opened and is ready for preview. Open the admin dashboard when you are ready to review."
+            MSG="A new safe-update PR was opened, passed local verification, and is ready for preview. Open the admin dashboard when you are ready to review."
             EVENT="update_prepared"
           fi
           curl -fsS -X POST "$NOTIFY_URL" \

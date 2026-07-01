@@ -14,7 +14,37 @@ permissions:
   actions: write
 
 jobs:
+  # A fresh PR every day regardless of whether yesterday's landed just buries
+  # the backlog: 17 straight safe-ycode-update PRs (2026-05-22 to 2026-06-27)
+  # were closed unmerged, each superseded by the next day's before anyone
+  # resolved it. Skip creating a new one while an old one is still open, so
+  # the backlog stops growing silently and someone has to actually deal with
+  # the stuck PR.
+  check-existing:
+    runs-on: ubuntu-latest
+    outputs:
+      has_open_pr: ${{ steps.check.outputs.has_open_pr }}
+    steps:
+      - name: Check for an unresolved safe-update PR
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName,url \
+            --jq '[.[] | select(.headRefName | startswith("safe-ycode-update/"))] | .[0] // empty')"
+          if [ -n "$existing" ]; then
+            number="$(echo "$existing" | jq -r '.number')"
+            url="$(echo "$existing" | jq -r '.url')"
+            echo "has_open_pr=true" >> "$GITHUB_OUTPUT"
+            echo "PR #$number is still open and unresolved ($url) — skipping today's run so it doesn't get buried." | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "has_open_pr=false" >> "$GITHUB_OUTPUT"
+            echo "No open safe-update PR — proceeding." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
   create-update-pr:
+    needs: check-existing
+    if: needs.check-existing.outputs.has_open_pr != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out MasjidWeb fork
@@ -96,6 +126,32 @@ jobs:
           npm run updates:safety-check
           cat /tmp/update-safety-report.md >> "$GITHUB_STEP_SUMMARY"
 
+      # A clean merge (no conflicts) used to be marked "ready" on git-merge
+      # success alone, relying entirely on ci-build-check.yml for real
+      # verification. That workflow is pull_request-triggered on a
+      # bot-authored branch and routinely lands in GitHub's action_required
+      # state (confirmed: 10+ occurrences across safe-ycode-update branches
+      # between 2026-06-13 and 2026-07-01), where it just sits until a human
+      # notices and manually approves/reruns it in the Actions tab — which,
+      # in 5+ weeks of this pipeline running, never happened in time for a
+      # single update to land. Run the same verification here, in a job that
+      # is NOT gated the same way (schedule/workflow_dispatch), so PR
+      # readiness never depends on that stuck gate. Mirrors the verification
+      # ai-repair-safe-update.yml already runs for the repair path.
+      - name: Verify clean merge (type-check, tenant isolation, build)
+        if: steps.merge.outputs.status == '0'
+        id: verify
+        run: |
+          set +e
+          npm run type-check && \
+          bash scripts/check-tenant-isolation.sh && \
+          npm run updates:isolation-audit && \
+          npx vitest run lib/masjidweb/bootstrap-tenant-owner.test.ts lib/masjidweb/provisioned-tenant-rbac.test.ts && \
+          npm run build
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+
       - name: Upload Autopilot report
         if: always()
         uses: actions/upload-artifact@v4
@@ -134,16 +190,31 @@ jobs:
           BRANCH: ${{ steps.branch.outputs.branch }}
           LATEST_TAG: ${{ steps.branch.outputs.latest_tag }}
           MERGE_STATUS: ${{ steps.merge.outputs.status }}
+          VERIFY_STATUS: ${{ steps.verify.outputs.status }}
         run: |
           gh label create "needs-developer-review" --repo "$GITHUB_REPOSITORY" --color "B60205" --description "Requires developer review before merge" || true
           gh label create "tenant-sensitive-update" --repo "$GITHUB_REPOSITORY" --color "D93F0B" --description "Touches tenant-sensitive MasjidWeb/Ycode files" || true
           gh label create "safe-ycode-update" --repo "$GITHUB_REPOSITORY" --color "0E8A16" --description "Created by the safe Ycode update workflow" || true
 
           report="$(cat /tmp/update-safety-report.md 2>/dev/null || echo 'Safety report was not generated.')"
-          if [ "$MERGE_STATUS" = "0" ]; then
+          # verify_ok is true only for a clean merge (status 0) whose local
+          # verification (type-check/isolation/tests/build) also exited 0.
+          # Conflicted merges never run verification, so VERIFY_STATUS is
+          # empty for them — treated as not-ok, same as any other failure.
+          if [ "$MERGE_STATUS" = "0" ] && [ "$VERIFY_STATUS" = "0" ]; then
+            verify_ok="true"
+          else
+            verify_ok="false"
+          fi
+
+          if [ "$MERGE_STATUS" = "0" ] && [ "$verify_ok" = "true" ]; then
             title="chore: update Ycode core to ${LATEST_TAG}"
             draft_flag=""
-            status_text="The upstream merge completed. Automated checks still need to pass before production."
+            status_text="The upstream merge completed cleanly and passed local verification (type-check, tenant isolation audit, tenant safety tests, production build). Preview it, then approve."
+          elif [ "$MERGE_STATUS" = "0" ]; then
+            title="chore: review Ycode core update to ${LATEST_TAG}"
+            draft_flag="--draft"
+            status_text="The upstream merge completed but LOCAL VERIFICATION FAILED (type-check, tenant isolation audit, tenant safety tests, or production build). Do not approve — a developer needs to investigate the workflow run before this can proceed."
           else
             title="chore: review Ycode core update to ${LATEST_TAG}"
             draft_flag="--draft"
@@ -176,32 +247,35 @@ jobs:
             pr_number="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --json number --jq '.[0].number')"
           fi
 
-          if [ "$MERGE_STATUS" = "0" ]; then
+          if [ "$verify_ok" = "true" ]; then
             gh pr ready "$pr_number" --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+          else
+            gh pr ready "$pr_number" --repo "$GITHUB_REPOSITORY" --undo 2>/dev/null || true
           fi
 
           gh pr edit "$pr_number" --repo "$GITHUB_REPOSITORY" --add-label "safe-ycode-update"
-          if [ "$MERGE_STATUS" != "0" ] || grep -q "Status: high" /tmp/update-safety-report.md; then
+          if [ "$verify_ok" != "true" ] || grep -q "Status: high" /tmp/update-safety-report.md; then
             gh pr edit "$pr_number" --repo "$GITHUB_REPOSITORY" --add-label "needs-developer-review,tenant-sensitive-update"
           fi
 
-          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          if [ "$MERGE_STATUS" = "0" ]; then
+            if [ "$verify_ok" = "true" ]; then
+              comment="Local verification passed outside the normal PR CI gate: type-check, tenant isolation audit, tenant safety tests, and production build all green. (ci-build-check.yml may still show action_required — a known GitHub limitation for bot-authored PR branches — but this PR's readiness does not depend on it.)"
+            else
+              comment="Local verification FAILED — see the **Verify clean merge** step in this run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. Do not approve until this is fixed."
+            fi
+            gh pr comment "$pr_number" --repo "$GITHUB_REPOSITORY" --body "$comment"
+          fi
 
-      - name: Dispatch mechanical repair for conflicted PR
-        if: >-
-          steps.changes.outputs.has_changes == 'true'
-          && steps.merge.outputs.status != '0'
-          && steps.open_pr.outputs.pr_number != ''
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ steps.open_pr.outputs.pr_number }}
-        run: |
-          echo "Dispatching mechanical repair for conflicted PR #${PR_NUMBER}"
-          gh workflow run ai-repair-safe-update.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            -f "pr_number=${PR_NUMBER}" \
-            -f "mechanical_only=true"
-          echo "Mechanical repair workflow started. CI will mark the PR ready when checks pass."
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "verify_ok=$verify_ok" >> "$GITHUB_OUTPUT"
+
+      # Repair dispatch (with escalation from mechanical-only to LLM-assisted
+      # repair when needed) is centralized in core-update-operator.yml, which
+      # already runs on workflow_run after this job completes. Dispatching it
+      # again from here as well caused every conflicted PR to get two
+      # redundant mechanical-only repair runs fired within seconds of each
+      # other (confirmed in run history: e.g. 06-29 05:44:44 and 05:44:54).
 
       - name: No upstream changes found
         if: steps.changes.outputs.has_changes == 'false'
