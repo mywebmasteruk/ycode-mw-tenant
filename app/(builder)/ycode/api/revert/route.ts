@@ -183,14 +183,27 @@ export async function POST(_request: NextRequest) {
     }
 
     // 7. Collection item values (preserve values belonging to draft-status items)
+    //
+    // collection_item_values has an independently generated `id` per publish
+    // state — its real identity is (item_id, field_id), enforced by the
+    // partial unique index idx_collection_item_values_unique. Without
+    // naturalKey, syncTableRows/cleanupOrphanedRows compare by `id`, which
+    // never matches across draft/published here, causing every revert to
+    // throw a duplicate-key error (same failure mode fixed in
+    // collectionItemValueRepository.ts's publishValues() on 2026-07-01, just
+    // hit from the opposite sync direction).
     {
       const stepStart = performance.now();
-      result.changes.collectionItemValues = await syncTableRows('collection_item_values', direction);
-      const valuesCleanup = await cleanupOrphanedRows('collection_item_values', direction,
-        preservedItemIds.size > 0
+      const collectionItemValuesNaturalKey = ['item_id', 'field_id'];
+      result.changes.collectionItemValues = await syncTableRows('collection_item_values', direction, {
+        naturalKey: collectionItemValuesNaturalKey,
+      });
+      const valuesCleanup = await cleanupOrphanedRows('collection_item_values', direction, {
+        naturalKey: collectionItemValuesNaturalKey,
+        ...(preservedItemIds.size > 0
           ? { excludeByColumn: { column: 'item_id', ids: preservedItemIds } }
-          : undefined
-      );
+          : {}),
+      });
       result.cleaned.collectionItemValues = valuesCleanup.deleted;
       stats.tables.collection_item_values.durationMs = Math.round(performance.now() - stepStart);
       stats.tables.collection_item_values.added = result.changes.collectionItemValues;
@@ -264,11 +277,17 @@ export async function POST(_request: NextRequest) {
     }
 
     // 13. Locales
+    // locales has its own non-partial unique constraint on
+    // (tenant_id, code, is_published), separate from the (id, is_published)
+    // PK — same defensive naturalKey reasoning as translations above.
     {
       const stepStart = performance.now();
+      const localesNaturalKey = ['tenant_id', 'code'];
       try {
-        result.changes.locales = await syncTableRows('locales', direction);
-        result.cleaned.locales = (await cleanupOrphanedRows('locales', direction)).deleted;
+        result.changes.locales = await syncTableRows('locales', direction, { naturalKey: localesNaturalKey });
+        result.cleaned.locales = (await cleanupOrphanedRows('locales', direction, {
+          naturalKey: localesNaturalKey,
+        })).deleted;
       } catch {
         // Non-fatal
       }
@@ -278,11 +297,22 @@ export async function POST(_request: NextRequest) {
     }
 
     // 14. Translations
+    //
+    // translations has its own non-partial unique constraint on
+    // (locale_id, source_type, source_id, content_key, is_published), separate
+    // from the (id, is_published) PK — same risk shape as collection_item_values
+    // above if `id` isn't reused across draft/published. Pass naturalKey
+    // defensively so a revert can't hit the same duplicate-key failure mode.
     {
       const stepStart = performance.now();
+      const translationsNaturalKey = ['locale_id', 'source_type', 'source_id', 'content_key'];
       try {
-        result.changes.translations = await syncTableRows('translations', direction);
-        result.cleaned.translations = (await cleanupOrphanedRows('translations', direction)).deleted;
+        result.changes.translations = await syncTableRows('translations', direction, {
+          naturalKey: translationsNaturalKey,
+        });
+        result.cleaned.translations = (await cleanupOrphanedRows('translations', direction, {
+          naturalKey: translationsNaturalKey,
+        })).deleted;
       } catch {
         // Non-fatal
       }
