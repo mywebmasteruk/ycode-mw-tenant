@@ -254,9 +254,21 @@ export async function proxy(request: NextRequest) {
 }
 
 /**
- * Public HTML: shared caches must not store (`private`) so publish is visible immediately;
- * per-tenant Netlify-Cache-Tag so purgeCache({ tags }) only drops that tenant. Skip `/a/*`
- * (immutable hashed assets — next.config sets long public cache).
+ * Public HTML: `private, max-age=0` meant NO shared cache (Netlify Edge, Cloudflare)
+ * ever stored a response — every single visit re-ran the full dynamic SSR render
+ * (measured: ~2s TTFB, worse on a cold function after a fresh publish-triggered
+ * deploy). That was true caution at the time this was written, but
+ * NETLIFY_AUTH_TOKEN + NETLIFY_SITE_ID are configured in production and
+ * `clearAllCache()`/`purgeNetlifyEdgeCache()` (lib/services/cacheService.ts)
+ * already purge by this exact per-tenant tag on every publish — confirmed
+ * working 2026-07-01. So shared caches CAN safely store this now: `s-maxage`
+ * lets Netlify's edge (and Cloudflare, if its zone cache rules permit it) serve
+ * repeat visits without hitting the origin at all, while `max-age=0` keeps
+ * browsers always revalidating so a site owner previewing their own just-published
+ * change never sees a browser-cached stale copy. The s-maxage window is a
+ * bounded safety net, not the primary invalidation mechanism — that's still the
+ * tag-based purge below. Skip `/a/*` (immutable hashed assets — next.config
+ * sets long public cache).
  */
 function attachTenantNetlifyCacheTag(
   response: NextResponse,
@@ -264,7 +276,7 @@ function attachTenantNetlifyCacheTag(
   pathname: string,
 ): void {
   if (!isPublicPage(pathname) || pathname.startsWith('/a/')) return;
-  response.headers.set('Cache-Control', 'private, max-age=0, must-revalidate');
+  response.headers.set('Cache-Control', 'public, max-age=0, s-maxage=60, must-revalidate');
   const tid = request.headers.get('x-tenant-id')?.trim();
   if (!tid) return;
   response.headers.set('Netlify-Cache-Tag', tenantAllPagesTag(tid));
