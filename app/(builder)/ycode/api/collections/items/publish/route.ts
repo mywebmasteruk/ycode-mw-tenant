@@ -3,6 +3,7 @@ import { publishValues } from '@/lib/repositories/collectionItemValueRepository'
 import { hardDeleteItem, getItemById } from '@/lib/repositories/collectionItemRepository';
 import { getCollectionById } from '@/lib/repositories/collectionRepository';
 import { cleanupDeletedCollections } from '@/lib/services/collectionService';
+import { invalidateForCollectionChange } from '@/lib/services/cacheService';
 import { noCache } from '@/lib/api-response';
 
 // Disable caching for this route
@@ -26,6 +27,13 @@ export async function POST(request: NextRequest) {
     
     let publishedCount = 0;
     const skipped: { itemId: string; reason: string }[] = [];
+    // Collections actually touched by a successful publish/delete below — the
+    // v1 API's equivalent routes invalidate cache after every item write
+    // (see app/(builder)/ycode/api/v1/collections/[collection_id]/items/[item_id]/route.ts),
+    // but this builder-facing route never did, so the public page kept
+    // serving stale content indefinitely after a normal "edit item, publish"
+    // in the CMS UI — even once the underlying write itself succeeded.
+    const changedCollectionIds = new Set<string>();
 
     // Publish each item
     for (const itemId of item_ids) {
@@ -41,6 +49,7 @@ export async function POST(request: NextRequest) {
         if (item.deleted_at) {
           // Hard delete the item and all its values (CASCADE)
           await hardDeleteItem(itemId);
+          changedCollectionIds.add(item.collection_id);
           publishedCount++;
         } else {
           // Block publishing if the collection hasn't been published
@@ -57,6 +66,7 @@ export async function POST(request: NextRequest) {
             skipped.push({ itemId, reason: 'no draft values found to publish' });
             continue;
           }
+          changedCollectionIds.add(item.collection_id);
           publishedCount++;
         }
       } catch (error) {
@@ -69,6 +79,21 @@ export async function POST(request: NextRequest) {
 
     // Clean up any soft-deleted collections
     await cleanupDeletedCollections();
+
+    // Invalidate cached routes for every page that renders one of the
+    // collections we touched. Non-fatal: a cache-invalidation failure
+    // shouldn't turn a successful publish into an error response — the
+    // route will still serve fresh content on its next natural revalidation.
+    for (const collectionId of changedCollectionIds) {
+      try {
+        const result = await invalidateForCollectionChange(collectionId);
+        if (result.invalidatedRoutes.length > 0) {
+          console.log(`[Cache] item publish: invalidated ${result.invalidatedRoutes.length} route(s) for collection ${collectionId}`);
+        }
+      } catch (cacheError) {
+        console.error(`[Cache] item publish: invalidation failed for collection ${collectionId}:`, cacheError);
+      }
+    }
 
     return noCache({
       data: { count: publishedCount, skipped }
