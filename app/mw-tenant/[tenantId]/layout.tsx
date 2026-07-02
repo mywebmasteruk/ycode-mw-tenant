@@ -16,7 +16,10 @@
  */
 import type { Metadata } from 'next';
 import SiteLayout, { generateMetadata as siteGenerateMetadata } from '../../(site)/layout';
-import { runWithEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import {
+  runWithEffectiveTenantId,
+  setRequestEffectiveTenantId,
+} from '@/lib/masjidweb/effective-tenant-id';
 
 interface Props {
   children: React.ReactNode;
@@ -25,10 +28,15 @@ interface Props {
 
 export default async function TenantSiteLayout({ children, params }: Props) {
   const { tenantId } = await params;
+  // Render-pass-wide pin: nested child components render outside the ALS
+  // scope below and would otherwise fall through to headers() — which
+  // hard-fails an ISR render (see effective-tenant-id.ts).
+  setRequestEffectiveTenantId(tenantId);
   return runWithEffectiveTenantId(tenantId, () => SiteLayout({ children }));
 }
 
 export async function generateMetadata({ params }: Pick<Props, 'params'>): Promise<Metadata> {
   const { tenantId } = await params;
+  setRequestEffectiveTenantId(tenantId);
   return runWithEffectiveTenantId(tenantId, () => siteGenerateMetadata());
 }

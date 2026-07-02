@@ -16,7 +16,10 @@
  */
 import type { Metadata } from 'next';
 import Home, { generateMetadata as homeGenerateMetadata } from '../../(site)/page';
-import { runWithEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import {
+  runWithEffectiveTenantId,
+  setRequestEffectiveTenantId,
+} from '@/lib/masjidweb/effective-tenant-id';
 
 export const dynamicParams = true;
 export const revalidate = false;
@@ -39,10 +42,12 @@ interface Props {
 
 export default async function TenantHome({ params }: Props) {
   const { tenantId } = await params;
+  setRequestEffectiveTenantId(tenantId);
   return runWithEffectiveTenantId(tenantId, () => Home());
 }
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { tenantId } = await params;
+  setRequestEffectiveTenantId(tenantId);
   return runWithEffectiveTenantId(tenantId, () => homeGenerateMetadata());
 }

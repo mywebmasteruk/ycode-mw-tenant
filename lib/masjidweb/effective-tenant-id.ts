@@ -19,6 +19,39 @@ export function runWithEffectiveTenantId<T>(
 }
 
 /**
+ * Render-pass-wide tenant override, complementing the AsyncLocalStorage one.
+ *
+ * ALS only covers the synchronous+awaited scope of the wrapped call. React
+ * renders NESTED server components in a page's returned JSX tree later,
+ * outside that scope — so a repository call made from a child component (e.g.
+ * fontRepository during PageRenderer's render) loses the ALS override, falls
+ * through to `headers()`, and on an ISR route hard-fails the render with
+ * "Page changed from static to dynamic at runtime, reason: headers"
+ * (observed live on the /mw-tenant canary, stack pointing at fontRepository).
+ *
+ * React's `cache()` store spans the ENTIRE request render pass — layouts,
+ * pages, generateMetadata, and deferred child components all share one store,
+ * and each request/generation gets a fresh one (so no cross-request or
+ * cross-tenant bleed, including during on-demand ISR generation). Entry
+ * points that know the tenant from a route param call
+ * `setRequestEffectiveTenantId()` once; every later resolveEffectiveTenantId()
+ * call anywhere in the same render finds it without touching `headers()`.
+ *
+ * Outside a React render (route handlers, scripts), `cache()` returns a fresh
+ * store per call, so the set value doesn't persist — those contexts keep
+ * using the ALS override / header resolution exactly as before.
+ */
+const requestTenantOverride = cache((): { id: string | null } => ({ id: null }));
+
+export function setRequestEffectiveTenantId(tenantId: string): void {
+  try {
+    requestTenantOverride().id = tenantId;
+  } catch {
+    /* outside a React cache scope — nothing to pin */
+  }
+}
+
+/**
  * Single entry point for “which tenant applies to this server work?”
  *
  * ## Resolution order
@@ -63,5 +96,11 @@ const readTenantIdFromHeadersAndEnv = cache(async (): Promise<string | null> => 
 export async function resolveEffectiveTenantId(): Promise<string | null> {
   const override = effectiveTenantOverride.getStore();
   if (override) return override;
+  try {
+    const fromRender = requestTenantOverride().id;
+    if (fromRender) return fromRender;
+  } catch {
+    /* outside a React cache scope */
+  }
   return readTenantIdFromHeadersAndEnv();
 }

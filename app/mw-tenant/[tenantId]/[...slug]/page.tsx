@@ -22,7 +22,10 @@
  */
 import type { Metadata } from 'next';
 import Page, { generateMetadata as slugGenerateMetadata } from '../../../(site)/[...slug]/page';
-import { runWithEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import {
+  runWithEffectiveTenantId,
+  setRequestEffectiveTenantId,
+} from '@/lib/masjidweb/effective-tenant-id';
 
 export const dynamicParams = true;
 export const revalidate = false;
@@ -47,6 +50,7 @@ interface Props {
 
 export default async function TenantSlugPage({ params }: Props) {
   const { tenantId, slug } = await params;
+  setRequestEffectiveTenantId(tenantId);
   return runWithEffectiveTenantId(tenantId, () =>
     Page({ params: Promise.resolve({ slug }) }),
   );
@@ -54,6 +58,7 @@ export default async function TenantSlugPage({ params }: Props) {
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { tenantId, slug } = await params;
+  setRequestEffectiveTenantId(tenantId);
   return runWithEffectiveTenantId(tenantId, () =>
     slugGenerateMetadata({ params: Promise.resolve({ slug }) }),
   );
