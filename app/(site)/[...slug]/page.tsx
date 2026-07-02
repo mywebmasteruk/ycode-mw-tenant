@@ -23,23 +23,28 @@ import { getSiteBaseUrl } from '@/lib/url-utils';
 import { matchRedirect } from '@/lib/redirect-utils';
 import type { Page, PageFolder, Translation, Redirect as RedirectType } from '@/types';
 
-// MASJIDWEB_SEAM: public-page-cache-enable — see docs/masjidweb-core-seams.md
-// Was force-dynamic (never cache) since 2026-03-31 — an emergency fix for
-// stale ISR HTML after publish, back when Netlify's edge purge wasn't
-// reliable. clearAllCache()/purgeNetlifyEdgeCache() (lib/services/cacheService.ts)
-// is now confirmed working with valid credentials, and every publish path
-// (site-wide + item-level) unconditionally calls it (2026-07-01).
-//
-// KNOWN LIMITATION — same root cause as app/(site)/page.tsx (see its comment
-// for the full explanation): getTenantCacheContext() below unconditionally
-// calls resolveEffectiveTenantId() -> headers() to resolve the tenant from
-// the Host header, which forces per-request dynamic rendering regardless of
-// this export. This route's generateStaticParams() below makes the build
-// report show it as prerendered ("SSG"), but that reflects build-time seed
-// params only — verified live that actual requests still show
-// fwd=miss/fwd=bypass, same as the homepage. Left in place pending a real
-// fix (see app/(site)/page.tsx for the options considered).
-export const revalidate = 60;
+// MASJIDWEB_SEAM: public-page-cache — see docs/masjidweb-core-seams.md
+// REVERTED to force-dynamic 2026-07-01 — same reasoning as app/(site)/page.tsx
+// (zero measured caching benefit, since headers()-based tenant resolution
+// forces dynamic rendering regardless of this export either way). This
+// route carries an EXTRA, more serious concern app/(site)/page.tsx doesn't
+// have: generateStaticParams() below resolves its tenant via
+// settingsTenantIdOrNull() (a build-time env var: TEMPLATE_TENANT_ID /
+// MASTER_TENANT_ID — currently masjidemo1), NOT the requesting tenant — so it
+// only ever enumerates ONE tenant's published slugs at build time. Combined
+// with dynamicParams=true and revalidate>0, this is exactly the shape of
+// setup where a static-generation build step can bake one tenant's page
+// content into an artifact keyed only by slug (no tenant dimension), which a
+// different tenant's visitor hitting the same slug path could then receive
+// instead of their own content or a 404 — a cross-tenant leak, not just a
+// caching inefficiency. Not fully verified either way (no non-homepage
+// published pages existed on any test tenant to reproduce it against), but
+// given force-dynamic provably eliminates this entire class of risk and the
+// revalidate approach had zero upside anyway, reverting is the correct call
+// under time pressure rather than shipping an unverified risk. See
+// masjidweb-public-page-caching-2026-07-01 memory for the full analysis.
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 export const dynamicParams = true;
 // MASJIDWEB_SEAM_END
 

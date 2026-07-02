@@ -22,29 +22,24 @@ import { getSiteBaseUrl } from '@/lib/url-utils';
 import type { Redirect as RedirectType } from '@/types';
 import type { Metadata } from 'next';
 
-// MASJIDWEB_SEAM: public-page-cache-enable — see docs/masjidweb-core-seams.md
-// Was force-dynamic (never cache) since 2026-03-31 — an emergency fix for
-// stale ISR HTML after publish, back when Netlify's edge purge wasn't
-// reliable. clearAllCache()/purgeNetlifyEdgeCache() (lib/services/cacheService.ts)
-// is now confirmed working with valid credentials, and every publish path
-// (site-wide + item-level) unconditionally calls it (2026-07-01).
-//
-// KNOWN LIMITATION (confirmed via production testing 2026-07-01): this
-// `revalidate` alone does NOT currently make the route cacheable at
-// Netlify's CDN layer. getTenantCacheContext() below unconditionally calls
-// resolveEffectiveTenantId() -> headers() (lib/masjidweb/effective-tenant-id.ts)
-// to resolve which tenant is being requested from the Host header — headers()
-// is a Next.js Dynamic API, and calling it unconditionally forces per-request
-// dynamic rendering regardless of this export, exactly as force-dynamic did.
-// Verified live: cache-status still reports fwd=miss/fwd=bypass after this
-// change. Left in place (harmless, matches intent) pending a real fix, which
-// needs one of: (a) Partial Prerendering / Suspense boundaries around the
-// headers()-dependent part so the rest of the shell can be cached, or (b) a
-// tenant-resolution path that doesn't require headers() (e.g. a route param
-// instead of a Host-header read), or (c) a caching layer outside Next.js's
-// own route cache entirely. Not attempted here — each is a bigger, riskier
-// change than this session's other core-file edits.
-export const revalidate = 60;
+// MASJIDWEB_SEAM: public-page-cache — see docs/masjidweb-core-seams.md
+// REVERTED to force-dynamic 2026-07-01: the revalidate=60 experiment
+// (2026-07-01, see git history) achieved ZERO measured caching benefit
+// (verified: cache-status stayed fwd=miss/fwd=bypass on every tenant, because
+// getTenantCacheContext() below unconditionally calls resolveEffectiveTenantId()
+// -> headers() to resolve tenant from the Host header, which forces dynamic
+// rendering regardless of this export) — while carrying a real, unverified
+// risk that this route's generateStaticParams()-equivalent build-time
+// behavior on [...slug]/page.tsx only enumerates ONE tenant (whichever is
+// configured as TEMPLATE_TENANT_ID/MASTER_TENANT_ID at build time), which
+// could bake that one tenant's content into a static file served regardless
+// of which tenant's subdomain a visitor actually requested. Given zero
+// confirmed benefit and a plausible cross-tenant risk, reverted rather than
+// investigated further under time pressure — see
+// masjidweb-public-page-caching-2026-07-01 memory for the full analysis and
+// the real options for a future, properly-verified fix.
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 // MASJIDWEB_SEAM_END
 
 const getTenantCacheContext = cache(async () => {
