@@ -16,6 +16,7 @@ import type {
 import { buildSlugPath } from './page-utils';
 import { buildPageHreflangAlternates } from './hreflang-utils';
 import type { HreflangAlternate } from './hreflang-utils';
+import { buildAbsolutePageUrl } from './url-utils';
 
 export interface SitemapUrl {
   loc: string;
@@ -49,7 +50,7 @@ function buildStaticPageUrls(
 
   // Build the default (base) URL
   const defaultPath = buildSlugPath(page, folders, 'page');
-  const defaultUrl = `${baseUrl}${defaultPath}`;
+  const defaultUrl = buildAbsolutePageUrl(baseUrl, defaultPath);
 
   const sitemapUrl: SitemapUrl = {
     loc: defaultUrl,
@@ -109,7 +110,7 @@ function buildDynamicPageUrls(
     if (!slugValue) continue;
 
     const itemPath = folderPath ? `${folderPath}/${slugValue}` : `/${slugValue}`;
-    const itemUrl = `${baseUrl}${itemPath}`;
+    const itemUrl = buildAbsolutePageUrl(baseUrl, itemPath);
 
     const sitemapUrl: SitemapUrl = {
       loc: itemUrl,
