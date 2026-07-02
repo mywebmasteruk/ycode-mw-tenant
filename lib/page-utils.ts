@@ -266,9 +266,12 @@ export function buildLocalizedSlugPath(
     }
   }
 
-  // Add locale code prefix
-  const pathWithoutLocale = '/' + slugParts.map(normalizeSlugSegment).filter(Boolean).join('/');
-  return `/${locale.code}${pathWithoutLocale}`;
+  // Add locale code prefix. Index pages have no slug segments, so the localized
+  // homepage is `/<locale>` (no trailing slash) to match its canonical URL.
+  const localizedSegments = slugParts.map(normalizeSlugSegment).filter(Boolean);
+  return localizedSegments.length > 0
+    ? `/${locale.code}/${localizedSegments.join('/')}`
+    : `/${locale.code}`;
 }
 
 /**
