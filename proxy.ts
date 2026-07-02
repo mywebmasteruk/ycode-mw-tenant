@@ -15,6 +15,11 @@ import {
 } from '@/lib/tenant';
 import { lookupTenant } from '@/lib/tenant/tenant-registry-lookup';
 import { tenantAllPagesTag } from '@/lib/masjidweb/tenant-cache-tags';
+import {
+  buildTenantRoutePath,
+  isInternalTenantRoutePath,
+  shouldRewriteToTenantRoute,
+} from '@/lib/masjidweb/route-tenant-resolution';
 
 const TENANT_DOMAIN_SUFFIX = process.env.TENANT_DOMAIN_SUFFIX || '';
 
@@ -100,6 +105,18 @@ export async function proxy(request: NextRequest) {
     response.headers.set('x-pathname', pathname);
     return response;
   }
+
+  // MASJIDWEB_SEAM: route-based-tenant-resolution guard — see
+  // lib/masjidweb/route-tenant-resolution.ts. Always on, independent of the
+  // feature flag. The internal `/mw-tenant/<tenantId>/…` routes read the tenant
+  // from the URL path, so they must only ever be reached via the internal
+  // rewrite below (NextResponse.rewrite does not re-run middleware). Any request
+  // arriving here with that prefix came directly from a client, which would let
+  // it select an arbitrary tenant's published content by id — 404 it.
+  if (isInternalTenantRoutePath(pathname)) {
+    return new NextResponse('Not found', { status: 404 });
+  }
+  // MASJIDWEB_SEAM_END
 
   // MASJIDWEB_SEAM: provisioning-publish — see docs/masjidweb-core-seams.md#provisioning
   const provisioningSecret = process.env.PROVISIONING_WEBHOOK_SECRET;
@@ -244,6 +261,27 @@ export async function proxy(request: NextRequest) {
     attachTenantNetlifyCacheTag(rewriteResponse, request, pathname);
     return rewriteResponse;
   }
+
+  // MASJIDWEB_SEAM: route-based-tenant-resolution rewrite — see
+  // lib/masjidweb/route-tenant-resolution.ts. Flag-gated (default off). When
+  // enabled for this host, rewrite the public page GET onto the internal
+  // param-based route so it resolves tenant from the path (not headers()) and
+  // becomes cacheable. Pagination requests already returned above and stay
+  // dynamic. We attach the tenant purge tag but deliberately do NOT call
+  // attachTenantNetlifyCacheTag (which would set `Cache-Control: private`,
+  // forbidding the shared caching this whole path exists to enable).
+  if (isPublicPage(pathname) && request.method === 'GET') {
+    const rewriteTid = request.headers.get('x-tenant-id')?.trim();
+    if (rewriteTid && shouldRewriteToTenantRoute(host)) {
+      const tenantRouteUrl = request.nextUrl.clone();
+      tenantRouteUrl.pathname = buildTenantRoutePath(rewriteTid, pathname);
+      const tenantRouteResponse = NextResponse.rewrite(tenantRouteUrl, { request });
+      tenantRouteResponse.headers.set('x-pathname', pathname);
+      tenantRouteResponse.headers.set('Netlify-Cache-Tag', tenantAllPagesTag(rewriteTid));
+      return tenantRouteResponse;
+    }
+  }
+  // MASJIDWEB_SEAM_END
 
   const response = NextResponse.next({ request });
 
