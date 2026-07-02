@@ -52,7 +52,18 @@ const getTenantCacheContext = cache(async () => {
   const effectiveTid = await resolveEffectiveTenantId();
   let publishedAtVersion = '_';
   try {
-    const publishedAt = await getSettingByKey('published_at');
+    // Cached (not a raw per-request read): clearAllCache() already calls
+    // revalidateTag(tenantAllPagesTag(tid)) on every publish, which reliably
+    // invalidates every unstable_cache() entry below tagged with the same tag
+    // — including this one, in the same publish action. So this value always
+    // updates in lockstep with the data it's meant to "version"; caching it
+    // removes a guaranteed extra DB round-trip on every single request
+    // without losing that guarantee.
+    const publishedAt = await unstable_cache(
+      () => getSettingByKey('published_at'),
+      ['data-for-published-at', effectiveTid ?? '_'],
+      { tags: [tenantAllPagesTag(effectiveTid)], revalidate: false },
+    )();
     if (typeof publishedAt === 'string' && publishedAt.trim()) {
       publishedAtVersion = publishedAt.trim();
     } else if (publishedAt != null) {
