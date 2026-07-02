@@ -15,11 +15,23 @@
  * of truth, no duplication.
  */
 import type { Metadata } from 'next';
-import Home, { generateMetadata as homeGenerateMetadata } from '../../page';
+import Home, { generateMetadata as homeGenerateMetadata } from '../../(site)/page';
 import { runWithEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 export const dynamicParams = true;
 export const revalidate = false;
+
+/**
+ * Deliberately returns [] — nothing is baked at build time (no build-time
+ * tenant can leak into a prebuilt artifact), but declaring this is what
+ * registers the route as ISR-capable: without generateStaticParams, Next
+ * classifies a dynamic-param route as fully dynamic and never caches it
+ * (verified via .next/prerender-manifest.json). Every (tenantId) path is
+ * generated on first request and cached until the publish-tag purge.
+ */
+export function generateStaticParams(): Array<{ tenantId: string }> {
+  return [];
+}
 
 interface Props {
   params: Promise<{ tenantId: string }>;

@@ -21,11 +21,25 @@
  * artifact.
  */
 import type { Metadata } from 'next';
-import Page, { generateMetadata as slugGenerateMetadata } from '../../../[...slug]/page';
+import Page, { generateMetadata as slugGenerateMetadata } from '../../../(site)/[...slug]/page';
 import { runWithEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 export const dynamicParams = true;
 export const revalidate = false;
+
+/**
+ * Deliberately returns [] — nothing is baked at build time (unlike the (site)
+ * [...slug] route's generateStaticParams, which enumerates a single build-time
+ * tenant — the cross-tenant-bake risk this tree exists to avoid), but
+ * declaring this is what registers the route as ISR-capable: without
+ * generateStaticParams, Next classifies a dynamic-param route as fully
+ * dynamic and never caches it (verified via .next/prerender-manifest.json).
+ * Every (tenantId, slug) path is generated on first request and cached until
+ * the publish-tag purge.
+ */
+export function generateStaticParams(): Array<{ tenantId: string; slug: string[] }> {
+  return [];
+}
 
 interface Props {
   params: Promise<{ tenantId: string; slug: string | string[] }>;
