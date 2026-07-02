@@ -403,12 +403,16 @@ export async function getDeletedDraftCount(tableName: string): Promise<number> {
   const client = await getSupabaseAdmin();
   if (!client) throw new Error('Supabase not configured');
 
-  const { data: deletedDrafts, error: draftError } = await client
+  const tenantId = await resolveEffectiveTenantId();
+
+  let draftQuery = client
     .from(tableName)
     .select('id')
     .eq('is_published', false)
     .not('deleted_at', 'is', null)
     .limit(SUPABASE_QUERY_LIMIT);
+  draftQuery = applyTenantEq(draftQuery, tenantId);
+  const { data: deletedDrafts, error: draftError } = await draftQuery;
 
   if (draftError) {
     throw new Error(`Failed to fetch deleted drafts from ${tableName}: ${draftError.message}`);
@@ -416,11 +420,13 @@ export async function getDeletedDraftCount(tableName: string): Promise<number> {
 
   if (!deletedDrafts || deletedDrafts.length === 0) return 0;
 
-  const { count, error: pubError } = await client
+  let pubQuery = client
     .from(tableName)
     .select('id', { count: 'exact', head: true })
     .in('id', deletedDrafts.map(d => d.id))
     .eq('is_published', true);
+  pubQuery = applyTenantEq(pubQuery, tenantId);
+  const { count, error: pubError } = await pubQuery;
 
   if (pubError) {
     throw new Error(`Failed to count published rows pending deletion in ${tableName}: ${pubError.message}`);

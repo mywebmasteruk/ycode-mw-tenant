@@ -752,7 +752,15 @@ async function publishItemValuesBatch(
       getValueRowsForItems(itemIds, true),
     ]);
 
-  const publishedById = new Map(publishedValues.map(v => [v.id, v.value]));
+  // Same bug class fixed in publishValues() (collectionItemValueRepository.ts): a
+  // draft row's id never matches its published counterpart's id (independently
+  // generated per row), so keying by id alone can never find the existing
+  // published row to update — the upsert below falls through to a plain INSERT
+  // that collides with idx_collection_item_values_unique (item_id, field_id,
+  // is_published) WHERE deleted_at IS NULL whenever the item already has a
+  // published value for that field. Key by (item_id, field_id) instead to find
+  // the real existing row id to reuse.
+  const publishedByKey = new Map(publishedValues.map(v => [`${v.item_id}:${v.field_id}`, v]));
 
   const valuesToUpsert: Array<{
     id: string;
@@ -766,12 +774,13 @@ async function publishItemValuesBatch(
   }> = [];
 
   for (const value of draftValues) {
-    if (publishedById.has(value.id) && publishedById.get(value.id) === value.value) {
+    const existingPublished = publishedByKey.get(`${value.item_id}:${value.field_id}`);
+    if (existingPublished && existingPublished.value === value.value) {
       continue;
     }
 
     valuesToUpsert.push({
-      id: value.id,
+      id: existingPublished?.id ?? value.id,
       item_id: value.item_id,
       field_id: value.field_id,
       value: value.value,
