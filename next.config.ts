@@ -79,8 +79,32 @@ const nextConfig: NextConfig = {
           },
         ],
       },
+      // MASJIDWEB_SEAM: route-based-tenant-resolution CDN caching — see
+      // lib/masjidweb/route-tenant-resolution.ts. The internal /mw-tenant/*
+      // routes are genuine ISR (tenant is in the path, so it's in the cache
+      // key) and are invalidated by the tenant-scoped Netlify purge-by-tag on
+      // every publish, so shared caches may store them: Netlify-CDN-Cache-Control
+      // lets the Durable/Edge tiers serve repeat requests WITHOUT invoking the
+      // server function at all (the function-in-the-loop cold start is why the
+      // in-function ISR cache alone didn't feel faster). Browsers still always
+      // revalidate (max-age=0) so a site owner never sees their own stale copy.
+      // The catch-all `private` rule below excludes these paths.
       {
-        source: '/:path((?!ycode|_next|a/).*)*',
+        source: '/mw-tenant/:path*',
+        headers: [
+          {
+            key: 'Cache-Control',
+            value: 'public, max-age=0, must-revalidate',
+          },
+          {
+            key: 'Netlify-CDN-Cache-Control',
+            value: 'public, s-maxage=31536000, durable',
+          },
+        ],
+      },
+      // MASJIDWEB_SEAM_END
+      {
+        source: '/:path((?!ycode|_next|a/|mw-tenant/).*)*',
         headers: [
           {
             key: 'Cache-Control',
@@ -88,6 +112,7 @@ const nextConfig: NextConfig = {
             // a publish + revalidateTag is visible on the next load — no edge TTL / "stale" window.
             // Tenant-scoped Netlify-Cache-Tag + purge still helps internal invalidation when
             // NETLIFY_PURGE_API_TOKEN is set. `/a/*` assets stay `public, immutable` (rule above).
+            // /mw-tenant/* (flag-gated cacheable tenant routes) is carved out above.
             value: 'private, max-age=0, must-revalidate',
           },
           {
