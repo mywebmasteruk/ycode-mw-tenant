@@ -389,6 +389,42 @@ async function cleanup(t: Tenant, created: Record<string, string>) {
   if (created.layerStyleId) await del(`/ycode/api/layer-styles/${created.layerStyleId}`, 'layer style');
   if (created.colorVarId) await del(`/ycode/api/color-variables/${created.colorVarId}`, 'color variable');
   if (created.localeId) await del(`/ycode/api/locales/${created.localeId}`, 'locale');
+
+  // Self-heal: sweep canary locales leaked by EARLIER crashed runs, not just
+  // this run's. A leaked draft locale becomes publicly visible the next time
+  // anything runs a real full publish — it lands in the live site's locale
+  // switcher and adds a /t<digits>/ URL prefix for every page (2026-07-03:
+  // t707580 appeared on high900's live homepage exactly this way after a
+  // 07-02 run died mid-way on rate limits, before reaching cleanup). If a
+  // leftover is found, follow with a full publish so an already-published row
+  // is removed from the live site too — guarded on the publish preview being
+  // otherwise empty, so the propagation publish can never sweep unrelated
+  // pending drafts live. (Note: this script's own publishFlow() POSTs an empty
+  // body, which the publish route treats as "publish nothing" — it exercises
+  // auth/tenant-scoping only and cannot propagate anything, hence the explicit
+  // publishAll here.)
+  try {
+    const list = await api(t, 'GET', '/ycode/api/locales');
+    const leftovers = ((list.json?.data ?? []) as Array<{ id: string; code?: string; label?: string; is_default?: boolean }>)
+      .filter((l) => l.id !== created.localeId && !l.is_default && /^t\d{6}$/.test(l.code ?? '') && l.label === 'Canary Locale');
+    for (const leftover of leftovers) {
+      await del(`/ycode/api/locales/${leftover.id}`, `leftover canary locale ${leftover.code} (prior crashed run)`);
+    }
+    if (leftovers.length > 0) {
+      const preview = await api(t, 'GET', '/ycode/api/publish/preview');
+      const pendingTotal = Number(preview.json?.data?.total ?? NaN);
+      if (pendingTotal === 0) {
+        const pub = await api(t, 'POST', '/ycode/api/publish', { publishAll: true });
+        record(area, 'propagate leftover-locale deletion (full publish)', pub.status === 200, pub.status);
+      } else {
+        record(area, 'propagate leftover-locale deletion (full publish)', false, undefined,
+          `skipped: ${pendingTotal || 'unknown'} unrelated pending draft(s) — publish manually to remove the locale from the live site`);
+      }
+    }
+  } catch (e) {
+    record(area, 'sweep leftover canary locales', false, undefined, e instanceof Error ? e.message : String(e));
+  }
+
   if (created.assetId) await del(`/ycode/api/assets/${created.assetId}`, 'asset');
   if (created.assetFolderId) await del(`/ycode/api/asset-folders/${created.assetFolderId}`, 'asset folder');
   if (created.globalId) await del(`/ycode/api/globals/${created.globalId}`, 'global variable');
