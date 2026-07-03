@@ -262,7 +262,11 @@ async function contentCrud(t: Tenant, created: Record<string, string>) {
   }
   recordApi(area, 'list assets', await api(t, 'GET', '/ycode/api/assets'), [200]);
 
-  recordApi(area, 'update setting', await api(t, 'PUT', '/ycode/api/settings/site_name', { value: 'Canary Site Name' }), [200]);
+  // Probe settings-write isolation on a DEDICATED key, never a real one:
+  // this originally wrote site_name='Canary Site Name' with no restore, which
+  // left BOTH canary tenants' public site names polluted until found on
+  // 2026-07-03. The write path/scoping exercised is identical for any key.
+  recordApi(area, 'update setting', await api(t, 'PUT', '/ycode/api/settings/canary_probe', { value: `canary-${Date.now()}` }), [200]);
 
   {
     const c = await api(t, 'POST', '/ycode/api/globals', { name: 'canaryGlobal', type: 'text', value: 'hello' });
@@ -390,39 +394,65 @@ async function cleanup(t: Tenant, created: Record<string, string>) {
   if (created.colorVarId) await del(`/ycode/api/color-variables/${created.colorVarId}`, 'color variable');
   if (created.localeId) await del(`/ycode/api/locales/${created.localeId}`, 'locale');
 
-  // Self-heal: sweep canary locales leaked by EARLIER crashed runs, not just
-  // this run's. A leaked draft locale becomes publicly visible the next time
-  // anything runs a real full publish — it lands in the live site's locale
-  // switcher and adds a /t<digits>/ URL prefix for every page (2026-07-03:
-  // t707580 appeared on high900's live homepage exactly this way after a
-  // 07-02 run died mid-way on rate limits, before reaching cleanup). If a
-  // leftover is found, follow with a full publish so an already-published row
-  // is removed from the live site too — guarded on the publish preview being
-  // otherwise empty, so the propagation publish can never sweep unrelated
-  // pending drafts live. (Note: this script's own publishFlow() POSTs an empty
-  // body, which the publish route treats as "publish nothing" — it exercises
-  // auth/tenant-scoping only and cannot propagate anything, hence the explicit
-  // publishAll here.)
+  // Self-heal: sweep debris leaked by EARLIER crashed runs — every resource
+  // type this script creates, not just this run's ids. Leaked drafts become
+  // publicly visible the next time anything runs a real full publish (2026-07-03:
+  // a 07-02 run died on rate limits before cleanup; the next day's real publish
+  // put "Canary Locale" in high900's live locale switcher with a /t<digits>/
+  // URL prefix on every page, plus a published Canary Component/Collection/
+  // style/global/color/asset — and site_name had been left as 'Canary Site
+  // Name' on BOTH canary tenants). If anything is swept, follow with a full
+  // publish so already-published leftovers are removed from the live site too —
+  // guarded on the publish preview being otherwise empty, so the propagation
+  // publish can never sweep unrelated pending drafts live. (This script's own
+  // publishFlow() POSTs an empty body, which the publish route treats as
+  // "publish nothing" — it exercises auth/tenant-scoping only and cannot
+  // propagate anything, hence the explicit publishAll here.)
+  const isCanaryName = (n: unknown): boolean =>
+    typeof n === 'string' && (/^Canary /.test(n) || /^canary(Color|Global|\.svg)$/.test(n));
+  const sweepTypes: Array<{ list: string; delPath: (id: string) => string; nameOf: (r: any) => unknown; label: string }> = [
+    { label: 'page', list: '/ycode/api/pages', delPath: (id) => `/ycode/api/pages/${id}`, nameOf: (r) => r.name },
+    { label: 'page folder', list: '/ycode/api/folders', delPath: (id) => `/ycode/api/folders/${id}`, nameOf: (r) => r.name },
+    { label: 'collection', list: '/ycode/api/collections', delPath: (id) => `/ycode/api/collections/${id}`, nameOf: (r) => r.name },
+    { label: 'component', list: '/ycode/api/components', delPath: (id) => `/ycode/api/components/${id}`, nameOf: (r) => r.name },
+    { label: 'layer style', list: '/ycode/api/layer-styles', delPath: (id) => `/ycode/api/layer-styles/${id}`, nameOf: (r) => r.name },
+    { label: 'color variable', list: '/ycode/api/color-variables', delPath: (id) => `/ycode/api/color-variables/${id}`, nameOf: (r) => r.name },
+    { label: 'locale', list: '/ycode/api/locales', delPath: (id) => `/ycode/api/locales/${id}`, nameOf: (r) => r.label },
+    { label: 'asset', list: '/ycode/api/assets', delPath: (id) => `/ycode/api/assets/${id}`, nameOf: (r) => r.filename ?? r.name },
+    { label: 'asset folder', list: '/ycode/api/asset-folders', delPath: (id) => `/ycode/api/asset-folders/${id}`, nameOf: (r) => r.name },
+    { label: 'global variable', list: '/ycode/api/globals', delPath: (id) => `/ycode/api/globals/${id}`, nameOf: (r) => r.name },
+    { label: 'api key', list: '/ycode/api/api-keys', delPath: (id) => `/ycode/api/api-keys/${id}`, nameOf: (r) => r.name },
+    { label: 'mcp token', list: '/ycode/api/mcp-tokens', delPath: (id) => `/ycode/api/mcp-tokens/${id}`, nameOf: (r) => r.name },
+    { label: 'webhook', list: '/ycode/api/webhooks', delPath: (id) => `/ycode/api/webhooks/${id}`, nameOf: (r) => r.name },
+  ];
   try {
-    const list = await api(t, 'GET', '/ycode/api/locales');
-    const leftovers = ((list.json?.data ?? []) as Array<{ id: string; code?: string; label?: string; is_default?: boolean }>)
-      .filter((l) => l.id !== created.localeId && !l.is_default && /^t\d{6}$/.test(l.code ?? '') && l.label === 'Canary Locale');
-    for (const leftover of leftovers) {
-      await del(`/ycode/api/locales/${leftover.id}`, `leftover canary locale ${leftover.code} (prior crashed run)`);
+    let sweptCount = 0;
+    for (const type of sweepTypes) {
+      const list = await api(t, 'GET', type.list);
+      if (list.status !== 200) continue;
+      const leftovers = ((list.json?.data ?? []) as Array<{ id: string }>).filter(
+        (r) => isCanaryName(type.nameOf(r)) && !Object.values(created).includes(r.id),
+      );
+      for (const leftover of leftovers) {
+        await del(type.delPath(leftover.id), `leftover canary ${type.label} '${type.nameOf(leftover)}' (prior crashed run)`);
+        sweptCount++;
+      }
     }
-    if (leftovers.length > 0) {
+    if (sweptCount > 0) {
       const preview = await api(t, 'GET', '/ycode/api/publish/preview');
       const pendingTotal = Number(preview.json?.data?.total ?? NaN);
-      if (pendingTotal === 0) {
+      // The preview counts the deletions themselves as pending changes, so
+      // "otherwise empty" here means nothing pending beyond what we just swept.
+      if (Number.isFinite(pendingTotal) && pendingTotal <= sweptCount) {
         const pub = await api(t, 'POST', '/ycode/api/publish', { publishAll: true });
-        record(area, 'propagate leftover-locale deletion (full publish)', pub.status === 200, pub.status);
+        record(area, `propagate ${sweptCount} leftover deletion(s) (full publish)`, pub.status === 200, pub.status);
       } else {
-        record(area, 'propagate leftover-locale deletion (full publish)', false, undefined,
-          `skipped: ${pendingTotal || 'unknown'} unrelated pending draft(s) — publish manually to remove the locale from the live site`);
+        record(area, `propagate ${sweptCount} leftover deletion(s) (full publish)`, false, undefined,
+          `skipped: preview shows ${pendingTotal} pending change(s), more than the ${sweptCount} swept — publish manually`);
       }
     }
   } catch (e) {
-    record(area, 'sweep leftover canary locales', false, undefined, e instanceof Error ? e.message : String(e));
+    record(area, 'sweep leftover canary debris', false, undefined, e instanceof Error ? e.message : String(e));
   }
 
   if (created.assetId) await del(`/ycode/api/assets/${created.assetId}`, 'asset');
