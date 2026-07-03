@@ -28,21 +28,35 @@ import { buildGlobalsMetaMap, buildGlobalsValueMap } from '@/lib/collection-fiel
 import { buildLocalizedPageUrls, type LocalizedDynamicSlug } from '@/lib/page-utils';
 import { getTranslatableKey } from '@/lib/locale-runtime';
 import { getSlugTranslationsByLocale } from '@/lib/repositories/translationRepository';
+import { resolveEffectiveTenantId, runWithEffectiveTenantIdIfPresent } from '@/lib/masjidweb/effective-tenant-id';
+import { tenantAllPagesTag } from '@/lib/masjidweb/tenant-cache-tags';
 import type { Layer, BackgroundsDesign, Component, Page, CollectionItemWithValues, CollectionField, Locale, PageFolder, PasswordProtectionContext, Translation } from '@/types';
 
 interface PageLinkRef { collection_item_id: string; page_id: string }
 
-const getCachedPublishedPages = unstable_cache(
-  async () => getAllPages({ is_published: true }),
-  ['page-renderer-published-pages'],
-  { tags: ['all-pages'], revalidate: false }
-);
+// MASJIDWEB_SEAM: tenant-scoped page/folder cache — these were module-level
+// unstable_cache wrappers with a FIXED key and the raw 'all-pages' tag. In a
+// multi-tenant deployment that meant (a) ONE shared cache entry for every
+// tenant — and since unstable_cache detaches tenant context, its content was
+// always the env-default (template) tenant's pages/folders, embedded into
+// every tenant's page payload (confirmed live: template "Posts" folder + 2
+// template pages in other tenants' HTML); and (b) the raw 'all-pages' tag is
+// never revalidated by the tenant-scoped publish purge, so the entry was also
+// permanently stale. Now keyed + tagged per tenant, with the tenant context
+// re-established inside the callback. See
+// lib/masjidweb/effective-tenant-id.ts runWithEffectiveTenantIdIfPresent.
+const getCachedPublishedPages = (tenantId: string | null) => unstable_cache(
+  async () => runWithEffectiveTenantIdIfPresent(tenantId, () => getAllPages({ is_published: true })),
+  ['page-renderer-published-pages', tenantId ?? '_'],
+  { tags: [tenantAllPagesTag(tenantId)], revalidate: false }
+)();
 
-const getCachedPublishedFolders = unstable_cache(
-  async () => getAllPageFolders({ is_published: true }),
-  ['page-renderer-published-folders'],
-  { tags: ['all-pages'], revalidate: false }
-);
+const getCachedPublishedFolders = (tenantId: string | null) => unstable_cache(
+  async () => runWithEffectiveTenantIdIfPresent(tenantId, () => getAllPageFolders({ is_published: true })),
+  ['page-renderer-published-folders', tenantId ?? '_'],
+  { tags: [tenantAllPagesTag(tenantId)], revalidate: false }
+)();
+// MASJIDWEB_SEAM_END
 
 /** Recursively collect all page link refs ({collection_item_id, page_id}) from a Tiptap JSON node.
  * Also descends into pre-resolved layers stored on embedded richTextComponent nodes. */
@@ -435,9 +449,13 @@ export default async function PageRenderer({
       ? getItemsWithValuesByIds(Array.from(referencedItemIds), usePublishedData)
       : Promise.resolve({} as Record<string, import('@/types').CollectionItemWithValues>);
 
+    // MASJIDWEB_SEAM: tenant resolved OUTSIDE the cache (it becomes part of
+    // the cache key) — see the getCachedPublishedPages seam comment above.
+    const rendererTenantId = usePublishedData ? await resolveEffectiveTenantId() : null;
+    // MASJIDWEB_SEAM_END
     [[pages, folders]] = await Promise.all([
       usePublishedData
-        ? Promise.all([getCachedPublishedPages(), getCachedPublishedFolders()])
+        ? Promise.all([getCachedPublishedPages(rendererTenantId), getCachedPublishedFolders(rendererTenantId)])
         : Promise.all([
           getAllPages({ is_published: false }),
           getAllPageFolders({ is_published: false }),

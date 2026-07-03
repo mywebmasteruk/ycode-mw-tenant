@@ -19,6 +19,30 @@ export function runWithEffectiveTenantId<T>(
 }
 
 /**
+ * Null-tolerant variant for `unstable_cache` callbacks.
+ *
+ * `unstable_cache` detaches BOTH the AsyncLocalStorage override established
+ * outside the callback AND the React cache() render-pass store — and inside
+ * the callback `headers()` is unavailable too, so resolveEffectiveTenantId()
+ * silently falls through to the env fallback (TENANT_ID/MASTER_TENANT_ID/
+ * TEMPLATE_TENANT_ID = the template tenant in production). Confirmed live
+ * 2026-07-02: template-tenant folder/page records were embedded in every
+ * other tenant's page payload via the cached folder/page-list fetches.
+ *
+ * Fix pattern: resolve the tenant OUTSIDE the cache (it is already part of
+ * the cache key), then start a FRESH ALS scope INSIDE the callback with this
+ * helper — ALS established inside the callback propagates normally through
+ * the whole awaited fetch subtree. Null-tolerant so no-tenant contexts (e.g.
+ * single-tenant/self-hosted with env fallback) keep today's exact behavior.
+ */
+export function runWithEffectiveTenantIdIfPresent<T>(
+  tenantId: string | null | undefined,
+  fn: () => T | Promise<T>,
+): T | Promise<T> {
+  return tenantId ? effectiveTenantOverride.run(tenantId, fn) : fn();
+}
+
+/**
  * Render-pass-wide tenant override, complementing the AsyncLocalStorage one.
  *
  * ALS only covers the synchronous+awaited scope of the wrapped call. React

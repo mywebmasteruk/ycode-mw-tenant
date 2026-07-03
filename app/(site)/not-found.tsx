@@ -4,20 +4,30 @@ import { fetchErrorPage, slimPageData } from '@/lib/page-fetcher';
 import { fetchGlobalPageSettings } from '@/lib/generate-page-metadata';
 import { getSettingByKey } from '@/lib/repositories/settingsRepository';
 import { tenantStore } from '@/lib/supabase-server';
+import { resolveEffectiveTenantId, runWithEffectiveTenantIdIfPresent } from '@/lib/masjidweb/effective-tenant-id';
+import { tenantAllPagesTag } from '@/lib/masjidweb/tenant-cache-tags';
 import PageRenderer from '@/components/PageRenderer';
 import YcodeBadge from '@/components/YcodeBadge';
 
 /** Cached lookup of the user's custom 404 page, invalidated on publish. */
+// MASJIDWEB_SEAM: tenant-scoped 404 cache — the key was a FIXED ['error-404']
+// with the raw 'all-pages' tag: one shared cache entry for every tenant, so
+// the first tenant to 404 baked THEIR custom 404 page into the entry served
+// to all other tenants' 404s (and the raw tag is never revalidated by the
+// tenant-scoped publish purge, so it also never invalidated). Same bug class
+// as PageRenderer's page/folder caches — key + tag now carry the tenant and
+// the callback re-establishes tenant context.
 function fetchCachedCustom404(tenantId?: string) {
   return unstable_cache(
-    async () => {
+    async () => runWithEffectiveTenantIdIfPresent(tenantId, async () => {
       const data = await fetchErrorPage(404, true, tenantId);
       return data ? slimPageData(data) : null;
-    },
-    ['error-404'],
-    { tags: ['all-pages'], revalidate: false }
+    }),
+    ['error-404', tenantId ?? '_'],
+    { tags: [tenantAllPagesTag(tenantId ?? null)], revalidate: false }
   )();
 }
+// MASJIDWEB_SEAM_END
 
 /**
  * 404 boundary for public pages. Renders the user's custom 404 page when one
@@ -25,7 +35,11 @@ function fetchCachedCustom404(tenantId?: string) {
  * 404 status, which avoids soft-404 SEO penalties from search engines.
  */
 export default async function NotFound() {
-  const tenantId = tenantStore.getStore();
+  // MASJIDWEB_SEAM: not-found boundaries receive no params — resolve tenant
+  // from the explicit webhook-style store first, then the standard resolver
+  // (headers on the header path, the render-pass pin on the param-based path).
+  const tenantId = tenantStore.getStore() ?? (await resolveEffectiveTenantId()) ?? undefined;
+  // MASJIDWEB_SEAM_END
 
   const errorPageData = await fetchCachedCustom404(tenantId).catch(() => null);
 

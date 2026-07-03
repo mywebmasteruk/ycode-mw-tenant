@@ -12,7 +12,7 @@ import PageRenderer from '@/components/PageRenderer';
 import PasswordForm from '@/components/PasswordForm';
 import { getSettingByKey } from '@/lib/repositories/settingsRepository';
 import { parseAuthCookie, getPasswordProtection, fetchFoldersForAuth } from '@/lib/page-auth';
-import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
+import { resolveEffectiveTenantId, runWithEffectiveTenantIdIfPresent } from '@/lib/masjidweb/effective-tenant-id';
 import { settingsTenantIdOrNull } from '@/lib/masjidweb/settings-tenant-id';
 import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
 import {
@@ -231,26 +231,31 @@ async function fetchPublishedPageWithLayers(slugPath: string) {
   const opts = { tags, revalidate: false as const };
 
   try {
+    // MASJIDWEB_SEAM: unstable_cache detaches tenant context — every callback
+    // re-establishes it from the tenant already resolved into the cache key,
+    // else nested fetches fall through to the env-default (template) tenant.
+    // See runWithEffectiveTenantIdIfPresent in lib/masjidweb/effective-tenant-id.ts.
     const [core, layers] = await Promise.all([
       unstable_cache(
-        async () => {
+        async () => runWithEffectiveTenantIdIfPresent(effectiveTid, async () => {
           const data = await fetchPageByPath(slugPath, true);
           if (!data) return null;
           return splitPageData(data).core;
-        },
+        }),
         [`core-/${slugPath}`, keySuffix],
         opts
       )(),
       unstable_cache(
-        async () => {
+        async () => runWithEffectiveTenantIdIfPresent(effectiveTid, async () => {
           const data = await fetchPageByPath(slugPath, true);
           if (!data) return null;
           return splitPageData(data).layers;
-        },
+        }),
         [`layers-/${slugPath}`, keySuffix],
         opts
       )(),
     ]);
+    // MASJIDWEB_SEAM_END
 
     if (!core) return null;
     return reassemblePageData(core, layers || []);
@@ -266,7 +271,7 @@ async function fetchPublishedPageWithLayers(slugPath: string) {
 async function fetchPublishedPageForMetadata(slugPath: string) {
   const { effectiveTid, keySuffix } = await getTenantCacheContext();
   return unstable_cache(
-    async () => fetchPageByPathForMetadata(slugPath, true),
+    async () => runWithEffectiveTenantIdIfPresent(effectiveTid, () => fetchPageByPathForMetadata(slugPath, true)),
     [`metadata-/${slugPath}`, keySuffix],
     {
       tags: [
@@ -282,7 +287,7 @@ async function fetchCachedRedirects(): Promise<RedirectType[] | null> {
   const { effectiveTid, keySuffix } = await getTenantCacheContext();
   try {
     return await unstable_cache(
-      async () => getSettingByKey('redirects') as Promise<RedirectType[] | null>,
+      async () => runWithEffectiveTenantIdIfPresent(effectiveTid, () => getSettingByKey('redirects') as Promise<RedirectType[] | null>),
       ['data-for-redirects', keySuffix],
       { tags: [tenantAllPagesTag(effectiveTid)], revalidate: false }
     )();
@@ -295,7 +300,7 @@ async function fetchCachedGlobalSettings() {
   const { effectiveTid, keySuffix } = await getTenantCacheContext();
   try {
     return await unstable_cache(
-      async () => fetchGlobalPageSettings(),
+      async () => runWithEffectiveTenantIdIfPresent(effectiveTid, () => fetchGlobalPageSettings()),
       ['data-for-global-settings', keySuffix],
       { tags: [tenantAllPagesTag(effectiveTid)], revalidate: false }
     )();
@@ -319,7 +324,7 @@ async function fetchCachedFoldersForAuth() {
   const { effectiveTid, keySuffix } = await getTenantCacheContext();
   try {
     return await unstable_cache(
-      async () => fetchFoldersForAuth(true),
+      async () => runWithEffectiveTenantIdIfPresent(effectiveTid, () => fetchFoldersForAuth(true)),
       ['data-for-auth-folders', keySuffix],
       { tags: [tenantAllPagesTag(effectiveTid)], revalidate: false }
     )();
@@ -332,10 +337,10 @@ async function fetchCachedErrorPage(errorCode: 401 | 404) {
   const { effectiveTid, keySuffix } = await getTenantCacheContext();
   try {
     return await unstable_cache(
-      async () => {
+      async () => runWithEffectiveTenantIdIfPresent(effectiveTid, async () => {
         const data = await fetchErrorPage(errorCode, true);
         return data ? slimPageData(data) : null;
-      },
+      }),
       [`error-${errorCode}`, keySuffix],
       { tags: [tenantAllPagesTag(effectiveTid)], revalidate: false }
     )();
@@ -507,7 +512,7 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
 
   const { effectiveTid, keySuffix } = await getTenantCacheContext();
   const { meta, baseUrl } = await unstable_cache(
-    async () => ({
+    async () => runWithEffectiveTenantIdIfPresent(effectiveTid, async () => ({
       meta: await generatePageMetadata(data.page, {
         fallbackTitle: slugPath.charAt(0).toUpperCase() + slugPath.slice(1),
         collectionItem: data.collectionItem,
@@ -515,7 +520,7 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
         globalSeoSettings: globalSettings,
       }),
       baseUrl: getSiteBaseUrl({ globalCanonicalUrl: globalSettings.globalCanonicalUrl }),
-    }),
+    })),
     [`data-for-route-/${slugPath}-meta`, keySuffix],
     {
       tags: [
