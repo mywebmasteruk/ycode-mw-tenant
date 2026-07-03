@@ -93,8 +93,17 @@ const nextConfig: NextConfig = {
         source: '/mw-tenant/:path*',
         headers: [
           {
+            // max-age=0 keeps BROWSERS always revalidating (a site owner never
+            // sees their own stale copy); s-maxage lets SHARED caches (Netlify's
+            // per-node Edge cache — which sits in front of the middleware, so an
+            // edge hit skips the server entirely) store until the publish
+            // purge-by-tag invalidates. Verified live that the Netlify-specific
+            // CDN header alone did not reach the edge tier on the
+            // middleware-rewritten path (stored with TTL 0), so the TTL lives in
+            // the standard directive; the Netlify header is kept for the durable
+            // tier where applicable.
             key: 'Cache-Control',
-            value: 'public, max-age=0, must-revalidate',
+            value: 'public, max-age=0, s-maxage=31536000, must-revalidate',
           },
           {
             key: 'Netlify-CDN-Cache-Control',
