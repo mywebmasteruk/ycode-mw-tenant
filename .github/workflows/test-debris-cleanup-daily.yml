@@ -1,0 +1,45 @@
+# Daily test-debris cleanup — calls the admin dashboard's cleanup endpoint,
+# which runs the service-role-locked mw_cleanup_run() SQL function (see
+# masjidweb-backend supabase/migrations/20260703090000_test_debris_cleanup.sql).
+#
+# The job is MANAGED FROM THE ADMIN DASHBOARD (Maintenance → Test-debris
+# cleanup): while the config there is disabled, this run is a green no-op
+# ("skipped: disabled"). Runs 30 minutes after the 08:00 UTC live isolation
+# canary so each day's canary soft-deletes are purged the same morning.
+#
+# Lives in this repo (not masjidweb-backend) because the dashboard-URL var and
+# the shared CORE_UPDATE_NOTIFY_SECRET already exist here for the isolation
+# canary's log step — same machine-auth pattern, no new secrets.
+name: Test-debris cleanup (daily)
+
+on:
+  schedule:
+    - cron: '30 8 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run cleanup via admin dashboard endpoint
+        env:
+          LOG_URL: ${{ vars.ADMIN_DASHBOARD_ISOLATION_LOG_URL }}
+          NOTIFY_SECRET: ${{ secrets.CORE_UPDATE_NOTIFY_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "$LOG_URL" ] || [ -z "$NOTIFY_SECRET" ]; then
+            echo "Missing ADMIN_DASHBOARD_ISOLATION_LOG_URL var or CORE_UPDATE_NOTIFY_SECRET secret" >&2
+            exit 1
+          fi
+          # Same origin as the isolation-log endpoint; swap in the cleanup path.
+          CLEANUP_URL="${LOG_URL%/api/*}/api/test-debris-cleanup"
+          echo "POST $CLEANUP_URL"
+          RESPONSE=$(curl -fsS -X POST "$CLEANUP_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-Core-Update-Notify-Secret: $NOTIFY_SECRET")
+          echo "$RESPONSE"
+          echo "$RESPONSE" | jq -e '.ok == true' > /dev/null
