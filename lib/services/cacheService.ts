@@ -851,6 +851,26 @@ function sanitiseWarmRoutes(routes: unknown): string[] {
   );
 }
 
+// MASJIDWEB_SEAM: netlify-cache-warming
+/**
+ * Whether we're executing inside Netlify's function runtime. `NETLIFY=true`
+ * is only guaranteed during BUILD; at function runtime we key on the same
+ * env vars the purge path (purgeNetlifyEdgeCache above) already relies on at
+ * runtime in production — purge credentials and/or the injected site id.
+ * Self-hosted deployments have none of these, so warming stays off there.
+ */
+function isNetlifyRuntime(): boolean {
+  return (
+    process.env.NETLIFY === 'true' ||
+    Boolean(
+      process.env.NETLIFY_PURGE_API_TOKEN?.trim() ||
+      process.env.NETLIFY_SITE_ID?.trim() ||
+      process.env.SITE_ID?.trim(),
+    )
+  );
+}
+// MASJIDWEB_SEAM_END
+
 /** Fetch a batch of routes in parallel, swallowing per-route failures. */
 async function warmBatch(routes: string[], baseUrl: string): Promise<void> {
   await Promise.allSettled(
@@ -970,7 +990,7 @@ export async function warmRouteChain(
   // MASJIDWEB_SEAM: netlify-cache-warming — warming also runs on Netlify,
   // where the publish purge empties the Durable CDN cache and the next real
   // visitor would otherwise pay the full cold render (measured 3–14s).
-  if (process.env.VERCEL !== '1' && process.env.NETLIFY !== 'true') {
+  if (process.env.VERCEL !== '1' && !isNetlifyRuntime()) {
     return { scheduled: 0, remaining: 0 };
   }
   // MASJIDWEB_SEAM_END
@@ -1041,18 +1061,25 @@ export async function warmRoutes(
   routes: string[],
   request: Request,
 ): Promise<{ warmed: number; total: number } | null> {
-  // MASJIDWEB_SEAM: netlify-cache-warming — see warmRouteChain.
-  if (
-    (process.env.VERCEL !== '1' && process.env.NETLIFY !== 'true') ||
-    routes.length === 0
-  ) {
+  // MASJIDWEB_SEAM: netlify-cache-warming — see warmRouteChain. The skip logs
+  // exist because a silent no-op here already hid one production gap (warming
+  // was Vercel-gated for weeks of Netlify publishes and nothing said so).
+  if (process.env.VERCEL !== '1' && !isNetlifyRuntime()) {
+    console.log('[Cache] warming skipped: no supported CDN platform detected');
     return null;
   }
-  // MASJIDWEB_SEAM_END
+  if (routes.length === 0) {
+    console.log('[Cache] warming skipped: no routes to warm');
+    return null;
+  }
 
   const total = routes.length;
   const result = await warmRouteChain(routes, 0, request);
-  if (result.scheduled === 0 && result.remaining === 0) return null;
+  if (result.scheduled === 0 && result.remaining === 0) {
+    console.log('[Cache] warming skipped: no routes scheduled (no valid routes or base URL)');
+    return null;
+  }
+  // MASJIDWEB_SEAM_END
 
   // scheduled = this batch; remaining = what the chain will drain next. The
   // chain is capped at MAX_ROUTES_TO_WARM_TOTAL, so report the capped total.
