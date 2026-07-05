@@ -1,9 +1,19 @@
+import crypto from 'node:crypto';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@/lib/masjidweb/effective-tenant-id', () => ({
   resolveEffectiveTenantId: vi.fn(),
 }));
 
+vi.mock('@supabase/supabase-js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@supabase/supabase-js')>();
+  // Stub the constructor: these tests only assert the OPTIONS the module builds
+  // (marker header + Bearer token); a real client would drag in realtime/ws.
+  return { ...actual, createClient: vi.fn(() => ({ __stubClient: true })) };
+});
+
+import { createClient } from '@supabase/supabase-js';
+import { MW_RLS_ENFORCED_HEADER } from '@/lib/masjidweb/apply-tenant-eq';
 import { tenantRlsEnforceEnabled, maybeGetTenantScopedClient } from './tenant-rls-client';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
@@ -51,5 +61,27 @@ describe('tenant-rls-client safety contract', () => {
     (resolveEffectiveTenantId as ReturnType<typeof vi.fn>).mockResolvedValue(null);
     const client = await maybeGetTenantScopedClient('https://x.supabase.co', 'anon', fetchStub);
     expect(client).toBeNull();
+  });
+
+  it('minted client is created with the RLS-enforced marker header (seam-retirement contract)', async () => {
+    process.env.MW_TENANT_RLS_ENFORCE = 'true';
+    const { privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const jwk = privateKey.export({ format: 'jwk' }) as crypto.JsonWebKey & { kid?: string };
+    jwk.kid = 'test-kid';
+    process.env.MW_TENANT_JWT_PRIVATE_JWK = JSON.stringify(jwk);
+    (resolveEffectiveTenantId as ReturnType<typeof vi.fn>).mockResolvedValue(
+      '22222222-2222-2222-2222-222222222222',
+    );
+
+    const client = await maybeGetTenantScopedClient('https://x.supabase.co', 'anon', fetchStub);
+    expect(client).not.toBeNull();
+
+    const mock = createClient as unknown as ReturnType<typeof vi.fn>;
+    expect(mock).toHaveBeenCalled();
+    const options = mock.mock.calls[mock.mock.calls.length - 1][2] as {
+      global?: { headers?: Record<string, string> };
+    };
+    expect(options.global?.headers?.[MW_RLS_ENFORCED_HEADER]).toBe('1');
+    expect(options.global?.headers?.Authorization).toMatch(/^Bearer /);
   });
 });

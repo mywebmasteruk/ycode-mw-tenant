@@ -22,6 +22,7 @@
  */
 import crypto from 'node:crypto';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { MW_RLS_ENFORCED_HEADER } from '@/lib/masjidweb/apply-tenant-eq';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { supabaseServerRealtimeOptions } from '@/lib/supabase-server-options';
 
@@ -114,7 +115,9 @@ export async function maybeGetTenantScopedClient(
     const client = createClient(projectUrl, anonKey, {
       auth: { autoRefreshToken: false, persistSession: false },
       realtime: supabaseServerRealtimeOptions,
-      global: { fetch: limitedFetch, headers: { Authorization: `Bearer ${jwt}` } },
+      // MW_RLS_ENFORCED_HEADER marks queries from this client as DB-enforced, so
+      // applyTenantEq can skip its redundant filter under MW_SEAMS_RETIRED (and only then).
+      global: { fetch: limitedFetch, headers: { Authorization: `Bearer ${jwt}`, [MW_RLS_ENFORCED_HEADER]: '1' } },
     });
     clientCache.set(tenantId, { client, exp: now + TOKEN_TTL_SECONDS });
     return client;
