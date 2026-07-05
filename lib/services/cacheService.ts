@@ -841,7 +841,10 @@ function sanitiseWarmRoutes(routes: unknown): string[] {
   return routes.filter(
     (r): r is string =>
       typeof r === 'string' &&
-      r.length > 0 &&
+      // '' is the homepage (see getRoutePathsForPages: index pages push '');
+      // warmBatch turns it into `${baseUrl}/`, which is exactly right. It was
+      // previously filtered out here, so warming skipped the homepage — the
+      // single most-visited page — on every publish.
       !r.includes('://') &&
       !r.startsWith('/') &&
       !r.startsWith('\\'),
@@ -964,7 +967,13 @@ export async function warmRouteChain(
   alreadyWarmed: number,
   request: Request,
 ): Promise<{ scheduled: number; remaining: number }> {
-  if (process.env.VERCEL !== '1') return { scheduled: 0, remaining: 0 };
+  // MASJIDWEB_SEAM: netlify-cache-warming — warming also runs on Netlify,
+  // where the publish purge empties the Durable CDN cache and the next real
+  // visitor would otherwise pay the full cold render (measured 3–14s).
+  if (process.env.VERCEL !== '1' && process.env.NETLIFY !== 'true') {
+    return { scheduled: 0, remaining: 0 };
+  }
+  // MASJIDWEB_SEAM_END
 
   const safeRoutes = sanitiseWarmRoutes(routes);
   if (safeRoutes.length === 0) return { scheduled: 0, remaining: 0 };
@@ -981,16 +990,29 @@ export async function warmRouteChain(
   const batch = allowed.slice(0, WARM_BATCH_SIZE);
   const remaining = allowed.slice(WARM_BATCH_SIZE);
 
+  const work = async () => {
+    await warmBatch(batch, baseUrl);
+    if (remaining.length > 0) {
+      await scheduleWarmChain(baseUrl, remaining, alreadyWarmed + batch.length);
+    }
+  };
+
   try {
-    const { waitUntil } = await import('@vercel/functions');
-    waitUntil(
-      (async () => {
-        await warmBatch(batch, baseUrl);
-        if (remaining.length > 0) {
-          await scheduleWarmChain(baseUrl, remaining, alreadyWarmed + batch.length);
-        }
-      })(),
-    );
+    if (process.env.VERCEL === '1') {
+      const { waitUntil } = await import('@vercel/functions');
+      waitUntil(work());
+    } else {
+      // MASJIDWEB_SEAM: netlify-cache-warming — Netlify's Next runtime has no
+      // reliable post-response continuation for route handlers (the lambda can
+      // be frozen once the response is sent, silently dropping background
+      // work), so the batch runs inline. The callers are the long-running
+      // publish routes (maxDuration 300) and the dedicated warm endpoint
+      // (maxDuration 60); one parallel batch adds roughly one page-render's
+      // wall time. Warming MUST therefore run after the purge, never before —
+      // inline warming before a purge would bake the stale copy back in.
+      await work();
+      // MASJIDWEB_SEAM_END
+    }
     return { scheduled: batch.length, remaining: remaining.length };
   } catch {
     return { scheduled: 0, remaining: safeRoutes.length };
@@ -1007,10 +1029,11 @@ export async function warmRouteChain(
  * whole list up to MAX_ROUTES_TO_WARM_TOTAL — anything beyond that self-warms
  * on first real visit.
  *
- * Vercel-only: warming via internal fetch only makes sense when there's a
- * CDN in front of the function. No-ops elsewhere.
+ * Vercel + Netlify: warming via internal fetch only makes sense when there's
+ * a CDN in front of the function. No-ops elsewhere. On Netlify the batch runs
+ * inline (awaited) rather than in the background — see warmRouteChain.
  *
- * @returns null if not on Vercel, no host header, no routes, or warming
+ * @returns null if not on Vercel/Netlify, no host header, no routes, or warming
  *   failed to schedule. Otherwise reports how many will be warmed (across the
  *   whole chain) vs the total requested.
  */
@@ -1018,7 +1041,14 @@ export async function warmRoutes(
   routes: string[],
   request: Request,
 ): Promise<{ warmed: number; total: number } | null> {
-  if (process.env.VERCEL !== '1' || routes.length === 0) return null;
+  // MASJIDWEB_SEAM: netlify-cache-warming — see warmRouteChain.
+  if (
+    (process.env.VERCEL !== '1' && process.env.NETLIFY !== 'true') ||
+    routes.length === 0
+  ) {
+    return null;
+  }
+  // MASJIDWEB_SEAM_END
 
   const total = routes.length;
   const result = await warmRouteChain(routes, 0, request);

@@ -879,16 +879,6 @@ export async function POST(request: NextRequest) {
             : invalidationResult.reason,
         );
 
-        // After invalidation, prime the affected pages in the background so the
-        // first real visitor doesn't pay the cold-cache cost. We absorb the
-        // STALE/MISS server-side; the visitor's first hit is HIT.
-        const warmResult = await warmRoutes(liveRoutesToWarm, request);
-        if (warmResult) {
-          console.log(
-            `[Cache] warming ${warmResult.warmed}${warmResult.total > warmResult.warmed ? ` of ${warmResult.total}` : ''} route(s) in background`,
-          );
-        }
-
         // The selective path above (invalidatePages -> revalidateTag/revalidatePath)
         // was the ONLY invalidation that ran for a normal (non-global) publish —
         // clearAllCache()'s explicit, proven purgeNetlifyEdgeCache() REST/tag purge
@@ -909,6 +899,32 @@ export async function POST(request: NextRequest) {
           } catch {
             // Non-fatal
           }
+        }
+
+        // The clearAllCache above purges the ENTIRE tenant from the CDN (the
+        // tag is tenant-scoped) even when route invalidation was selective, so
+        // the warm scope must be the whole tenant too — warming only the
+        // selectively-invalidated routes would leave every other page cold.
+        if (invalidationResult.strategy === 'selective') {
+          try {
+            liveRoutesToWarm = await getAllPublishedRoutes();
+          } catch {
+            // Non-fatal: fall back to warming the selective list.
+          }
+        }
+
+        // After ALL invalidation is done, prime the affected pages so the first
+        // real visitor doesn't pay the cold-cache cost. We absorb the
+        // STALE/MISS server-side; the visitor's first hit is HIT. This must
+        // stay AFTER the last purge above: on Netlify the warm fetches run
+        // inline (see warmRouteChain), so warming before the purge would
+        // repopulate the CDN with the pre-publish copy and then purge it —
+        // or worse, race the purge and bake stale HTML back in.
+        const warmResult = await warmRoutes(liveRoutesToWarm, request);
+        if (warmResult) {
+          console.log(
+            `[Cache] warming ${warmResult.warmed}${warmResult.total > warmResult.warmed ? ` of ${warmResult.total}` : ''} route(s)`,
+          );
         }
       } catch {
       // Fallback: if selective invalidation fails, nuke everything

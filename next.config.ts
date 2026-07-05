@@ -109,6 +109,14 @@ const nextConfig: NextConfig = {
             key: 'Netlify-CDN-Cache-Control',
             value: 'public, s-maxage=31536000, durable',
           },
+          {
+            // Same font preconnect as the catch-all rule below. Tenant HTML is
+            // served under these rewritten paths, which the catch-all excludes —
+            // without this copy the preconnect disappears from every tenant page
+            // once the /mw-tenant rewrite is enabled for a host.
+            key: 'Link',
+            value: '<https://fonts.gstatic.com>; rel=preconnect; crossorigin',
+          },
         ],
       },
       // MASJIDWEB_SEAM_END
