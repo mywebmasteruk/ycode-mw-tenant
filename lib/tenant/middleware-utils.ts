@@ -35,6 +35,9 @@ const PUBLIC_COLLECTION_ITEM_SUFFIXES = ['/items/filter', '/items/load-more'];
 const PUBLIC_API_EXACT = [
   '/ycode/api/revalidate',
   '/ycode/api/health',
+  // MASJIDWEB: RLS mint-health probe (booleans/counters only, no secrets) —
+  // polled unauthenticated by the daily isolation canary.
+  '/ycode/api/mw-rls-health',
   '/ycode/api/auth/session',
   '/ycode/api/auth/callback',
   // OAuth DCR and token exchange: called by unauthenticated MCP clients.
