@@ -4355,6 +4355,23 @@ export function updateLayerProps(
   });
 }
 
+/** Append a child to the parent layer with `parentId`, returning a new tree. */
+export function addChildToLayerTree(
+  layers: Layer[],
+  parentId: string,
+  child: Layer
+): Layer[] {
+  return layers.map(layer => {
+    if (layer.id === parentId) {
+      return { ...layer, children: [...(layer.children || []), child] };
+    }
+    if (layer.children && layer.children.length > 0) {
+      return { ...layer, children: addChildToLayerTree(layer.children, parentId, child) };
+    }
+    return layer;
+  });
+}
+
 /**
  * Find all layers with a custom anchor ID (settings.id takes priority over attributes.id).
  * Deduplicates by anchor ID since an `#id` link resolves to the first match, so a

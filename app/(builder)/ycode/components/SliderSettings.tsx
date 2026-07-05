@@ -24,12 +24,13 @@ import {
 import SettingsPanel from './SettingsPanel';
 import ToggleGroup from './ToggleGroup';
 
-import { findAncestorByName, getCollectionVariable } from '@/lib/layer-utils';
+import { addChildToLayerTree, findAncestorByName, getCollectionVariable } from '@/lib/layer-utils';
 import { isSliderLayerName, DEFAULT_SLIDER_SETTINGS, createSlideLayer } from '@/lib/templates/utilities';
 import { EFFECTS_WITH_PER_VIEW } from '@/lib/slider-utils';
 import { slidePrev, slideNext } from '@/hooks/use-canvas-slider';
 import { useEditorStore } from '@/stores/useEditorStore';
 import { usePagesStore } from '@/stores/usePagesStore';
+import { useComponentsStore } from '@/stores/useComponentsStore';
 import { useCollectionLayerStore } from '@/stores/useCollectionLayerStore';
 import {
   MULTI_ASSET_COLLECTION_ID,
@@ -96,8 +97,11 @@ export default function SliderSettings({ layer, onLayerUpdate, allLayers, fieldG
   const handleNext = useCallback(() => slideNext(sliderLayerId), [sliderLayerId]);
 
   const currentPageId = useEditorStore((state) => state.currentPageId);
+  const editingComponentId = useEditorStore((state) => state.editingComponentId);
+  const editingComponentVariantId = useEditorStore((state) => state.editingComponentVariantId);
   const setSliderSnapCount = useEditorStore((state) => state.setSliderSnapCount);
   const addLayerWithId = usePagesStore((state) => state.addLayerWithId);
+  const updateComponentDraft = useComponentsStore((state) => state.updateComponentDraft);
   const setSelectedLayerId = useEditorStore((state) => state.setSelectedLayerId);
   const clearLayerData = useCollectionLayerStore((state) => state.clearLayerData);
 
@@ -118,15 +122,28 @@ export default function SliderSettings({ layer, onLayerUpdate, allLayers, fieldG
   }, [fieldGroups]);
 
   const handleAddSlide = useCallback(() => {
-    if (!currentPageId || !sliderLayer) return;
-    if (!slidesLayer) return;
+    if (!sliderLayer || !slidesLayer) return;
     const slideNumber = (slidesLayer.children?.length ?? 0) + 1;
     const slide = createSlideLayer(`Slide ${slideNumber}`, '/ycode/layouts/assets/placeholder-2.webp');
-    if (slide) {
+    if (!slide) return;
+
+    // When editing a component, write to the component draft — not the page store,
+    // whose tree doesn't contain the slider being edited (would silently no-op).
+    if (editingComponentId) {
+      const drafts = useComponentsStore.getState().componentDrafts[editingComponentId];
+      if (!drafts) return;
+      const variantId = editingComponentVariantId && drafts[editingComponentVariantId]
+        ? editingComponentVariantId
+        : Object.keys(drafts)[0];
+      if (!variantId) return;
+      const newLayers = addChildToLayerTree(drafts[variantId], slidesLayer.id, slide);
+      updateComponentDraft(editingComponentId, variantId, newLayers);
+    } else {
+      if (!currentPageId) return;
       addLayerWithId(currentPageId, slidesLayer.id, slide);
-      requestAnimationFrame(() => setSelectedLayerId(slide.id));
     }
-  }, [currentPageId, sliderLayer, slidesLayer, addLayerWithId, setSelectedLayerId]);
+    requestAnimationFrame(() => setSelectedLayerId(slide.id));
+  }, [currentPageId, editingComponentId, editingComponentVariantId, sliderLayer, slidesLayer, addLayerWithId, updateComponentDraft, setSelectedLayerId]);
 
   /**
    * Switch slides content source between static, regular collection, and CMS multi-image.
