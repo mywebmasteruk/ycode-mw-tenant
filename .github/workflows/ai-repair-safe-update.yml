@@ -416,6 +416,11 @@ jobs:
             echo "No file changes to push."
             exit 0
           fi
+          # Stage everything the repair produced. Unstaged-only changes (e.g. the
+          # deterministic lockfile resolve touching package-lock.json with no code
+          # repairs) previously passed the diff check but made `git commit` fail
+          # with "no changes added to commit" (PR #35, 2026-07-05).
+          git add -A
           git commit -m "fix(ai): resolve safe update conflicts [automated]"
           git push origin HEAD
           echo "changed=true" >> "$GITHUB_OUTPUT"
