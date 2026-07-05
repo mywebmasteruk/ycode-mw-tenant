@@ -6,7 +6,6 @@ import { useEditorUrl } from '@/hooks/use-editor-url';
 import { findHomepage } from '@/lib/page-utils';
 import { getTranslationValue } from '@/lib/localisation-utils';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -32,6 +31,7 @@ import type { Page } from '@/types';
 import type { User } from '@supabase/supabase-js';
 import ActiveUsersInHeader from './ActiveUsersInHeader';
 import InviteUserButton from './InviteUserButton';
+import { LocaleSelector } from './LocaleSelector';
 import PublishPopover from './PublishPopover';
 import { Label } from '@/components/ui/label';
 import Icon from '@/components/ui/icon';
@@ -112,9 +112,7 @@ export default function HeaderBar({
 
   const locales = useLocalisationStore((s) => s.locales);
   const selectedLocaleId = useLocalisationStore((s) => s.selectedLocaleId);
-  const setSelectedLocaleId = useLocalisationStore((s) => s.setSelectedLocaleId);
   const translations = useLocalisationStore((s) => s.translations);
-  const loadTranslations = useLocalisationStore((s) => s.loadTranslations);
   const { navigateToLayers, navigateToCollection, navigateToCollections, updateQueryParams, routeType } = useEditorUrl();
 
   // Optimistic nav button state - set immediately on click, cleared when URL catches up
@@ -627,49 +625,7 @@ export default function HeaderBar({
       </div>
 
       <div className="flex gap-1.5 items-center justify-center">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button size="xs" variant="ghost">
-              <Icon name="globe" />
-              {selectedLocale ? selectedLocale.code.toUpperCase() : 'EN'}
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            {canManageSettings && !pathname?.startsWith('/ycode/localization') && (
-              <>
-                <DropdownMenuItem
-                  onClick={() => router.push('/ycode/localization')}
-                >
-                  Manage locales
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-              </>
-            )}
-            <DropdownMenuRadioGroup
-              value={selectedLocaleId || ''}
-              onValueChange={(value) => {
-                setSelectedLocaleId(value);
-                // Eager-load translations so the canvas reflects the new locale
-                // without waiting for component-level effects to run. The store
-                // short-circuits for the default locale and for cached locales.
-                loadTranslations(value);
-              }}
-            >
-              {locales.map((locale) => (
-                <DropdownMenuRadioItem key={locale.id} value={locale.id}>
-                  <span className="flex items-center gap-3">
-                    {locale.label}
-                    {locale.is_default && (
-                      <Badge variant="secondary" className="text-[10px] mr-5">
-                        Default
-                      </Badge>
-                    )}
-                  </span>
-                </DropdownMenuRadioItem>
-              ))}
-            </DropdownMenuRadioGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <LocaleSelector />
 
         <div className="h-5">
           <Separator orientation="vertical" />

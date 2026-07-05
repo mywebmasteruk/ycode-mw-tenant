@@ -274,12 +274,15 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
   marginLeft: /^ml-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
 
   // Sizing
-  width: /^w-(\[.+\]|\d+\/\d+|\d+|px|auto|full|screen|min|max|fit)$/,
-  height: /^h-(\[.+\]|\d+\/\d+|\d+|px|auto|full|screen|min|max|fit)$/,
-  minWidth: /^min-w-(\[.+\]|\d+|px|full|min|max|fit)$/,
-  minHeight: /^min-h-(\[.+\]|\d+|px|full|screen|min|max|fit)$/,
-  maxWidth: /^max-w-(\[.+\]|none|xs|sm|md|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|full|min|max|fit|prose|screen-sm|screen-md|screen-lg|screen-xl|screen-2xl)$/,
-  maxHeight: /^max-h-(\[.+\]|\d+|px|full|screen|min|max|fit)$/,
+  // Match any value after the prefix (including partial keywords typed live,
+  // e.g. h-a, h-au, h-aut) so in-progress classes are replaced instead of
+  // accumulating. Each prefix is exclusive to its property in Tailwind.
+  width: /^w-.+$/,
+  height: /^h-.+$/,
+  minWidth: /^min-w-.+$/,
+  minHeight: /^min-h-.+$/,
+  maxWidth: /^max-w-.+$/,
+  maxHeight: /^max-h-.+$/,
   overflow: /^(truncate|overflow-(visible|hidden|clip|scroll|auto|x-visible|x-hidden|x-clip|x-scroll|x-auto|y-visible|y-hidden|y-clip|y-scroll|y-auto))$/,
   aspectRatio: /^aspect-(\[.+\]|auto|square|video)$/,
   objectFit: /^object-(contain|cover|fill|none|scale-down)$/,
