@@ -3,10 +3,12 @@ import { createToken, deleteToken, getAllTokens, getTokenById, validateToken } f
 
 const mocks = vi.hoisted(() => ({
   getSupabaseAdmin: vi.fn(),
+  getSupabaseServiceRole: vi.fn(),
 }));
 
 vi.mock('@/lib/supabase-server', () => ({
   getSupabaseAdmin: mocks.getSupabaseAdmin,
+  getSupabaseServiceRole: mocks.getSupabaseServiceRole,
 }));
 
 function queryMock(result: unknown = { data: [], error: null }) {
@@ -87,7 +89,9 @@ describe('mcpTokenRepository tenant scope', () => {
         .mockReturnValueOnce(selectQuery)
         .mockReturnValueOnce(updateQuery),
     };
-    mocks.getSupabaseAdmin.mockResolvedValue(client);
+    // validateToken is a pre-auth global lookup — it uses the always-service-role
+    // client (getSupabaseServiceRole), not the tenant-scoped getSupabaseAdmin.
+    mocks.getSupabaseServiceRole.mockResolvedValue(client);
 
     const token = await validateToken('ymc_plain');
 
