@@ -12,6 +12,18 @@
 .swiper-vertical { touch-action: pan-x; }
 .swiper-slide-invisible-blank { visibility: hidden; }
 
+/*
+ * Slides default to Tailwind `h-full` (height:100%). When the slider itself has
+ * no definite height (e.g. `h-[100%]` on tablet/mobile), the percentage-height
+ * chain becomes circular and slides collapse to 0 — the first slide appears
+ * blank. Auto height lets flexbox stretch every slide to the tallest one, which
+ * still fills a definite-height container (e.g. desktop `h-[600px]`) identically.
+ * Effect sliders (cube/flip/cards/3D) keep their own explicit height rules.
+ */
+.swiper:not(.swiper-cube):not(.swiper-flip):not(.swiper-cards):not(.swiper-3d) > .swiper-wrapper > .swiper-slide {
+  height: auto;
+}
+
 .swiper-autoheight,
 .swiper-autoheight .swiper-slide { height: auto; }
 .swiper-autoheight .swiper-wrapper {
