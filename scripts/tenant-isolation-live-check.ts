@@ -472,6 +472,37 @@ async function main() {
   const B: Tenant = { label: CANARIES.B.label, host: CANARIES.B.host, tenantId: CANARIES.B.tenantId, cookie: '' };
 
   try {
+    console.log('=== RLS mint health ===');
+    // Seam-retirement guard: with MW_SEAMS_RETIRED on, tenant scoping rides entirely on
+    // the minted-JWT RLS path for marked queries. A broken mint silently degrades to
+    // service_role (seams re-arm, still safe) — but that degradation must ALERT, not
+    // linger unnoticed. /ycode/api/mw-rls-health actively proves key→sign→JWKS trust.
+    try {
+      const healthRes = await fetch(`https://${A.host}/ycode/api/mw-rls-health`);
+      const health = (await healthRes.json()) as {
+        healthy?: boolean; enforce?: boolean; seamsRetired?: boolean;
+        keyLoaded?: boolean; signOk?: boolean; jwksTrusted?: boolean | null;
+      };
+      record(
+        'rls-mint',
+        'mint path healthy (key loads, signs, JWKS-trusted)',
+        healthRes.status === 200 && health.healthy === true,
+        healthRes.status,
+        JSON.stringify(health),
+      );
+      if (health.seamsRetired) {
+        record(
+          'rls-mint',
+          'seams retired → enforcement must be ON with a working mint',
+          health.enforce === true && health.keyLoaded === true && health.signOk === true && health.jwksTrusted === true,
+          healthRes.status,
+          JSON.stringify(health),
+        );
+      }
+    } catch (e) {
+      record('rls-mint', 'mint health endpoint reachable', false, undefined, e instanceof Error ? e.message : String(e));
+    }
+
     console.log('=== login ===');
     A.cookie = (await resetPasswordAndLogin(A.host, CANARIES.A.userId, CANARIES.A.email)).cookie;
     B.cookie = (await resetPasswordAndLogin(B.host, CANARIES.B.userId, CANARIES.B.email)).cookie;

@@ -14,7 +14,7 @@ type TenantEqQuery = {
 export const MW_RLS_ENFORCED_HEADER = 'x-mw-rls-enforced';
 
 /** Only the literal 'true' retires the app-layer filter; anything else = seams active. */
-function seamsRetired(): boolean {
+export function seamRetirementEnabled(): boolean {
   return typeof process !== 'undefined' && process.env.MW_SEAMS_RETIRED === 'true';
 }
 
@@ -35,7 +35,7 @@ function queryIsRlsEnforced(query: unknown): boolean {
 
 export function applyTenantEq<Q>(query: Q, tenantId: string | null | undefined): Q {
   if (tenantId) {
-    if (seamsRetired() && queryIsRlsEnforced(query)) {
+    if (seamRetirementEnabled() && queryIsRlsEnforced(query)) {
       return query;
     }
     return (query as TenantEqQuery).eq('tenant_id', tenantId) as Q;

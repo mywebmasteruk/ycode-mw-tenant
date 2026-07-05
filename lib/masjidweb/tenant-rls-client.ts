@@ -43,6 +43,72 @@ function warnOnce(reason: string): void {
   console.warn(`[tenant-rls] enforcement ON but falling back to service_role: ${reason}`);
 }
 
+// --- Mint-health telemetry (seam-retirement observability) ---
+// Per-instance counters (serverless: each lambda has its own; any non-zero value
+// surfaced via /ycode/api/mw-rls-health still signals mint degradation).
+type TenantRlsTelemetry = {
+  fallbacksSinceBoot: number;
+  lastFallback: { reason: string; at: string } | null;
+};
+const telemetry: TenantRlsTelemetry = { fallbacksSinceBoot: 0, lastFallback: null };
+
+function recordFallback(reason: string): void {
+  telemetry.fallbacksSinceBoot += 1;
+  telemetry.lastFallback = { reason, at: new Date().toISOString() };
+  warnOnce(reason);
+}
+
+export function getTenantRlsTelemetry(): TenantRlsTelemetry {
+  return {
+    fallbacksSinceBoot: telemetry.fallbacksSinceBoot,
+    lastFallback: telemetry.lastFallback ? { ...telemetry.lastFallback } : null,
+  };
+}
+
+export type TenantRlsMintProbe = {
+  enforce: boolean;
+  keyLoaded: boolean;
+  signOk: boolean;
+  kid: string | null;
+  /** true = PostgREST accepted a token signed with our BYOK key (key still in JWKS); null = network-inconclusive. */
+  jwksTrusted: boolean | null;
+};
+
+/**
+ * Actively proves the whole mint path: key loads → ES256 signing works → PostgREST
+ * trusts the token (BYOK key still in JWKS). Uses a RANDOM probe tenant id, so RLS
+ * matches zero rows — a 2xx proves trust without touching any tenant's data.
+ */
+export async function probeTenantRlsMint(projectUrl: string, anonKey: string): Promise<TenantRlsMintProbe> {
+  const probe: TenantRlsMintProbe = {
+    enforce: tenantRlsEnforceEnabled(),
+    keyLoaded: false,
+    signOk: false,
+    kid: null,
+    jwksTrusted: null,
+  };
+  const signing = loadSigningKey();
+  if (!signing) return probe;
+  probe.keyLoaded = true;
+  probe.kid = signing.kid;
+  let jwt: string;
+  try {
+    jwt = mintTenantJwt(crypto.randomUUID(), signing.key, signing.kid, Math.floor(Date.now() / 1000));
+    probe.signOk = true;
+  } catch {
+    return probe;
+  }
+  try {
+    const res = await fetch(`${projectUrl}/rest/v1/settings?select=key&limit=1`, {
+      headers: { apikey: anonKey, Authorization: `Bearer ${jwt}` },
+    });
+    probe.jwksTrusted = res.ok;
+  } catch {
+    probe.jwksTrusted = null; // network error — inconclusive, not proof of distrust
+  }
+  return probe;
+}
+
 function loadSigningKey(): { key: crypto.KeyObject; kid: string } | null {
   const jwkStr = process.env.MW_TENANT_JWT_PRIVATE_JWK;
   if (!jwkStr) return null;
@@ -98,12 +164,12 @@ export async function maybeGetTenantScopedClient(
   try {
     const tenantId = await resolveEffectiveTenantId();
     if (!tenantId) {
-      warnOnce('no effective tenant id in context');
+      recordFallback('no effective tenant id in context');
       return null;
     }
     const signing = loadSigningKey();
     if (!signing) {
-      warnOnce('MW_TENANT_JWT_PRIVATE_JWK missing or invalid');
+      recordFallback('MW_TENANT_JWT_PRIVATE_JWK missing or invalid');
       return null;
     }
 
@@ -122,7 +188,9 @@ export async function maybeGetTenantScopedClient(
     clientCache.set(tenantId, { client, exp: now + TOKEN_TTL_SECONDS });
     return client;
   } catch (error) {
-    console.warn('[tenant-rls] mint/build failed, using service_role:', error instanceof Error ? error.message : error);
+    const msg = error instanceof Error ? error.message : String(error);
+    recordFallback(`mint/build failed: ${msg}`);
+    console.warn('[tenant-rls] mint/build failed, using service_role:', msg);
     return null;
   }
 }
