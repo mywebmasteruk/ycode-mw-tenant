@@ -262,6 +262,42 @@ export function isLocaleCodeSupported(code: string): boolean {
 }
 
 /**
+ * Strip characters that aren't valid in a region subtag and lowercase the rest.
+ * Keeps only letters and digits (e.g. "BE" -> "be", "419" stays "419").
+ */
+export function sanitizeRegionCode(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * Combine a base language code and optional region subtag into a full locale code.
+ * e.g. ("nl", "be") -> "nl-be", ("nl", "") -> "nl".
+ */
+export function buildLocaleCode(language: string, region: string): string {
+  return region ? `${language}-${region}` : language;
+}
+
+/**
+ * Split a locale code into its language and region parts at the first hyphen.
+ * e.g. "fr-ca" -> { language: "fr", region: "ca" }, "nl" -> { language: "nl", region: "" }.
+ */
+export function parseLocaleCode(code: string): { language: string; region: string } {
+  const dashIndex = code.indexOf('-');
+  if (dashIndex === -1) {
+    return { language: code, region: '' };
+  }
+  return { language: code.slice(0, dashIndex), region: code.slice(dashIndex + 1) };
+}
+
+/**
+ * Validate a BCP-47-style locale code: a 2-3 letter language, optionally
+ * followed by hyphen-separated region/script subtags (e.g. "nl", "nl-be", "zh-hans-cn").
+ */
+export function isValidLocaleCode(code: string): boolean {
+  return /^[a-z]{2,3}(-[a-z0-9]{2,4})*$/.test(code);
+}
+
+/**
  * Check if a locale is right-to-left
  */
 export function isLocaleRtl(locale: LocaleOption): boolean {

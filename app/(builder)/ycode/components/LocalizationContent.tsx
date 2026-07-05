@@ -15,7 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import { InputGroup, InputGroupAddon, InputGroupInput } from '@/components/ui/input-group';
 import { InputAutocomplete } from '@/components/ui/input-autocomplete';
-import { LOCALES, extractPageTranslatableItems, extractFolderTranslatableItems, extractComponentTranslatableItems, extractCmsTranslatableItems } from '@/lib/localisation-utils';
+import { LOCALES, sanitizeRegionCode, buildLocaleCode, parseLocaleCode, isValidLocaleCode, extractPageTranslatableItems, extractFolderTranslatableItems, extractComponentTranslatableItems, extractCmsTranslatableItems } from '@/lib/localisation-utils';
 import { findLayerById } from '@/lib/layer-utils';
 import { buildFieldGroupsForLayer } from '@/lib/collection-field-utils';
 import type { TranslatableItem } from '@/lib/localisation-utils';
@@ -41,6 +41,8 @@ interface ModalState {
   isEditMode: boolean;
   editingLocaleId: string | null;
   selectedLanguage: LocaleOption | null;
+  localeCode: string;
+  regionCode: string;
   customLocaleName: string;
   isDefaultLocale: boolean;
   localeSearch: string;
@@ -51,6 +53,8 @@ const initialModalState: ModalState = {
   isEditMode: false,
   editingLocaleId: null,
   selectedLanguage: null,
+  localeCode: '',
+  regionCode: '',
   customLocaleName: '',
   isDefaultLocale: false,
   localeSearch: '',
@@ -470,14 +474,30 @@ export default function LocalizationContent({ children }: LocalizationContentPro
   const existingLocaleCodes = new Set(locales.map(l => l.code));
   const availableLocales = LOCALES.filter(l => !existingLocaleCodes.has(l.code));
 
+  // Combine the picker-driven base language with the editable region subtag,
+  // then validate the result against its BCP-47 shape and existing locales
+  // (excluding the one currently being edited).
+  const fullLocaleCode = buildLocaleCode(modalState.localeCode, modalState.regionCode);
+  const isDuplicateLocaleCode = locales.some(
+    l => l.code === fullLocaleCode && l.id !== modalState.editingLocaleId
+  );
+  const isLocaleCodeValid = !!modalState.localeCode && isValidLocaleCode(fullLocaleCode) && !isDuplicateLocaleCode;
+
+  const localeCodeError = (() => {
+    if (!modalState.localeCode || !modalState.regionCode) return null;
+    if (isDuplicateLocaleCode) return 'This locale code already exists.';
+    if (!isValidLocaleCode(fullLocaleCode)) return 'Enter a valid region like "BE".';
+    return null;
+  })();
+
   const handleAddLocale = async () => {
-    if (!modalState.selectedLanguage || !modalState.customLocaleName.trim()) {
+    if (!isLocaleCodeValid || !modalState.customLocaleName.trim()) {
       return;
     }
 
     try {
       const newLocale = await createLocale({
-        code: modalState.selectedLanguage.code,
+        code: fullLocaleCode,
         label: modalState.customLocaleName.trim(),
         is_default: modalState.isDefaultLocale,
       });
@@ -492,12 +512,13 @@ export default function LocalizationContent({ children }: LocalizationContentPro
   };
 
   const handleUpdateLocale = async () => {
-    if (!modalState.editingLocaleId || !modalState.customLocaleName.trim()) {
+    if (!modalState.editingLocaleId || !isLocaleCodeValid || !modalState.customLocaleName.trim()) {
       return;
     }
 
     try {
       await updateLocale(modalState.editingLocaleId, {
+        code: fullLocaleCode,
         label: modalState.customLocaleName.trim(),
         is_default: modalState.isDefaultLocale,
       });
@@ -524,14 +545,18 @@ export default function LocalizationContent({ children }: LocalizationContentPro
   const handleOpenEditDialog = (locale: Locale) => {
     clearError();
 
-    // Set the selected language to show in the disabled selector
-    const localeOption = LOCALES.find(l => l.code === locale.code);
+    // Split the stored code into its base language and region parts so each
+    // maps to its own input.
+    const { language, region } = parseLocaleCode(locale.code);
+    const localeOption = LOCALES.find(l => l.code === language);
 
     setModalState({
       isOpen: true,
       isEditMode: true,
       editingLocaleId: locale.id,
       customLocaleName: locale.label,
+      localeCode: language,
+      regionCode: region,
       isDefaultLocale: locale.is_default,
       selectedLanguage: localeOption || null,
       localeSearch: localeOption?.label || '',
@@ -551,15 +576,21 @@ export default function LocalizationContent({ children }: LocalizationContentPro
         ...prev,
         selectedLanguage: null,
         localeSearch: '',
+        localeCode: '',
+        regionCode: '',
         customLocaleName: '',
       }));
       return;
     }
 
+    const { language, region } = parseLocaleCode(locale.code);
+
     setModalState(prev => ({
       ...prev,
       localeSearch: locale.label,
       selectedLanguage: locale,
+      localeCode: language,
+      regionCode: region,
       customLocaleName: locale.label,
     }));
   };
@@ -602,7 +633,7 @@ export default function LocalizationContent({ children }: LocalizationContentPro
                   onClick={() => setSelectedLocaleId(locale.id)}
                 >
                   <div className="flex items-center flex-1 outline-none focus:outline-none select-none text-left text-xs gap-1.5 min-w-0">
-                    <span className="bg-secondary text-[10px] font-semibold py-0.5 px-1.5 rounded-[6px] uppercase shrink-0">{locale.code}</span>
+                    <span className="bg-secondary text-secondary-foreground text-[10px] font-semibold py-0.5 px-1.5 rounded-[6px] uppercase shrink-0">{locale.code}</span>
                     <Label className="cursor-[inherit] min-w-0 flex-1">
                       <div className="truncate">{locale.label}</div>
                     </Label>
@@ -1129,26 +1160,47 @@ export default function LocalizationContent({ children }: LocalizationContentPro
               />
             </div>
 
-            <div className="flex gap-3">
-              <div className="flex flex-col gap-2 flex-1">
-                <Label htmlFor="name">Custom name</Label>
-                <Input
-                  id="name"
-                  value={modalState.customLocaleName}
-                  onChange={(e) => setModalState(prev => ({ ...prev, customLocaleName: e.target.value }))}
-                  placeholder="Custom name"
-                />
+            <div className="flex flex-col gap-2">
+              <div className="flex gap-3">
+                <div className="flex flex-col gap-2 flex-1">
+                  <div className="flex items-center gap-2">
+                    <Label htmlFor="name">Custom name</Label>
+                    {fullLocaleCode && (
+                      <span className="text-xs text-muted-foreground uppercase">{fullLocaleCode}</span>
+                    )}
+                  </div>
+                  <Input
+                    id="name"
+                    value={modalState.customLocaleName}
+                    onChange={(e) => setModalState(prev => ({ ...prev, customLocaleName: e.target.value }))}
+                    placeholder="Custom name"
+                  />
+                </div>
+                <div className="flex flex-col gap-2 w-24">
+                  <Label htmlFor="code" className="whitespace-nowrap">Locale code</Label>
+                  <Input
+                    id="code"
+                    value={modalState.localeCode}
+                    disabled
+                    placeholder="Code"
+                    className={modalState.localeCode ? 'uppercase' : ''}
+                  />
+                </div>
+                <div className="flex flex-col gap-2 w-24">
+                  <Label htmlFor="region" className="whitespace-nowrap">Regional code</Label>
+                  <Input
+                    id="region"
+                    value={modalState.regionCode}
+                    onChange={(e) => setModalState(prev => ({ ...prev, regionCode: sanitizeRegionCode(e.target.value) }))}
+                    placeholder="e.g. BE"
+                    disabled={!modalState.localeCode}
+                    className={cn(modalState.regionCode && 'uppercase', localeCodeError && 'border-destructive')}
+                  />
+                </div>
               </div>
-              <div className="flex flex-col gap-2 flex-1">
-                <Label htmlFor="code">Locale code</Label>
-                <Input
-                  id="code"
-                  value={modalState.selectedLanguage?.code || ''}
-                  disabled
-                  placeholder="Code"
-                  className={modalState.selectedLanguage?.code ? 'uppercase' : ''}
-                />
-              </div>
+              {localeCodeError && (
+                <span className="text-xs text-destructive">{localeCodeError}</span>
+              )}
             </div>
 
             {(() => {
@@ -1237,8 +1289,8 @@ export default function LocalizationContent({ children }: LocalizationContentPro
                 onClick={modalState.isEditMode ? handleUpdateLocale : handleAddLocale}
                 disabled={
                   modalState.isEditMode
-                    ? !modalState.customLocaleName.trim() || isLoading.update
-                    : !modalState.selectedLanguage || !modalState.customLocaleName.trim() || isLoading.create
+                    ? !isLocaleCodeValid || !modalState.customLocaleName.trim() || isLoading.update
+                    : !isLocaleCodeValid || !modalState.customLocaleName.trim() || isLoading.create
                 }
                 size="sm"
               >

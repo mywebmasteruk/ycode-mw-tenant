@@ -239,7 +239,7 @@ export default function ComponentVariantsSection({
   return (
     <section className="border-b pb-4">
       <header className="py-5 flex justify-between shrink-0 z-20">
-        <span className="font-medium">Variants</span>
+        <span className="font-medium">Component variants</span>
         <div className="-my-1">
           <Button
             size="xs"
