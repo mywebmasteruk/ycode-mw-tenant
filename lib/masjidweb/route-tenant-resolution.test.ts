@@ -3,6 +3,7 @@ import {
   routeTenantResolutionMode,
   shouldRewriteToTenantRoute,
   isInternalTenantRoutePath,
+  isTenantPageRewritablePath,
   buildTenantRoutePath,
   TENANT_ROUTE_PREFIX,
 } from './route-tenant-resolution';
@@ -82,6 +83,29 @@ describe('isInternalTenantRoutePath', () => {
     expect(isInternalTenantRoutePath('/mw-tenant-x')).toBe(false);
     expect(isInternalTenantRoutePath('/about')).toBe(false);
     expect(isInternalTenantRoutePath('/')).toBe(false);
+  });
+});
+
+describe('isTenantPageRewritablePath', () => {
+  it('rejects asset-proxy paths (the high900 broken-images bug)', () => {
+    expect(isTenantPageRewritablePath('/a/1KNOKrpvkK0WcgfG5lSE4m/almanaar-logo.webp')).toBe(false);
+    expect(isTenantPageRewritablePath('/a/x/y/z.pdf')).toBe(false);
+  });
+
+  it('rejects dedicated (site) route-handler paths', () => {
+    expect(isTenantPageRewritablePath('/sitemap.xml')).toBe(false);
+    expect(isTenantPageRewritablePath('/robots.txt')).toBe(false);
+    expect(isTenantPageRewritablePath('/llms.txt')).toBe(false);
+    expect(isTenantPageRewritablePath('/icon.svg')).toBe(false);
+  });
+
+  it('accepts real page paths, including lookalikes and locale prefixes', () => {
+    expect(isTenantPageRewritablePath('/')).toBe(true);
+    expect(isTenantPageRewritablePath('/about')).toBe(true);
+    expect(isTenantPageRewritablePath('/blog/post-1')).toBe(true);
+    expect(isTenantPageRewritablePath('/a')).toBe(true); // page slug "a", not the asset prefix
+    expect(isTenantPageRewritablePath('/docs/robots.txt-guide')).toBe(true);
+    expect(isTenantPageRewritablePath('/fr/a-propos')).toBe(true);
   });
 });
 

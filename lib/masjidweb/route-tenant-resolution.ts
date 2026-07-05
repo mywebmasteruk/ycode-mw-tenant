@@ -78,6 +78,29 @@ export function shouldRewriteToTenantRoute(
 }
 
 /**
+ * Public paths that are NOT tenant pages: they are served by dedicated route
+ * handlers (`app/a/[hash]` asset proxy, `app/(site)/{sitemap.xml,robots.txt,
+ * llms.txt}`) or Next metadata routes (`/icon.svg`), none of which exist under
+ * the internal tenant route tree. Rewriting them onto `/mw-tenant/<tid>/…`
+ * lands in the `[...slug]` page catch-all and 404s — which is exactly what
+ * broke every image (plus sitemap/robots) on the high900 caching canary:
+ * `isPublicPage()` passes `/a/…`, so the rewrite swallowed asset requests and
+ * the CDN then cached the 404s.
+ */
+const NON_PAGE_PUBLIC_PATHS = ['/a/', '/sitemap.xml', '/robots.txt', '/llms.txt', '/icon.svg'];
+
+/**
+ * Whether a public-page GET may be rewritten onto the param-based tenant
+ * route. Only real page paths qualify; dedicated-handler paths must keep
+ * hitting their own routes.
+ */
+export function isTenantPageRewritablePath(pathname: string): boolean {
+  return !NON_PAGE_PUBLIC_PATHS.some((p) =>
+    p.endsWith('/') ? pathname.startsWith(p) : pathname === p,
+  );
+}
+
+/**
  * Whether `pathname` targets the internal tenant-route prefix. Used by the
  * proxy guard to 404 direct external probes of the internal routes.
  */

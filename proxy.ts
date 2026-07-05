@@ -18,6 +18,7 @@ import { tenantAllPagesTag } from '@/lib/masjidweb/tenant-cache-tags';
 import {
   buildTenantRoutePath,
   isInternalTenantRoutePath,
+  isTenantPageRewritablePath,
   shouldRewriteToTenantRoute,
 } from '@/lib/masjidweb/route-tenant-resolution';
 
@@ -267,10 +268,13 @@ export async function proxy(request: NextRequest) {
   // enabled for this host, rewrite the public page GET onto the internal
   // param-based route so it resolves tenant from the path (not headers()) and
   // becomes cacheable. Pagination requests already returned above and stay
-  // dynamic. We attach the tenant purge tag but deliberately do NOT call
+  // dynamic. Only real PAGE paths are rewritable: /a/* assets and
+  // sitemap/robots/llms have their own route handlers, which don't exist under
+  // /mw-tenant — rewriting them 404s (broke all images on the caching canary).
+  // We attach the tenant purge tag but deliberately do NOT call
   // attachTenantNetlifyCacheTag (which would set `Cache-Control: private`,
   // forbidding the shared caching this whole path exists to enable).
-  if (isPublicPage(pathname) && request.method === 'GET') {
+  if (isPublicPage(pathname) && isTenantPageRewritablePath(pathname) && request.method === 'GET') {
     const rewriteTid = request.headers.get('x-tenant-id')?.trim();
     if (rewriteTid && shouldRewriteToTenantRoute(host)) {
       const tenantRouteUrl = request.nextUrl.clone();
