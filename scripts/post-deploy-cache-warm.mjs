@@ -143,7 +143,10 @@ async function urlsForTenant(host) {
       for (const m of xml.matchAll(/<loc>\s*([^<\s]+)\s*<\/loc>/g)) {
         if (urls.length > URLS_PER_TENANT) break;
         try {
-          const u = new URL(m[1]);
+          // The tenant sitemaps emit RELATIVE locs (e.g. "/posts/foo"), so
+          // resolve against the site base — bare new URL(loc) throws on those
+          // and silently reduced this crawl to homepages only.
+          const u = new URL(m[1], base);
           if (u.host === host && !urls.includes(u.toString())) urls.push(u.toString());
         } catch { /* skip malformed loc */ }
       }
