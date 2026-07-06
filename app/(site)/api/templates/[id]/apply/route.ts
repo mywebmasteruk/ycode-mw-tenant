@@ -5,10 +5,11 @@ import { clearAllCache, getAllPublishedRoutes, warmRoutes } from '@/lib/services
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-// On Netlify the post-purge cache warming below runs inline (see
-// warmRouteChain), adding roughly one parallel page-render's wall time —
-// give the function room beyond the default timeout.
+// MASJIDWEB_SEAM: netlify-cache-warming — on Netlify the post-purge cache
+// warming below runs inline (see warmRouteChain), adding roughly one parallel
+// page-render's wall time; give the function room beyond the default timeout.
 export const maxDuration = 60;
+// MASJIDWEB_SEAM_END
 
 /**
  * POST /api/templates/:id/apply

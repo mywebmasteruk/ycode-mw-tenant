@@ -3,10 +3,11 @@ import { getSettingByKey, setSetting } from '@/lib/repositories/settingsReposito
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { clearAllCache, getAllPublishedRoutes, warmRoutes } from '@/lib/services/cacheService';
 
-// On Netlify the post-purge cache warming in PUT runs inline (see
-// warmRouteChain), adding roughly one parallel page-render's wall time —
-// give the function room beyond the default timeout.
+// MASJIDWEB_SEAM: netlify-cache-warming — on Netlify the post-purge cache
+// warming in PUT runs inline (see warmRouteChain), adding roughly one parallel
+// page-render's wall time; give the function room beyond the default timeout.
 export const maxDuration = 60;
+// MASJIDWEB_SEAM_END
 
 /**
  * Setting keys that don't affect public-page rendering and therefore should

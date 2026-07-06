@@ -901,10 +901,11 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        // The clearAllCache above purges the ENTIRE tenant from the CDN (the
-        // tag is tenant-scoped) even when route invalidation was selective, so
-        // the warm scope must be the whole tenant too — warming only the
-        // selectively-invalidated routes would leave every other page cold.
+        // MASJIDWEB_SEAM: netlify-cache-warming — the clearAllCache above purges
+        // the ENTIRE tenant from the CDN (the tag is tenant-scoped) even when
+        // route invalidation was selective, so the warm scope must be the whole
+        // tenant too — warming only the selectively-invalidated routes would
+        // leave every other page cold.
         if (invalidationResult.strategy === 'selective') {
           try {
             liveRoutesToWarm = await getAllPublishedRoutes();
@@ -926,6 +927,7 @@ export async function POST(request: NextRequest) {
             `[Cache] warming ${warmResult.warmed}${warmResult.total > warmResult.warmed ? ` of ${warmResult.total}` : ''} route(s)`,
           );
         }
+        // MASJIDWEB_SEAM_END
       } catch {
       // Fallback: if selective invalidation fails, nuke everything
         try { await clearAllCache(await resolveEffectiveTenantId()); } catch { /* non-fatal */ }

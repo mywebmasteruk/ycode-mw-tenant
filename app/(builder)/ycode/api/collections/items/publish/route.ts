@@ -10,10 +10,12 @@ import { noCache } from '@/lib/api-response';
 // Disable caching for this route
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-// On Netlify the post-purge cache warming below runs inline (see
-// warmRouteChain), adding roughly one parallel page-render's wall time on top
-// of the publish work — give the function room beyond the default timeout.
+// MASJIDWEB_SEAM: netlify-cache-warming — on Netlify the post-purge cache
+// warming below runs inline (see warmRouteChain), adding roughly one parallel
+// page-render's wall time on top of the publish work; give the function room
+// beyond the default timeout.
 export const maxDuration = 60;
+// MASJIDWEB_SEAM_END
 
 /**
  * POST /ycode/api/collections/items/publish
@@ -126,12 +128,13 @@ export async function POST(request: NextRequest) {
         console.error('[Cache] item publish: clearAllCache failed:', cacheError);
       }
 
-      // clearAllCache() above purged the WHOLE tenant from the CDN (tag-scoped),
-      // so every page — not just the ones rendering these collections — goes
-      // cold. Re-prime them all so the next real visitor (usually the site
-      // owner checking their publish) gets a cache hit instead of the full
-      // cold render. Must stay after the purge: on Netlify warming runs
-      // inline, and warming first would bake the stale copy back in.
+      // MASJIDWEB_SEAM: netlify-cache-warming — clearAllCache() above purged the
+      // WHOLE tenant from the CDN (tag-scoped), so every page — not just the
+      // ones rendering these collections — goes cold. Re-prime them all so the
+      // next real visitor (usually the site owner checking their publish) gets
+      // a cache hit instead of the full cold render. Must stay after the purge:
+      // on Netlify warming runs inline, and warming first would bake the stale
+      // copy back in.
       try {
         const warmResult = await warmRoutes(await getAllPublishedRoutes(), request);
         if (warmResult) {
@@ -142,6 +145,7 @@ export async function POST(request: NextRequest) {
       } catch (warmError) {
         console.error('[Cache] item publish: warming failed:', warmError);
       }
+      // MASJIDWEB_SEAM_END
     }
 
     return noCache({
