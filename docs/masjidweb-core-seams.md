@@ -30,7 +30,13 @@ Wrap non-trivial custom blocks:
 
 Use for: publish cache invalidation, tenant cache tags on public pages, proxy auth alignment, Netlify purge, composite publish steps.
 
-**Do not** wrap every `applyTenantEq` line — that is the standard repository pattern (below).
+**Do not** wrap every `applyTenantEq` line — that is the standard repository pattern (below). Same for the **tenant-scoped cache clear one-liner**: wherever upstream calls `clearAllCache()` bare, the fork calls
+
+```ts
+await clearAllCache(await resolveEffectiveTenantId());
+```
+
+This is a mechanical pattern (~12 call sites across builder API routes: publish, revert, settings `[key]`/batch, project import, collection items/status). On upstream conflict, take upstream's call site and re-add the argument — dropping it makes a tenant publish purge **every** tenant's CDN cache (regressed once; fixed in `fbcbd12`). Do not wrap each call site in seam markers.
 
 ---
 
@@ -117,7 +123,7 @@ Upstream changes often; MasjidWeb blocks must be re-applied carefully.
 
 | File | MasjidWeb responsibility |
 |------|---------------------------|
-| `lib/services/cacheService.ts` | Tenant-scoped `invalidatePage` / `clearAllCache`; **Netlify** `purgeNetlifyEdgeCache`; upstream selective invalidation/warming — use tenant tags from `tenant-cache-tags.ts`, not global `route-/` only |
+| `lib/services/cacheService.ts` | Tenant-scoped `invalidatePage` / `clearAllCache`; **Netlify** `purgeNetlifyEdgeCache`; upstream selective invalidation/warming — use tenant tags from `tenant-cache-tags.ts`, not global `route-/` only. Seams: `netlify-edge-purge` (whole purge machinery, fork-only), `clearAllCache tenant+netlify composite` (tenant param + non-fatal revalidate + purge tail), `tenant-scoped invalidation`, `netlify-cache-warming` |
 | `lib/services/pageService.ts` | Publish pages with tenant context; return shape for publish route (`changedPageIds`, etc.) |
 | `lib/services/collectionService.ts` | Tenant filters on publish/cleanup; `applyTenantEq` |
 | `lib/services/localisationService.ts` | Locale/translation scoping via tenant locales |
@@ -132,7 +138,8 @@ Upstream changes often; MasjidWeb blocks must be re-applied carefully.
 
 | Route / area | MasjidWeb note |
 |--------------|----------------|
-| `app/(builder)/ycode/api/publish/route.ts` | `runWithEffectiveTenantId`; tenant `clearAllCache`; upstream publish pipeline |
+| `app/(builder)/ycode/api/publish/route.ts` | `runWithEffectiveTenantId`; tenant `clearAllCache`; upstream publish pipeline. Seams: `tenant-publish-context` (head + end pair around the `runPublish` wrapper), `netlify-selective-purge`, `netlify-cache-warming` |
+| `app/(builder)/ycode/api/collections/items/publish/route.ts` | Cache invalidation after item publish (upstream has none). Seams: `item-publish-invalidation` (tracking set + whole invalidate/purge/warm block), `netlify-cache-warming` (`maxDuration` + nested warm) |
 | `app/(builder)/ycode/api/cache/clear-tag/route.ts`, `revalidate/route.ts` | Vercel `invalidateByTag` vs `revalidateTag`; tenant-aware tags |
 | `app/(builder)/ycode/api/settings/[key]/route.ts`, `settings/batch/route.ts` | Draft-only keys + `clearAllCache(await resolveEffectiveTenantId())` |
 | `app/(builder)/ycode/api/project/import/route.ts` | Tenant-scoped cache clear after import |

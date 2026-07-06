@@ -124,6 +124,7 @@ function buildSystemPrompt(mode: 'file' | 'hunk' | 'batch'): string {
     '- Remove all Git conflict markers (<<<<<<<, =======, >>>>>>>, |||||||).',
     '- When a ||||||| base section is present, use it to merge both sides correctly.',
     '- Keep MASJIDWEB_SEAM blocks and tenant scoping (resolveEffectiveTenantId, applyTenantEq, tenant_id).',
+    '- Where upstream calls clearAllCache() bare, keep the fork\'s tenant argument: clearAllCache(await resolveEffectiveTenantId()).',
     '- Never drop tenant isolation to match upstream.',
     '- Prefer MasjidWeb Tier 0 paths under lib/masjidweb/ when choosing between implementations.',
     '',

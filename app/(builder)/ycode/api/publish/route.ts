@@ -129,8 +129,15 @@ function createEmptyStats(): PublishStats {
  * - collectionItemIds: Publish specific collection items (automatically grouped by collection)
  */
 export async function POST(request: NextRequest) {
+  // MASJIDWEB_SEAM: tenant-publish-context — see docs/masjidweb-core-seams.md#tier-4.
+  // Upstream's handler body starts inline here. The fork wraps it in runPublish
+  // so the proxy-verified x-tenant-id header pins the effective tenant for
+  // every repository/service call in the publish (closing half of this seam is
+  // at the end of the handler). Without it a publish resolves tenant context
+  // per-call and provisioning/canary publishes lose their tenant.
   const headerTenantId = request.headers.get('x-tenant-id')?.trim() ?? '';
   const runPublish = async () => {
+  // MASJIDWEB_SEAM_END
     const startTime = performance.now();
     const stats = createEmptyStats();
 
@@ -879,6 +886,9 @@ export async function POST(request: NextRequest) {
             : invalidationResult.reason,
         );
 
+        // MASJIDWEB_SEAM: netlify-selective-purge — see docs/masjidweb-core-seams.md#tier-4.
+        // This whole block is fork-only (upstream goes straight from the
+        // strategy log to warming).
         // The selective path above (invalidatePages -> revalidateTag/revalidatePath)
         // was the ONLY invalidation that ran for a normal (non-global) publish —
         // clearAllCache()'s explicit, proven purgeNetlifyEdgeCache() REST/tag purge
@@ -900,6 +910,7 @@ export async function POST(request: NextRequest) {
             // Non-fatal
           }
         }
+        // MASJIDWEB_SEAM_END
 
         // MASJIDWEB_SEAM: netlify-cache-warming — the clearAllCache above purges
         // the ENTIRE tenant from the CDN (the tag is tenant-scoped) even when
@@ -981,9 +992,12 @@ export async function POST(request: NextRequest) {
         500
       );
     }
+  // MASJIDWEB_SEAM: tenant-publish-context (end) — closes the runPublish
+  // wrapper opened at the top of this handler; see docs/masjidweb-core-seams.md#tier-4.
   };
   if (headerTenantId) {
     return runWithEffectiveTenantId(headerTenantId, runPublish);
   }
   return runPublish();
+  // MASJIDWEB_SEAM_END
 }

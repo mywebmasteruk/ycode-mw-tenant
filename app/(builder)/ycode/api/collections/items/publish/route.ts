@@ -34,6 +34,7 @@ export async function POST(request: NextRequest) {
     
     let publishedCount = 0;
     const skipped: { itemId: string; reason: string }[] = [];
+    // MASJIDWEB_SEAM: item-publish-invalidation — see docs/masjidweb-core-seams.md#tier-4.
     // Collections actually touched by a successful publish/delete below — the
     // v1 API's equivalent routes invalidate cache after every item write
     // (see app/(builder)/ycode/api/v1/collections/[collection_id]/items/[item_id]/route.ts),
@@ -41,6 +42,7 @@ export async function POST(request: NextRequest) {
     // serving stale content indefinitely after a normal "edit item, publish"
     // in the CMS UI — even once the underlying write itself succeeded.
     const changedCollectionIds = new Set<string>();
+    // MASJIDWEB_SEAM_END
 
     // Publish each item
     for (const itemId of item_ids) {
@@ -56,7 +58,9 @@ export async function POST(request: NextRequest) {
         if (item.deleted_at) {
           // Hard delete the item and all its values (CASCADE)
           await hardDeleteItem(itemId);
+          // MASJIDWEB_SEAM: item-publish-invalidation (track)
           changedCollectionIds.add(item.collection_id);
+          // MASJIDWEB_SEAM_END
           publishedCount++;
         } else {
           // Block publishing if the collection hasn't been published
@@ -73,7 +77,9 @@ export async function POST(request: NextRequest) {
             skipped.push({ itemId, reason: 'no draft values found to publish' });
             continue;
           }
+          // MASJIDWEB_SEAM: item-publish-invalidation (track)
           changedCollectionIds.add(item.collection_id);
+          // MASJIDWEB_SEAM_END
           publishedCount++;
         }
       } catch (error) {
@@ -87,6 +93,9 @@ export async function POST(request: NextRequest) {
     // Clean up any soft-deleted collections
     await cleanupDeletedCollections();
 
+    // MASJIDWEB_SEAM: item-publish-invalidation — see docs/masjidweb-core-seams.md#tier-4.
+    // Upstream has no cache invalidation in this route at all; everything from
+    // here to the end of the warming block is fork-only.
     // Invalidate cached routes for every page that renders one of the
     // collections we touched, in a single batched call — not once per
     // collection in a loop. invalidateForCollectionChange (the singular form)
@@ -147,6 +156,7 @@ export async function POST(request: NextRequest) {
       }
       // MASJIDWEB_SEAM_END
     }
+    // MASJIDWEB_SEAM_END
 
     return noCache({
       data: { count: publishedCount, skipped }

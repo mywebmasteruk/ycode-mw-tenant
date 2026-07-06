@@ -82,6 +82,11 @@ export async function purgeTagsOnVercel(tags: string[]): Promise<void> {
  * Netlify: revalidateTag clears Next data cache; optional REST purge clears Edge when configured.
  */
 
+// MASJIDWEB_SEAM: netlify-edge-purge — see docs/masjidweb-core-seams.md#tier-3.
+// Everything from here through purgeNetlifyEdgeCache is fork-only: upstream
+// Ycode targets Vercel and has no Netlify edge purge at all. Tenant-tag purge
+// (proxy sets Netlify-Cache-Tag per tenant) keeps one tenant's publish from
+// invalidating every other tenant on the shared Netlify site.
 /** Legacy tag when tenant id is unknown (single-tenant / admin scripts). */
 const ALL_PAGES_CACHE_TAG = 'all-pages';
 
@@ -242,6 +247,7 @@ export async function purgeNetlifyEdgeCache(
   console.error('❌ [Cache] All Netlify edge purge methods failed:', error);
   return { method: 'none', ok: false, error };
 }
+// MASJIDWEB_SEAM_END
 
 /**
  * Invalidate cache for a specific page by route path.
@@ -312,6 +318,14 @@ export async function invalidatePages(routePaths: string[]): Promise<boolean> {
   }
 }
 
+// MASJIDWEB_SEAM: clearAllCache tenant+netlify composite — see
+// docs/masjidweb-core-seams.md#tier-3. Upstream's clearAllCache() takes no
+// argument, returns void, and throws on failure. The fork version takes the
+// publisher's tenant id (so the clear stays scoped to that tenant), treats
+// Next revalidate errors as non-fatal, and finishes with the explicit
+// Netlify tag purge, returning its diagnostics. On upstream conflict take
+// upstream's inner invalidation calls but keep this signature, the tenant
+// tags, and the purgeNetlifyEdgeCache tail.
 export async function clearAllCache(
   publisherTenantId?: string | null,
 ): Promise<Record<string, unknown>> {
@@ -358,6 +372,7 @@ export async function clearAllCache(
     ...(nextCacheNote ? { nextJsRevalidateNote: nextCacheNote } : {}),
   };
 }
+// MASJIDWEB_SEAM_END
 
 /**
  * Resolve published page IDs to their route paths (for cache invalidation).
