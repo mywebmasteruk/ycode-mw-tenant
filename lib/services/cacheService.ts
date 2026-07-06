@@ -328,8 +328,21 @@ export async function clearAllCache(
       // Self-hosted: clear Next.js's in-process caches.
       revalidateTag(tenantAllPagesTag(tid), { expire: 0 });
       revalidateTag(tenantRouteTag(tid, '/'), { expire: 0 });
-      revalidatePath('/', 'layout');
-      revalidatePath('/', 'page');
+      // MASJIDWEB_SEAM: tenant-scoped full cache clear (cont.) — only nuke the
+      // whole route tree for deliberately UNTENANTED calls (reset-db, template
+      // apply, error-page escalation). revalidatePath('/', 'layout') is
+      // path-keyed, not tenant-keyed: on Netlify the runtime bridges it to a
+      // CDN purge of EVERY tenant's durable entries, so leaving it on the
+      // tenant-scoped path meant any tenant's publish re-colded the whole
+      // platform (confirmed live 2026-07-06: an uninvolved tenant's durable
+      // entry vanished the moment another tenant's canary publish ran). The
+      // tenant-scoped calls above + purgeNetlifyEdgeCache's tenant-tag REST
+      // purge (verified 2026-07-03) already cover the publisher's own pages.
+      if (!tid) {
+        revalidatePath('/', 'layout');
+        revalidatePath('/', 'page');
+      }
+      // MASJIDWEB_SEAM_END
     }
     // MASJIDWEB_SEAM_END
   } catch (error) {
