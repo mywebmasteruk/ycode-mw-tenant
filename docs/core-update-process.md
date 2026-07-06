@@ -4,6 +4,8 @@ This repository is a MasjidWeb production fork of Ycode. It contains MasjidWeb-s
 
 Do not apply upstream Ycode updates directly to `main`, and do not use one-click "Sync fork" for production without review.
 
+**Seam registry (required reading for merges):** [masjidweb-core-seams.md](./masjidweb-core-seams.md) — lists every allowed core touchpoint, the standard repository pattern, and step-by-step re-application after upstream updates.
+
 **Operator workflow (prepare → preview → approve → full rollback):** see [CORE_UPDATE_WORKFLOW.md](../../masjidweb-backend/docs/CORE_UPDATE_WORKFLOW.md) in the admin backend repo.
 
 ## Current in-app update behavior
