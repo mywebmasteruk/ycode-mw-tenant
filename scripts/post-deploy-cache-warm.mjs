@@ -127,8 +127,10 @@ async function listActiveTenantSlugs() {
   const rows = await res.json();
   return [...new Set(
     rows
-      .map((r) => (typeof r.slug === 'string' ? r.slug.trim() : ''))
-      .filter(Boolean),
+      .map((r) => (typeof r.slug === 'string' ? r.slug.trim().toLowerCase() : ''))
+      // Slug becomes the subdomain we crawl — only accept a plain DNS label so
+      // a malformed registry row can never point our GETs at another host.
+      .filter((s) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(s)),
   )];
 }
 
