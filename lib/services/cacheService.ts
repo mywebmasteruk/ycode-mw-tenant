@@ -343,8 +343,8 @@ export async function clearAllCache(
       revalidateTag(tenantAllPagesTag(tid), { expire: 0 });
       revalidateTag(tenantRouteTag(tid, '/'), { expire: 0 });
       // MASJIDWEB_SEAM: tenant-scoped full cache clear (cont.) — only nuke the
-      // whole route tree for deliberately UNTENANTED calls (reset-db, template
-      // apply, error-page escalation). revalidatePath('/', 'layout') is
+      // whole route tree for deliberately UNTENANTED calls (reset-db,
+      // error-page escalation). revalidatePath('/', 'layout') is
       // path-keyed, not tenant-keyed: on Netlify the runtime bridges it to a
       // CDN purge of EVERY tenant's durable entries, so leaving it on the
       // tenant-scoped path meant any tenant's publish re-colded the whole
@@ -989,14 +989,22 @@ async function scheduleWarmChain(
 
   const body = JSON.stringify({ routes, warmed: alreadyWarmed });
   const signature = await hmacHex(body, key);
-  await fetch(`${baseUrl}/ycode/api/cache/warm`, {
+  const res = await fetch(`${baseUrl}/ycode/api/cache/warm`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', [WARM_SIGNATURE_HEADER]: signature },
     body,
     // The endpoint returns as soon as it has scheduled its own background
     // work, so this resolves fast — the timeout only guards a stuck connect.
     signal: AbortSignal.timeout(10000),
-  }).catch(() => null);
+  }).catch((err: unknown) => {
+    console.warn('[Cache] warm chain hop failed:', err instanceof Error ? err.message : err);
+    return null;
+  });
+  // A silent non-2xx here already hid one production gap (the proxy 401'd
+  // every hop because the endpoint wasn't on the public-API list) — log it.
+  if (res && !res.ok) {
+    console.warn(`[Cache] warm chain hop rejected: HTTP ${res.status} (${routes.length} route(s) not warmed)`);
+  }
 }
 
 /**

@@ -87,6 +87,14 @@ describe('isPublicApiRoute', () => {
     expect(isPublicApiRoute('/ycode/api/form-submissions', 'GET')).toBe(false);
   });
 
+  it('allows POST cache-warm chain hops (HMAC-authenticated in the handler)', () => {
+    expect(isPublicApiRoute('/ycode/api/cache/warm', 'POST')).toBe(true);
+  });
+
+  it('blocks GET cache-warm', () => {
+    expect(isPublicApiRoute('/ycode/api/cache/warm', 'GET')).toBe(false);
+  });
+
   it('allows POST to collection items filter', () => {
     expect(
       isPublicApiRoute('/ycode/api/collections/abc123/items/filter', 'POST'),

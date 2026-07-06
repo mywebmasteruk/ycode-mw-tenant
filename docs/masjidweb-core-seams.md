@@ -113,7 +113,7 @@ const { data, error } = await query;
 
 **On conflict:** Take **upstream** function structure/business logic; re-apply the three pieces (imports, `applyTenantEq` on selects/updates/deletes, `tenant_id` on writes). Run tenant tests.
 
-**Translations:** no `tenant_id` on table — scope via `locale_id` / tenant-owned locales (`localeRepository`).
+**Translations:** `translations` now has `tenant_id` and is in the generated tenant-table list (scoped via `applyTenantEq` like the rest); the old "scope via `locale_id` only" note predates that migration.
 
 ---
 

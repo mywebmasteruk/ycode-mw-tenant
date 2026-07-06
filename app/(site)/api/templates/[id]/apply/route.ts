@@ -38,8 +38,13 @@ export async function POST(
     // variable, etc. — without invalidation the CDN would keep serving the
     // previous site's HTML indefinitely. Warm afterwards so the user's
     // first visit to the new site is a HIT, not a cold render.
+    // Scope the purge to THIS tenant: an untenanted clearAllCache() does a
+    // full-site purge + revalidatePath('/', 'layout'), which on Netlify
+    // re-colds EVERY tenant's durable cache for a one-tenant action (the
+    // same incident class fbcbd12 fixed for publishes). Falls back to the
+    // legacy global clear only when no tenant header is present.
     try {
-      await clearAllCache();
+      await clearAllCache(tenantId ?? null);
       const routes = await getAllPublishedRoutes();
       const warmResult = await warmRoutes(routes, request);
       if (warmResult) {

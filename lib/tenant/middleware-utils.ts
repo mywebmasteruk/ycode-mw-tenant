@@ -54,6 +54,15 @@ export function isPublicApiRoute(pathname: string, method: string): boolean {
     return true;
   }
 
+  // MASJIDWEB: cache-warm chain hops are server-to-server fetches with no
+  // session cookie; the route authenticates itself via an HMAC signature
+  // derived from the service-role key (verifyWarmChainSignature). Without
+  // this entry the proxy 401s every hop and only the first warm batch of a
+  // publish ever runs (confirmed live 2026-07-06).
+  if (pathname === '/ycode/api/cache/warm' && method === 'POST') {
+    return true;
+  }
+
   if (PUBLIC_API_EXACT.includes(pathname)) return true;
   if (PUBLIC_API_PREFIXES.some((prefix) => pathname.startsWith(prefix)))
     return true;
