@@ -17,6 +17,7 @@
 export {
   extractSubdomain,
   isPublicApiRoute,
+  isProtectedSiteApiRoute,
   getSupabaseEnvConfig,
   isPublicPage,
 } from './middleware-utils';

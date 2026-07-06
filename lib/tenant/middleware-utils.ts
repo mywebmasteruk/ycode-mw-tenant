@@ -69,6 +69,33 @@ export function isPublicApiRoute(pathname: string, method: string): boolean {
   return false;
 }
 
+// MASJIDWEB_SEAM: site-api-auth
+/**
+ * Builder API routes that live OUTSIDE `/ycode/api` (under the `(site)` group
+ * at `/api/…`) yet perform authenticated builder actions on tenant data.
+ *
+ * Upstream Ycode is single-tenant — the whole app sits behind one login, so
+ * these routes shipped without their own auth. MasjidWeb serves every tenant's
+ * builder on a PUBLIC subdomain, which exposes them to anonymous internet
+ * requests. The `/api/templates` POSTs are destructive/exfiltrating:
+ *   - POST /api/templates/:id/apply        → wipes + replaces tenant content
+ *   - POST /api/templates/export           → dumps tenant content as SQL
+ *   - POST /api/templates/export-and-upload→ dumps + ships it to an external svc
+ *
+ * The GET catalog routes (`/api/templates`, `/api/templates/:id`) return only
+ * the shared external template marketplace (no tenant data), so they stay
+ * public. Legit callers of the POSTs are the authenticated builder UI
+ * (components/templates/*, same-origin fetch → session cookie present);
+ * provisioning never calls these (it hits the external template API directly).
+ *
+ * proxy.ts routes matches through the same `verifyApiAuth` + tenant/JWT
+ * alignment it applies to `/ycode/api`.
+ */
+export function isProtectedSiteApiRoute(pathname: string, method: string): boolean {
+  return method === 'POST' && pathname.startsWith('/api/templates/');
+}
+// MASJIDWEB_SEAM_END
+
 /**
  * Derive Supabase project URL and anon key from env vars.
  */

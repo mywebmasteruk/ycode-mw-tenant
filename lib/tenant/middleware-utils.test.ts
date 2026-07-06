@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   extractSubdomain,
   isPublicApiRoute,
+  isProtectedSiteApiRoute,
   isPublicPage,
 } from './middleware-utils';
 
@@ -124,6 +125,29 @@ describe('isPublicApiRoute', () => {
 
   it('keeps OAuth authorize protected (requires user session)', () => {
     expect(isPublicApiRoute('/ycode/api/oauth/authorize', 'POST')).toBe(false);
+  });
+});
+
+describe('isProtectedSiteApiRoute', () => {
+  it('protects the destructive template POSTs', () => {
+    expect(isProtectedSiteApiRoute('/api/templates/some-id/apply', 'POST')).toBe(true);
+    expect(isProtectedSiteApiRoute('/api/templates/export', 'POST')).toBe(true);
+    expect(isProtectedSiteApiRoute('/api/templates/export-and-upload', 'POST')).toBe(true);
+  });
+
+  it('leaves the read-only template catalog public', () => {
+    // GETs return only the shared external marketplace, no tenant data.
+    expect(isProtectedSiteApiRoute('/api/templates', 'GET')).toBe(false);
+    expect(isProtectedSiteApiRoute('/api/templates/some-id', 'GET')).toBe(false);
+    expect(isProtectedSiteApiRoute('/api/templates/some-id/apply', 'GET')).toBe(false);
+  });
+
+  it('does not touch genuinely public (site) routes or unrelated paths', () => {
+    expect(isProtectedSiteApiRoute('/api/page-auth/verify', 'POST')).toBe(false);
+    expect(isProtectedSiteApiRoute('/api/airtable-webhook', 'POST')).toBe(false);
+    expect(isProtectedSiteApiRoute('/api/cron/airtable-webhooks', 'GET')).toBe(false);
+    expect(isProtectedSiteApiRoute('/about', 'GET')).toBe(false);
+    expect(isProtectedSiteApiRoute('/ycode/api/publish', 'POST')).toBe(false);
   });
 });
 

@@ -11,6 +11,7 @@ import {
   extractSubdomain,
   getSupabaseEnvConfig,
   isPublicApiRoute,
+  isProtectedSiteApiRoute,
   isPublicPage,
 } from '@/lib/tenant';
 import { lookupTenant } from '@/lib/tenant/tenant-registry-lookup';
@@ -226,8 +227,15 @@ export async function proxy(request: NextRequest) {
   const skipPreviewAuth = process.env.DISABLE_PREVIEW_AUTH === 'true'
     && pathname.startsWith('/ycode/preview');
 
+  // MASJIDWEB_SEAM: site-api-auth — extend the auth chokepoint to cover the
+  // destructive `(site)/api/templates` POSTs. Upstream Ycode leaves these
+  // unauthenticated (single-tenant assumption); on MasjidWeb they face the
+  // public tenant subdomains. See isProtectedSiteApiRoute in middleware-utils.
+  const isProtectedSiteApi = isProtectedSiteApiRoute(pathname, request.method);
+  // MASJIDWEB_SEAM_END
+
   // Protect API and preview routes with auth + tenant / JWT alignment
-  if (!skipPreviewAuth && (pathname.startsWith('/ycode/api') || pathname.startsWith('/ycode/preview'))) {
+  if (!skipPreviewAuth && (pathname.startsWith('/ycode/api') || pathname.startsWith('/ycode/preview') || isProtectedSiteApi)) {
     // MASJIDWEB_SEAM: tenant-jwt-alignment — see docs/masjidweb-core-seams.md#auth
     if (!isProvisionPublish) {
       const auth = await verifyApiAuth(request);
@@ -237,7 +245,10 @@ export async function proxy(request: NextRequest) {
         }
         return auth.response;
       }
-      if (auth.kind === 'authenticated' && pathname.startsWith('/ycode/api')) {
+      // Alignment applies to every authenticated API route (/ycode/api AND the
+      // protected (site)/api routes) — both act on the subdomain's tenant, so a
+      // session for a DIFFERENT tenant must be rejected, not just any session.
+      if (auth.kind === 'authenticated' && (pathname.startsWith('/ycode/api') || isProtectedSiteApi)) {
         const headerTid = request.headers.get('x-tenant-id');
         if (tenantJwtHeaderMismatchReason(headerTid, auth.user)) {
           return NextResponse.json(
