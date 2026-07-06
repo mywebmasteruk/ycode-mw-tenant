@@ -35,6 +35,7 @@ import { writeFileSync } from 'node:fs';
 import crypto from 'node:crypto';
 import { createBrowserClient } from '@supabase/ssr';
 import WS from 'ws';
+import { TENANT_SCOPED_TABLES } from '../lib/masjidweb/tenant-scoped-tables.generated';
 
 (globalThis as unknown as { WebSocket: unknown }).WebSocket = WS;
 
@@ -501,6 +502,69 @@ async function main() {
       }
     } catch (e) {
       record('rls-mint', 'mint health endpoint reachable', false, undefined, e instanceof Error ? e.message : String(e));
+    }
+
+    console.log('=== RLS schema coverage ===');
+    // Seam-retirement guard #2: mint health proves the JWT path works, but says
+    // nothing about the SCHEMA. With the app-layer filter retired, a tenant
+    // table (any public table with a tenant_id column) that lacks RLS is
+    // fail-OPEN for the authenticated-role client — the classic way this
+    // happens is a Ycode update shipping a NEW table (global_variables did
+    // exactly this in June). mw_rls_coverage() (database/migrations/
+    // 20260706000000, service_role-only) reports live pg_catalog state; fail
+    // on: RLS disabled, a permissive non-tenant policy for authenticated/
+    // PUBLIC that can match rows (permissive policies OR-combine, so one such
+    // policy negates every tenant policy on the table), or drift between the
+    // live schema and the generated tenant-table list the static gate uses.
+    // Fail-CLOSED: an unreachable/missing function is itself a failure.
+    try {
+      const covRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/mw_rls_coverage`, {
+        method: 'POST',
+        headers: {
+          apikey: SUPABASE_SERVICE_ROLE_KEY,
+          Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      });
+      if (!covRes.ok) {
+        record('rls-coverage', 'mw_rls_coverage() callable', false, covRes.status, (await covRes.text()).slice(0, 300));
+      } else {
+        const rows = (await covRes.json()) as Array<{
+          table_name: string; rls_enabled: boolean; rls_forced: boolean;
+          tenant_policies: number; leaky_policies: number;
+        }>;
+        const dbTables = new Set(rows.map((r) => r.table_name));
+        const noRls = rows.filter((r) => !r.rls_enabled).map((r) => r.table_name);
+        const leaky = rows.filter((r) => r.leaky_policies > 0).map((r) => r.table_name);
+        const notInGate = rows.filter((r) => !TENANT_SCOPED_TABLES.has(r.table_name)).map((r) => r.table_name);
+        const goneFromDb = [...TENANT_SCOPED_TABLES].filter((t) => !dbTables.has(t));
+        record(
+          'rls-coverage',
+          `every tenant table has RLS enabled (${rows.length} tables)`,
+          rows.length > 0 && noRls.length === 0,
+          covRes.status,
+          noRls.length ? `RLS DISABLED on: ${noRls.join(', ')}` : undefined,
+        );
+        record(
+          'rls-coverage',
+          'no permissive non-tenant policies for authenticated/PUBLIC',
+          leaky.length === 0,
+          covRes.status,
+          leaky.length ? `leaky policies on: ${leaky.join(', ')} (permissive policies OR-combine and negate tenant scoping)` : undefined,
+        );
+        record(
+          'rls-coverage',
+          'live schema matches the generated tenant-table list (static gate coverage)',
+          notInGate.length === 0 && goneFromDb.length === 0,
+          covRes.status,
+          notInGate.length || goneFromDb.length
+            ? `${notInGate.length ? `new tenant_id table(s) NOT in the gate list (regenerate tenant-scoped-tables): ${notInGate.join(', ')}. ` : ''}${goneFromDb.length ? `in gate list but missing tenant_id in DB: ${goneFromDb.join(', ')}.` : ''}`
+            : undefined,
+        );
+      }
+    } catch (e) {
+      record('rls-coverage', 'mw_rls_coverage() callable', false, undefined, e instanceof Error ? e.message : String(e));
     }
 
     console.log('=== login ===');
