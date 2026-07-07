@@ -83,6 +83,7 @@ import type { ExternalPastePlacement } from '@/stores/useExternalPasteStore';
 
 // 6. Utils/lib
 import { findHomepage } from '@/lib/page-utils';
+import { hasTextSelection } from '@/lib/utils';
 import { getStyleIds } from '@/lib/layer-style-resolve';
 import { findLayerById, getClassesString, removeLayerById, canCopyLayer, canDeleteLayer, regenerateIdsWithInteractionRemapping, findParentAndIndex, insertLayerAfter, updateLayerProps, getLayerIndexes, removeRichTextSublayer, canPasteIntoParent, canHaveChildren, LINK_NESTING_ERROR } from '@/lib/layer-utils';
 import { cloneDeep } from 'lodash';
@@ -1715,8 +1716,9 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
         }
 
         // Copy: Cmd/Ctrl + C (supports multi-select)
+        // Skip when the user has a plain-text selection so native copy works.
         if ((e.metaKey || e.ctrlKey) && e.key === 'c' && !isContentOnlyRole) {
-          if (!isInputFocused && (currentPageId || editingComponentId)) {
+          if (!isInputFocused && !hasTextSelection() && (currentPageId || editingComponentId)) {
             e.preventDefault();
 
             // Get layers from the correct context
@@ -1760,8 +1762,9 @@ export default function YCodeBuilder({ children, isTemplateTenant }: YCodeBuilde
         }
 
         // Cut: Cmd/Ctrl + X (supports multi-select)
+        // Skip when the user has a plain-text selection so native cut works.
         if ((e.metaKey || e.ctrlKey) && e.key === 'x' && !isContentOnlyRole) {
-          if (!isInputFocused && (currentPageId || editingComponentId)) {
+          if (!isInputFocused && !hasTextSelection() && (currentPageId || editingComponentId)) {
             e.preventDefault();
 
             // Get layers from the correct context
