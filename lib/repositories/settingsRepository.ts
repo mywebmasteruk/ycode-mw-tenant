@@ -54,14 +54,14 @@ export async function getAllSettings(): Promise<Setting[]> {
  * @returns Promise resolving to the setting value or null if not found
  */
 export async function getSettingByKey(key: string, tenantId?: string): Promise<any | null> {
-  const client = await getSupabaseAdmin(tenantId);
+  const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
+  const client = await getSupabaseAdmin();
   if (!client) {
     throw new Error('Failed to initialize Supabase client');
   }
 
-  const tenantId = await resolveEffectiveTenantId();
   let query = client.from('settings').select('value').eq('key', key);
-  query = applyTenantEq(query, tenantId);
+  query = applyTenantEq(query, effectiveTenantId);
 
   const { data, error } = await query.maybeSingle();
 

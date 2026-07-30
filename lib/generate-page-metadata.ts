@@ -272,21 +272,9 @@ export async function generatePageMetadata(
   }
 
   // Build description - resolve field variables if collection item is available
-<<<<<<< HEAD
   let description = seo?.description || fallbackDescription || `${page.name} - ${MASJIDWEB_BUILT_WITH}`;
-||||||| 2929273e
-  let description = seo?.description || fallbackDescription || `${page.name} - Built with Ycode`;
-=======
-  let description = seo?.description || fallbackDescription || page.name;
->>>>>>> upstream/main
   if (collectionItem && seo?.description) {
-<<<<<<< HEAD
     description = resolveInlineVariables(seo.description, collectionItem) || fallbackDescription || `${page.name} - ${MASJIDWEB_BUILT_WITH}`;
-||||||| 2929273e
-    description = resolveInlineVariables(seo.description, collectionItem) || fallbackDescription || `${page.name} - Built with Ycode`;
-=======
-    description = resolveInlineVariables(seo.description, collectionItem) || fallbackDescription || page.name;
->>>>>>> upstream/main
   }
 
   // Base metadata

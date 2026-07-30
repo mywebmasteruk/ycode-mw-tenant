@@ -29,15 +29,11 @@ import { buildGlobalsMetaMap, buildGlobalsValueMap } from '@/lib/collection-fiel
 import { buildLocalizedPageUrls, type LocalizedDynamicSlug } from '@/lib/page-utils';
 import { getTranslatableKey } from '@/lib/locale-runtime';
 import { getSlugTranslationsByLocale } from '@/lib/repositories/translationRepository';
-<<<<<<< HEAD
+import { buildPageHreflangAlternatesForPage } from '@/lib/generate-page-metadata';
 import { resolveEffectiveTenantId, runWithEffectiveTenantIdIfPresent } from '@/lib/masjidweb/effective-tenant-id';
 import { tenantAllPagesTag } from '@/lib/masjidweb/tenant-cache-tags';
-||||||| 2929273e
-=======
-import { buildPageHreflangAlternatesForPage } from '@/lib/generate-page-metadata';
 import { getSiteBaseUrl } from '@/lib/url-utils';
 import type { HreflangAlternate } from '@/lib/hreflang-utils';
->>>>>>> upstream/main
 import type { Layer, BackgroundsDesign, Component, Page, CollectionItemWithValues, CollectionField, Locale, PageFolder, PasswordProtectionContext, Translation } from '@/types';
 
 interface PageLinkRef { collection_item_id: string; page_id: string }

@@ -13,21 +13,24 @@
  *   upsert code path (one round-trip per completed turn, never per token).
  */
 
+import { applyTenantEq } from '@/lib/masjidweb/apply-tenant-eq';
+import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import type { AiChat, AiChatSummary, UpsertAiChatData } from '@/types';
 
 /** Fetch all chats without their transcripts, newest activity first. */
 export async function getAllAiChatSummaries(tenantId?: string): Promise<AiChatSummary[]> {
-  const client = await getSupabaseAdmin(tenantId);
+  const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
+  const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
   }
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('ai_chats')
     .select('id, title, updated_at')
-    .order('updated_at', { ascending: false });
+    .order('updated_at', { ascending: false }), effectiveTenantId);
 
   if (error) {
     throw new Error(`Failed to fetch AI chats: ${error.message}`);
@@ -38,17 +41,18 @@ export async function getAllAiChatSummaries(tenantId?: string): Promise<AiChatSu
 
 /** Fetch a single chat including its full transcript. */
 export async function getAiChatById(id: string, tenantId?: string): Promise<AiChat | null> {
-  const client = await getSupabaseAdmin(tenantId);
+  const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
+  const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
   }
 
-  const { data, error } = await client
+  const { data, error } = await applyTenantEq(client
     .from('ai_chats')
     .select('*')
     .eq('id', id)
-    .single();
+    .single(), effectiveTenantId);
 
   if (error) {
     if (error.code === 'PGRST116') {
@@ -67,7 +71,8 @@ export async function getAiChatById(id: string, tenantId?: string): Promise<AiCh
  * long conversations.
  */
 export async function upsertAiChat(chatData: UpsertAiChatData, tenantId?: string): Promise<void> {
-  const client = await getSupabaseAdmin(tenantId);
+  const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
+  const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
@@ -81,6 +86,7 @@ export async function upsertAiChat(chatData: UpsertAiChatData, tenantId?: string
         title: chatData.title,
         messages: chatData.messages,
         updated_at: new Date().toISOString(),
+        ...(effectiveTenantId ? { tenant_id: effectiveTenantId } : {}),
       },
       { onConflict: 'id' },
     );
@@ -91,16 +97,17 @@ export async function upsertAiChat(chatData: UpsertAiChatData, tenantId?: string
 }
 
 export async function deleteAiChat(id: string, tenantId?: string): Promise<void> {
-  const client = await getSupabaseAdmin(tenantId);
+  const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
+  const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
   }
 
-  const { error } = await client
+  const { error } = await applyTenantEq(client
     .from('ai_chats')
     .delete()
-    .eq('id', id);
+    .eq('id', id), effectiveTenantId);
 
   if (error) {
     throw new Error(`Failed to delete AI chat: ${error.message}`);

@@ -62,12 +62,8 @@ import { useLiveComponentUpdates } from '@/hooks/use-live-component-updates';
 import { useLiveLayerStyleUpdates } from '@/hooks/use-live-layer-style-updates';
 
 // 4. Stores
-<<<<<<< HEAD
 import { isSessionInvalidError } from '@/lib/masjidweb/session-error';
-||||||| 2929273e
-=======
 import { useAgentSettingsStore } from '@/stores/useAgentSettingsStore';
->>>>>>> upstream/main
 import { useAuthStore } from '@/stores/useAuthStore';
 import { useClipboardStore } from '@/stores/useClipboardStore';
 import { useEditorStore } from '@/stores/useEditorStore';

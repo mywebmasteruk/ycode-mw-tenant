@@ -13,9 +13,9 @@
  */
 
 import { NextRequest } from 'next/server';
+import sharp from 'sharp';
 import { base62ToUuid } from '@/lib/convertion-utils';
 import { getAssetProxyUrl, isAssetOfType, ASSET_CATEGORIES } from '@/lib/asset-utils';
-import { buildAssetProxyResponse } from '@/lib/asset-proxy-response';
 import { getAssetForProxy } from '@/lib/repositories/assetRepository';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { STORAGE_BUCKET } from '@/lib/asset-constants';
@@ -23,24 +23,6 @@ import { STORAGE_BUCKET } from '@/lib/asset-constants';
 // Cache headers set at infrastructure level via next.config.ts headers()
 // to prevent Next.js proxy from overriding them
 
-<<<<<<< HEAD
-||||||| 2929273e
-function parseTransformParams(searchParams: URLSearchParams) {
-  const width = parseInt(searchParams.get('width') || '');
-  const height = parseInt(searchParams.get('height') || '');
-  const quality = parseInt(searchParams.get('quality') || '');
-
-  const hasParams = width > 0 || height > 0 || quality > 0;
-  if (!hasParams) return null;
-
-  return {
-    width: width > 0 ? width : undefined,
-    height: height > 0 ? height : undefined,
-    quality: quality > 0 ? Math.min(quality, 100) : 80,
-  };
-}
-
-=======
 function parseTransformParams(searchParams: URLSearchParams) {
   const width = parseInt(searchParams.get('width') || '');
   const height = parseInt(searchParams.get('height') || '');
@@ -68,7 +50,6 @@ function isResizableBitmap(mimeType: string | null | undefined): boolean {
   return true;
 }
 
->>>>>>> upstream/main
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ hash: string; name: string[] }> }
@@ -126,58 +107,6 @@ export async function GET(
       return new Response('Not found', { status: 404 });
     }
 
-<<<<<<< HEAD
-    return buildAssetProxyResponse({
-      storageResponse: response,
-      mimeType: asset.mime_type,
-      searchParams: url.searchParams,
-      canTransformMimeType: isAssetOfType(asset.mime_type, ASSET_CATEGORIES.IMAGES),
-||||||| 2929273e
-    const transform = parseTransformParams(url.searchParams);
-    const canResize = transform && isImage;
-
-    if (canResize) {
-      const buffer = Buffer.from(await response.arrayBuffer());
-      let pipeline = sharp(buffer);
-
-      if (transform.width || transform.height) {
-        pipeline = pipeline.resize(transform.width, transform.height, {
-          fit: 'cover',
-          withoutEnlargement: true,
-        });
-      }
-
-      pipeline = pipeline.webp({ quality: transform.quality });
-
-      const resized = await pipeline.toBuffer();
-
-      return new Response(new Uint8Array(resized), {
-        status: 200,
-        headers: {
-          'Content-Type': 'image/webp',
-          'Content-Length': resized.length.toString(),
-        },
-      });
-    }
-
-    // Mirror the upstream status (206 for partial content) and range headers so
-    // Safari can stream/seek the video. Advertise Accept-Ranges so clients know
-    // range requests are supported even on the initial full response.
-    const headers = new Headers({
-      'Content-Type': asset.mime_type || 'application/octet-stream',
-      'Accept-Ranges': 'bytes',
-    });
-
-    const contentRange = response.headers.get('content-range');
-    if (contentRange) headers.set('Content-Range', contentRange);
-
-    const contentLength = response.headers.get('content-length');
-    if (contentLength) headers.set('Content-Length', contentLength);
-
-    return new Response(response.body, {
-      status: response.status,
-      headers,
-=======
     const transform = parseTransformParams(url.searchParams);
     // Resize the fetched original in-process with sharp. GIFs are excluded via
     // isResizableBitmap — Sharp flattens animated frames into a single static
@@ -248,7 +177,6 @@ export async function GET(
     return new Response(response.body, {
       status: response.status,
       headers,
->>>>>>> upstream/main
     });
   } catch {
     return new Response('Internal server error', { status: 500 });

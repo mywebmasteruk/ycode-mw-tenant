@@ -12,15 +12,11 @@ import { useEditorStore } from '../stores/useEditorStore';
 import { createClient } from '@/lib/supabase-browser';
 import { debounce } from '../lib/collaboration-utils';
 import { createChannelLifecycle } from '@/lib/realtime-channel';
-<<<<<<< HEAD
+import { syncLayerAssets } from '@/lib/canvas-asset-sync';
+import { findAddedLayerIds } from '@/lib/layer-utils';
 // MASJIDWEB_SEAM: realtime-tenant-isolation — see docs/masjidweb-core-seams.md#tier-6
 import { clientTenantId, tenantChannelName } from '@/lib/masjidweb/realtime-tenant-channel';
 // MASJIDWEB_SEAM_END
-||||||| 2929273e
-=======
-import { findAddedLayerIds } from '@/lib/layer-utils';
-import { syncLayerAssets } from '@/lib/canvas-asset-sync';
->>>>>>> upstream/main
 import type { Layer, LayerUpdate } from '../types';
 
 // Helper function to find layer in draft

@@ -101,18 +101,10 @@ export async function PUT(
 
     // Skip cache invalidation for draft/internal settings so builder
     // autosaves don't purge the public CDN cache on every edit.
-<<<<<<< HEAD
-    if (!DRAFT_ONLY_SETTING_KEYS.has(key)) {
+    if (!isDraftOnlySettingKey(key)) {
       // MASJIDWEB_SEAM: tenant-scoped cache clear — see docs/masjidweb-core-seams.md#tier-4
       await clearAllCache(await resolveEffectiveTenantId());
       // MASJIDWEB_SEAM_END
-||||||| 2929273e
-    if (!DRAFT_ONLY_SETTING_KEYS.has(key)) {
-      await clearAllCache();
-=======
-    if (!isDraftOnlySettingKey(key)) {
-      await clearAllCache();
->>>>>>> upstream/main
 
       // Prime the cache so the first visit to any public page after this
       // settings change doesn't pay the cold-cache cost. warmRoutes batches

@@ -108,13 +108,12 @@ export async function getFieldsByCollectionId(
   filters?: FieldFilters,
   tenantId?: string
 ): Promise<CollectionField[]> {
-  const client = await getSupabaseAdmin(tenantId);
+  const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
+  const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
-
-  const effectiveTenantId = await resolveEffectiveTenantId();
 
   let query = client
     .from('collection_fields')
