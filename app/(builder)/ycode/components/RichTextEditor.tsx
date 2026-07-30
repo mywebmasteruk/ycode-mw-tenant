@@ -8,7 +8,7 @@
  * Data is stored in data-variable attribute as JSON-encoded string
  */
 
-import React, { useEffect, useState, useImperativeHandle, forwardRef, useCallback, useMemo, useRef } from 'react';
+import React, { useEffect, useState, useImperativeHandle, forwardRef, useCallback, useMemo, useReducer, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { useEditor, EditorContent } from '@tiptap/react';
 import { Mark, mergeAttributes } from '@tiptap/core';
@@ -652,6 +652,16 @@ const RichTextEditor = forwardRef<RichTextEditorHandle, RichTextEditorProps>(({
     if (!editor) return;
     editor.setEditable(!disabled);
   }, [editor, disabled]);
+
+  // Tiptap v3's useEditor no longer re-renders on every transaction, so toolbar
+  // state read via editor.isActive(...) (e.g. the heading Select) goes stale when
+  // the selection moves. Force a re-render on each transaction to keep it in sync.
+  const [, forceToolbarUpdate] = useReducer((x: number) => x + 1, 0);
+  useEffect(() => {
+    if (!editor) return;
+    editor.on('transaction', forceToolbarUpdate);
+    return () => { editor.off('transaction', forceToolbarUpdate); };
+  }, [editor]);
 
   // Sync CMS context into editor storage so node views can access it, then
   // force every dynamic-variable badge to re-render. Badges resolve their label

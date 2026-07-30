@@ -12,9 +12,15 @@ import { useEditorStore } from '../stores/useEditorStore';
 import { createClient } from '@/lib/supabase-browser';
 import { debounce } from '../lib/collaboration-utils';
 import { createChannelLifecycle } from '@/lib/realtime-channel';
+<<<<<<< HEAD
 // MASJIDWEB_SEAM: realtime-tenant-isolation — see docs/masjidweb-core-seams.md#tier-6
 import { clientTenantId, tenantChannelName } from '@/lib/masjidweb/realtime-tenant-channel';
 // MASJIDWEB_SEAM_END
+||||||| 2929273e
+=======
+import { findAddedLayerIds } from '@/lib/layer-utils';
+import { syncLayerAssets } from '@/lib/canvas-asset-sync';
+>>>>>>> upstream/main
 import type { Layer, LayerUpdate } from '../types';
 
 // Helper function to find layer in draft
@@ -199,6 +205,12 @@ export function useLiveLayerUpdates(
     // Apply the layer addition with the exact same layer object
     if (pageId && payload.page_id === pageId) {
       freshAddLayerWithId(pageId, payload.parent_layer_id, payload.new_layer);
+      if (payload.new_layer?.id) {
+        useEditorStore.getState().markLayersEntering([payload.new_layer.id]);
+      }
+      if (payload.new_layer) {
+        void syncLayerAssets([payload.new_layer]);
+      }
     }
   }, [pageId]);
 
@@ -245,8 +257,36 @@ export function useLiveLayerUpdates(
     const currentPageId = pageIdRef.current;
     if (currentPageId && payload.page_id === currentPageId) {
       markPageMcpSynced(currentPageId);
-      const { setDraftLayers } = usePagesStore.getState();
-      setDraftLayers(currentPageId, payload.layers);
+      const { setDraftLayers, draftsByPageId, loadDraft } = usePagesStore.getState();
+      const existingDraft = draftsByPageId[currentPageId];
+
+      if (existingDraft) {
+        // Diff against the current draft (before replacing it) so the canvas can
+        // step-reveal exactly the layers this remote update added.
+        const previousLayers = existingDraft.layers ?? [];
+        const addedIds = findAddedLayerIds(previousLayers, payload.layers);
+
+        setDraftLayers(currentPageId, payload.layers);
+
+        if (addedIds.length > 0) {
+          useEditorStore.getState().markLayersEntering(addedIds);
+        }
+      } else {
+        // The broadcast can race the page's initial draft load (the channel
+        // subscribes on page switch while loadDraft is still in flight), and
+        // setDraftLayers no-ops without a loaded draft. Load it first, then
+        // apply the authoritative layers (loadDraft de-dupes in-flight loads).
+        void (async () => {
+          await loadDraft(currentPageId);
+          if (usePagesStore.getState().draftsByPageId[currentPageId]) {
+            usePagesStore.getState().setDraftLayers(currentPageId, payload.layers);
+          }
+        })();
+      }
+
+      // Pull in any assets these layers reference that the editor hasn't loaded
+      // yet (e.g. images the AI just uploaded), so they render without a refresh.
+      void syncLayerAssets(payload.layers);
 
       // Set a 10-second page lock so the UI shows MCP is editing
       const lockKey = getResourceLockKey('page', currentPageId);

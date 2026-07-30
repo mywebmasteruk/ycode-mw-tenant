@@ -240,6 +240,19 @@ function ensureLengthUnit(value: string): string {
 }
 
 /**
+ * Normalizes a grid span value to a bare Tailwind suffix.
+ * Accepts CSS-native shorthand ("span 3") as well as bare values ("3", "full", "auto").
+ */
+function normalizeGridSpanValue(value: string): string {
+  return value.replace(/^span\s+/i, '').trim();
+}
+
+/** Tailwind `display` utility values the editor supports as bare classes. */
+const DISPLAY_VALUES = new Set([
+  'block', 'inline-block', 'inline', 'flex', 'inline-flex', 'grid', 'inline-grid', 'hidden',
+]);
+
+/**
  * Map of Tailwind class prefixes to their property names
  * Used for conflict detection and removal
  */
@@ -250,6 +263,7 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
   flexWrap: /^flex-(wrap|wrap-reverse|nowrap)$/,
   justifyContent: /^justify-(start|end|center|between|around|evenly|stretch)$/,
   alignItems: /^items-(start|end|center|baseline|stretch)$/,
+  alignSelf: /^self-(auto|start|end|center|baseline|stretch)$/,
   alignContent: /^content-(start|end|center|between|around|evenly|stretch)$/,
   gap: /^gap-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
   columnGap: /^gap-x-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
@@ -300,6 +314,7 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
   letterSpacing: /^tracking-(tighter|tight|normal|wide|wider|widest|\[.+\]|.+)$/,
   textAlign: /^text-(left|center|right|justify|start|end)$/,
   textWrap: /^text-(wrap|nowrap|balance|pretty)$/,
+  fontVariantNumeric: /^(normal-nums|ordinal|slashed-zero|lining-nums|oldstyle-nums|proportional-nums|tabular-nums|diagonal-fractions|stacked-fractions)$/,
   textTransform: /^(uppercase|lowercase|capitalize|normal-case)$/,
   textDecoration: /^(underline|overline|line-through|no-underline)$/,
   textDecorationColor: /^decoration-\[.+\](\/\d+)?$/,
@@ -686,8 +701,12 @@ export function propertyToClass(
   // Layout conversions
   if (category === 'layout') {
     switch (property) {
-      case 'display':
-        return value.toLowerCase();
+      case 'display': {
+        // Map CSS synonyms (e.g. "none") to Tailwind's canonical value and
+        // ignore unsupported values so we never emit an invalid class like "none".
+        const normalized = value.toLowerCase() === 'none' ? 'hidden' : value.toLowerCase();
+        return DISPLAY_VALUES.has(normalized) ? normalized : null;
+      }
       case 'flexDirection':
         if (value === 'row') return 'flex-row';
         if (value === 'column') return 'flex-col';
@@ -715,6 +734,13 @@ export function propertyToClass(
           'flex-end': 'end',
         };
         return `items-${itemsMap[value] || value}`;
+      }
+      case 'alignSelf': {
+        const selfMap: Record<string, string> = {
+          'flex-start': 'start',
+          'flex-end': 'end',
+        };
+        return `self-${selfMap[value] || value}`;
       }
       case 'alignContent': {
         const contentMap: Record<string, string> = {
@@ -766,6 +792,10 @@ export function propertyToClass(
         return `tracking-${value}`;
       case 'textAlign':
         return `text-${value}`;
+      case 'textWrap':
+        return `text-${value}`;
+      case 'fontVariantNumeric':
+        return value === 'normal' ? 'normal-nums' : value;
       case 'textTransform':
         if (value === 'none') return 'normal-case';
         return value; // uppercase, lowercase, capitalize
@@ -875,6 +905,13 @@ export function propertyToClass(
       // Special case: 100% → full
       if (value === '100%') return `${prefix}-full`;
 
+      // Tailwind fraction values (e.g. "1/2" → w-1/2); n/n equals 100% → full
+      const fractionMatch = value.match(/^(\d+)\/([1-9]\d*)$/);
+      if (fractionMatch) {
+        if (fractionMatch[1] === fractionMatch[2]) return `${prefix}-full`;
+        return `${prefix}-${value}`;
+      }
+
       // Use abstracted helper with allowed named values
       return formatMeasurementClass(value, prefix, ['auto', 'full', 'screen', 'min', 'max', 'fit', 'none']);
     }
@@ -903,12 +940,14 @@ export function propertyToClass(
 
     // Grid Column Span
     if (property === 'gridColumnSpan') {
-      return value === 'full' ? 'col-span-full' : `col-span-${value}`;
+      const span = normalizeGridSpanValue(value);
+      return span === 'full' ? 'col-span-full' : `col-span-${span}`;
     }
 
     // Grid Row Span
     if (property === 'gridRowSpan') {
-      return value === 'full' ? 'row-span-full' : `row-span-${value}`;
+      const span = normalizeGridSpanValue(value);
+      return span === 'full' ? 'row-span-full' : `row-span-${span}`;
     }
   }
 
@@ -1441,6 +1480,14 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
       }
     }
 
+    // Align Self
+    if (cls.startsWith('self-')) {
+      const value = cls.replace('self-', '');
+      if (['auto', 'start', 'end', 'center', 'baseline', 'stretch'].includes(value)) {
+        design.layout!.alignSelf = value;
+      }
+    }
+
     // Gap
     if (cls.startsWith('gap-[')) {
       const value = extractArbitraryValue(cls);
@@ -1509,6 +1556,17 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
     if (cls === 'text-center') design.typography!.textAlign = 'center';
     if (cls === 'text-right') design.typography!.textAlign = 'right';
     if (cls === 'text-justify') design.typography!.textAlign = 'justify';
+
+    // Text Wrap
+    if (cls === 'text-wrap') design.typography!.textWrap = 'wrap';
+    if (cls === 'text-nowrap') design.typography!.textWrap = 'nowrap';
+    if (cls === 'text-balance') design.typography!.textWrap = 'balance';
+    if (cls === 'text-pretty') design.typography!.textWrap = 'pretty';
+
+    // Font Variant Numeric
+    if (CLASS_PROPERTY_MAP.fontVariantNumeric.test(cls)) {
+      design.typography!.fontVariantNumeric = cls === 'normal-nums' ? 'normal' : cls;
+    }
 
     // Text Transform
     if (cls === 'uppercase') design.typography!.textTransform = 'uppercase';

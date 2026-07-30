@@ -4,7 +4,7 @@
  * Handles communication with Next.js API routes
  */
 
-import type { Page, PageLayers, Layer, Asset, AssetCategory, PageFolder, ApiResponse, Collection, CollectionField, CollectionItemWithValues, Component, LayerStyle, Setting, UpdateCollectionData, CreateCollectionFieldData, UpdateCollectionFieldData, Locale, Translation, CreateLocaleData, UpdateLocaleData, CreateTranslationData, UpdateTranslationData, AssetFolder, Font } from '../types';
+import type { Page, PageLayers, Layer, Asset, AssetCategory, PageFolder, ApiResponse, AgentProviderId, AgentSettingsStatus, AiChat, AiChatSummary, Collection, CollectionField, CollectionItemWithValues, Component, LayerStyle, Setting, UpdateAgentSettingsData, UpdateCollectionData, CreateCollectionFieldData, UpdateCollectionFieldData, Locale, Translation, CreateLocaleData, UpdateLocaleData, CreateTranslationData, UpdateTranslationData, AssetFolder, Font } from '../types';
 import type { StatusAction } from '@/lib/collection-field-utils';
 import type { CollectionUsageResult, CollectionFieldUsageResult } from '@/lib/collection-usage-utils';
 import { createBrowserClient } from '@/lib/supabase-browser';
@@ -832,6 +832,59 @@ export const settingsApi = {
   },
 };
 
+// Agent (AI builder) Settings API
+export const agentSettingsApi = {
+  /** Get the agent configuration status (API key is returned masked). */
+  async getStatus(): Promise<ApiResponse<AgentSettingsStatus>> {
+    return apiRequest<AgentSettingsStatus>('/ycode/api/settings/agent');
+  },
+
+  /** Save agent configuration. Only provided fields are updated; a null key removes the stored key. */
+  async update(data: UpdateAgentSettingsData): Promise<ApiResponse<AgentSettingsStatus>> {
+    return apiRequest<AgentSettingsStatus>('/ycode/api/settings/agent', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** Verify a provider API key (or its currently configured one when omitted). */
+  async testKey(provider: AgentProviderId, apiKey?: string): Promise<ApiResponse<{ success: boolean }>> {
+    return apiRequest<{ success: boolean }>('/ycode/api/settings/agent/test', {
+      method: 'POST',
+      body: JSON.stringify(apiKey ? { provider, apiKey } : { provider }),
+    });
+  },
+};
+
+// AI Chats API - server-side AI builder conversation history
+export const aiChatsApi = {
+  /** List all saved chats as lightweight summaries (no transcripts). */
+  async getAll(): Promise<ApiResponse<AiChatSummary[]>> {
+    return apiRequest<AiChatSummary[]>('/ycode/api/ai/chats');
+  },
+
+  /** Get one chat including its full transcript. */
+  async getById(id: string): Promise<ApiResponse<AiChat>> {
+    return apiRequest<AiChat>(`/ycode/api/ai/chats/${id}`);
+  },
+
+  /** Create or update a chat, replacing its whole transcript. The response is
+   * a bare acknowledgment — the row is not echoed back. */
+  async upsert(id: string, data: { title: string; messages: unknown[] }): Promise<ApiResponse<{ success: boolean }>> {
+    return apiRequest<{ success: boolean }>(`/ycode/api/ai/chats/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+
+  /** Remove a chat from history. */
+  async delete(id: string): Promise<ApiResponse<{ success: boolean }>> {
+    return apiRequest<{ success: boolean }>(`/ycode/api/ai/chats/${id}`, {
+      method: 'DELETE',
+    });
+  },
+};
+
 // Cache API - Manage Next.js cache
 export const cacheApi = {
   /**
@@ -847,8 +900,10 @@ export const cacheApi = {
 
 // File Upload API
 
-// Files above this threshold use presigned URLs to bypass serverless body limits
-const DIRECT_UPLOAD_THRESHOLD = 4.5 * 1024 * 1024; // 4.5MB
+// Files above this threshold use presigned URLs to bypass serverless body limits.
+// Vercel caps the serverless request body at ~4.5MB, and multipart/form-data adds
+// encoding overhead on top of the raw file, so we keep headroom below the hard limit.
+const DIRECT_UPLOAD_THRESHOLD = 4 * 1024 * 1024; // 4MB
 
 /**
  * Upload a file via presigned URL (direct browser-to-storage).
@@ -917,7 +972,7 @@ async function uploadViaPresignedUrl(
 
 /**
  * Upload a file and create Asset record.
- * Small files (<4.5MB) go through the server for WebP conversion.
+ * Small files (<4MB) go through the server for WebP conversion.
  * Large files use presigned URLs to upload directly to storage.
  *
  * @param file - File to upload

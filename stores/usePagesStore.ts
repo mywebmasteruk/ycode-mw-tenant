@@ -94,6 +94,7 @@ interface PagesActions {
   updatePageLocal: (pageId: string, updates: Partial<Page>) => void;
   removePage: (pageId: string) => void;
   setDraftLayers: (pageId: string, layers: Layer[]) => void;
+  setDraftGeneratedCss: (pageId: string, css: string) => void;
   copyLayer: (pageId: string, layerId: string) => Layer | null;
   copyLayers: (pageId: string, layerIds: string[]) => Layer[]; // New batch copy
   duplicateLayer: (pageId: string, layerId: string) => Layer | null;
@@ -1259,6 +1260,13 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
 
   addPage: (page: Page) => {
     const { pages } = get();
+    // Idempotent: a `page_created` broadcast is received by every mounted
+    // page-updates subscription (the builder and the pages sidebar both
+    // subscribe), so the same new page can arrive more than once — especially
+    // for AI/MCP-created pages, where the broadcast comes from a separate
+    // connection the acting client also receives. Skip if we already have it so
+    // the pages list never holds a duplicate id (which crashes the tree render).
+    if (pages.some((existing) => existing.id === page.id)) return;
     set({ pages: [...pages, page] });
   },
 
@@ -1304,6 +1312,23 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
       },
     });
 
+  },
+
+  // Store the server-compiled Tailwind CSS for a page so the editor canvas can
+  // inject it directly (mirroring the published page). This is the reliable
+  // source of truth for colors/styles on AI-built pages, where the canvas's
+  // Tailwind Browser CDN JIT is too flaky to compile large bulk inserts.
+  setDraftGeneratedCss: (pageId, css) => {
+    const { draftsByPageId } = get();
+    const draft = draftsByPageId[pageId];
+    if (!draft) return;
+    if (draft.generated_css === css) return;
+    set({
+      draftsByPageId: {
+        ...draftsByPageId,
+        [pageId]: { ...draft, generated_css: css },
+      },
+    });
   },
 
   copyLayer: (pageId, layerId) => {
@@ -2963,8 +2988,11 @@ export const usePagesStore = create<PagesStore>((set, get) => ({
     const layerToCopy = copyLayer(pageId, layerId);
     if (!layerToCopy) return null;
 
+    // Regenerate IDs so the component's internal layers don't collide with the
+    // instance layer that keeps the original id in the page tree.
+    const regeneratedLayer = regenerateIdsWithInteractionRemapping(layerToCopy);
     // Strip CMS bindings that won't be valid inside a standalone component
-    const cleanedLayers = cleanLayersForComponentCreation([layerToCopy]);
+    const cleanedLayers = cleanLayersForComponentCreation([regeneratedLayer]);
     const newComponent = await createComponentViaApi(componentName, cleanedLayers);
     if (!newComponent) return null;
 

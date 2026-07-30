@@ -486,9 +486,17 @@ export async function getAllItemsByCollectionId(
  * @param id - Item UUID
  * @param isPublished - Get draft (false) or published (true) version. Defaults to false (draft).
  */
+<<<<<<< HEAD
 export async function getItemById(id: string, isPublished: boolean = false): Promise<CollectionItem | null> {
   const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
+||||||| 2929273e
+export async function getItemById(id: string, isPublished: boolean = false): Promise<CollectionItem | null> {
+  const client = await getSupabaseAdmin();
+=======
+export async function getItemById(id: string, isPublished: boolean = false, tenantId?: string): Promise<CollectionItem | null> {
+  const client = await getSupabaseAdmin(tenantId);
+>>>>>>> upstream/main
 
   if (!client) {
     throw new Error('Supabase client not configured');
@@ -569,16 +577,24 @@ export async function getItemsByIds(ids: string[], isPublished: boolean = false,
  * @param id - Item UUID
  * @param is_published - Get draft (false) or published (true) values. Defaults to false (draft).
  */
+<<<<<<< HEAD
 export async function getItemWithValues(id: string, is_published: boolean = false): Promise<CollectionItemWithValues | null> {
   const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
+||||||| 2929273e
+export async function getItemWithValues(id: string, is_published: boolean = false): Promise<CollectionItemWithValues | null> {
+  const client = await getSupabaseAdmin();
+=======
+export async function getItemWithValues(id: string, is_published: boolean = false, tenantId?: string): Promise<CollectionItemWithValues | null> {
+  const client = await getSupabaseAdmin(tenantId);
+>>>>>>> upstream/main
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
   // Get the item
-  const item = await getItemById(id, is_published);
+  const item = await getItemById(id, is_published, tenantId);
   if (!item) return null;
 
   // Build query for values with field type info

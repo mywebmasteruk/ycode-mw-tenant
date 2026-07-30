@@ -13,7 +13,7 @@ import { randomUUID } from 'crypto';
 
 import { getSupabaseAdmin, runWithTenantId } from '@/lib/supabase-server';
 import { getAppSettingValue, setAppSetting } from '@/lib/repositories/appSettingsRepository';
-import { slugify } from '@/lib/collection-utils';
+import { generateUniqueSlug as generateUniqueSlugFromSet } from '@/lib/collection-utils';
 import { isAssetFieldType, isMultipleAssetField, getAssetCategoryForField } from '@/lib/collection-field-utils';
 import { ALLOWED_MIME_TYPES } from '@/lib/asset-constants';
 import { uploadFile } from '@/lib/file-upload';
@@ -478,17 +478,7 @@ interface SlugContext {
 }
 
 function generateUniqueSlug(value: string | null, ctx: SlugContext): string {
-  const base = slugify(value || 'item');
-  if (!ctx.existingSlugs.has(base)) {
-    ctx.existingSlugs.add(base);
-    return base;
-  }
-
-  let n = 1;
-  while (ctx.existingSlugs.has(`${base}-${n}`)) n++;
-  const unique = `${base}-${n}`;
-  ctx.existingSlugs.add(unique);
-  return unique;
+  return generateUniqueSlugFromSet(value, ctx.existingSlugs);
 }
 
 /**
