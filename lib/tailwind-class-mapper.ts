@@ -571,6 +571,19 @@ export function removeConflictingClasses(
       }
     }
 
+    // Special handling for font-[...] arbitrary values
+    // Distinguish fontWeight (numeric, e.g. font-[700]) from fontFamily
+    // (non-numeric, e.g. font-[Gelasio_Regular]) — both match each other's
+    // pattern via \[.+\], so keep the mismatched one instead of removing it.
+    if (baseClass.startsWith('font-[')) {
+      const value = extractArbitraryValue(baseClass);
+      if (value) {
+        const isNumeric = /^\d/.test(value);
+        if (property === 'fontWeight' && !isNumeric) return true;
+        if (property === 'fontFamily' && isNumeric) return true;
+      }
+    }
+
     // Background-image CSS variable classes are always backgroundImage
     if (BG_IMG_VAR_RE.test(baseClass)) {
       if (property === 'backgroundColor') return true;
@@ -1224,6 +1237,19 @@ export function getAffectedProperties(className: string): string[] {
         properties.push('fontSize');
         return properties;
       }
+    }
+  }
+
+  // Special handling for font-[...] arbitrary values
+  // Must distinguish between fontWeight (numeric, e.g. font-[700]) and
+  // fontFamily (non-numeric, e.g. font-[Gelasio_Regular]). Both share the
+  // font-[…] namespace, so without this an arbitrary weight would be treated
+  // as a family (and vice versa) and strip its sibling typography class.
+  if (baseClass.startsWith('font-[')) {
+    const value = extractArbitraryValue(baseClass);
+    if (value) {
+      properties.push(/^\d/.test(value) ? 'fontWeight' : 'fontFamily');
+      return properties;
     }
   }
 
