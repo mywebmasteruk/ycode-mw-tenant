@@ -187,14 +187,13 @@ export async function getAllAssets(folderId?: string | null): Promise<Asset[]> {
  * @param id Asset ID
  * @param isPublished If true, get published version; if false, get draft version (default: false)
  */
-export async function getAssetById(id: string, isPublished: boolean = false): Promise<Asset | null> {
+export async function getAssetById(id: string, isPublished: boolean = false, tenantId?: string): Promise<Asset | null> {
+  const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
   }
-
-  const tenantId = await resolveEffectiveTenantId();
 
   let query = client
     .from('assets')
@@ -207,7 +206,7 @@ export async function getAssetById(id: string, isPublished: boolean = false): Pr
     query = query.is('deleted_at', null);
   }
 
-  query = applyTenantEq(query, tenantId);
+  query = applyTenantEq(query, effectiveTenantId);
 
   const { data, error } = await query.single();
 

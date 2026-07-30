@@ -20,6 +20,7 @@ import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextCo
 import { getMapIframeProps, DEFAULT_MAP_SETTINGS, resolveMarkerColor } from '@/lib/map-utils';
 import { HTML_TO_REACT_ATTRS } from '@/lib/parse-head-html';
 import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
+import { getSliderPresizeVars } from '@/lib/slider-utils';
 import { getDynamicTextContent, getImageUrlFromVariable, getVideoUrlFromVariable, getIframeUrlFromVariable, isFieldVariable, isAssetVariable, isStaticTextVariable, isDynamicTextVariable, getStaticTextContent, getAssetId, resolveDesignStyles } from '@/lib/variable-utils';
 import { getTranslatedAssetId, getTranslatedText } from '@/lib/locale-runtime';
 import { isValidLinkSettings, generateLinkHref, resolveLinkAttrs, isLinkAtCollectionBoundary, isLinkToCurrentPage, type LinkResolutionContext } from '@/lib/link-utils';
@@ -972,6 +973,14 @@ const LayerItem: React.FC<{
       if (layer.name === 'slider' && layer.settings?.slider) {
         elementProps['data-slider-id'] = layer.id;
         elementProps['data-slider-settings'] = JSON.stringify(layer.settings.slider);
+        // Pre-size slides before Swiper JS runs (prevents a 1-slide flash) only
+        // for numeric multi-view sliders; per-view 1 keeps its own slide widths.
+        const presizeVars = getSliderPresizeVars(layer.settings.slider);
+        if (presizeVars) {
+          elementProps['data-slider-presize'] = '';
+          const existingStyle = (typeof elementProps.style === 'object' && elementProps.style) || {};
+          elementProps.style = { ...existingStyle, ...presizeVars };
+        }
       }
       if (SWIPER_DATA_ATTR_MAP[layer.name]) {
         elementProps[SWIPER_DATA_ATTR_MAP[layer.name]] = '';
@@ -998,8 +1007,12 @@ const LayerItem: React.FC<{
       }
     }
 
-    // Hide elements with hiddenGenerated: true by default (in all modes)
-    if (layer.hiddenGenerated) {
+    // Hide elements with hiddenGenerated: true by default (in all modes).
+    // Scoped to alerts only: the flag is meant for form success/error alerts,
+    // whose reveal path clears inline display. Non-alert layers (e.g. animated
+    // dropdowns) manage visibility via data-gsap-hidden and must not be pinned
+    // to display:none here.
+    if (layer.hiddenGenerated && layer.alertType) {
       const existingStyle = typeof elementProps.style === 'object' ? elementProps.style : {};
       elementProps.style = { ...existingStyle, display: 'none' };
     }

@@ -9,7 +9,7 @@ import { getCollectionById } from '@/lib/repositories/collectionRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
 import { getPageById } from '@/lib/repositories/pageRepository';
 import { getCachedDraft, saveCachedLayers } from '@/lib/mcp/page-layers';
-import { findLayerById, updateLayerById } from '@/lib/mcp/utils';
+import { applyBackgroundImageDesign, findLayerById, updateLayerById } from '@/lib/mcp/utils';
 import { findParentCollectionLayer } from '@/lib/layer-utils';
 import {
   fieldConditionSchema,
@@ -434,7 +434,12 @@ page_id_target = the dynamic page, and NO collection_item_id (it resolves to the
         };
       }
 
-      const updated = updateLayerById(layers, layer_id, (l) => ({ ...l, variables: nextVariables }));
+      const updated = updateLayerById(layers, layer_id, (l) => {
+        const next = { ...l, variables: nextVariables };
+        // Background bindings also need the design/classes that render the
+        // --bg-img variable, otherwise the bound image never displays.
+        return target === 'background' ? applyBackgroundImageDesign(next) : next;
+      });
       await saveCachedLayers(page_id, updated);
 
       return {

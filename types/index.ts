@@ -17,6 +17,7 @@ export interface LayoutDesign {
   flexWrap?: string;
   justifyContent?: string;
   alignItems?: string;
+  alignSelf?: string;
   gap?: string;
   columnGap?: string;
   rowGap?: string;
@@ -34,6 +35,8 @@ export interface TypographyDesign {
   lineHeight?: string;
   letterSpacing?: string;
   textAlign?: string;
+  textWrap?: string;
+  fontVariantNumeric?: string;
   textTransform?: string;
   textDecoration?: string;
   lineClamp?: string;
@@ -216,10 +219,17 @@ export interface LightboxSettings {
   duration: string; // Transition duration in seconds
 }
 
+/**
+ * A value that can either be a single number (applies to every breakpoint) or
+ * an object of per-breakpoint overrides. Desktop is the base; tablet/mobile
+ * fall back to larger breakpoints when unset (desktop-first).
+ */
+export type ResponsiveNumber = number | Partial<Record<Breakpoint, number>>;
+
 export interface SliderSettings {
   navigation: boolean;
-  groupSlide: number;
-  slidesPerGroup: number;
+  groupSlide: ResponsiveNumber; // Slides visible per view (responsive)
+  slidesPerGroup: ResponsiveNumber; // Slides advanced per navigation step (responsive)
   loop: SliderLoopMode;
   centered: boolean;
   touchEvents: boolean;
@@ -516,6 +526,10 @@ export interface Layer {
     // Mirrors `CollectionPaginationMeta.maxTotal` so client-side filtering shows
     // the same clamped count/`hasMore` as SSR instead of the raw filtered total.
     maxTotal?: number;
+    // The collection's configured `offset` — leading records skipped before
+    // paginating. Forwarded to the filter API so client-side filtered paging
+    // composes offset with pagination the same way SSR does.
+    baseOffset?: number;
     paginationMode?: 'pages' | 'load_more';
     layerTemplate: Layer[];
     collectionLayerClasses?: string[];
@@ -1264,6 +1278,48 @@ export interface Setting {
   updated_at: string;
 }
 
+// Agent (AI builder) Settings
+export type AgentProviderId = 'anthropic' | 'openai' | 'google' | 'xai';
+
+/** Who a configured provider key is available to. */
+export type AgentKeyScope = 'all' | 'personal';
+
+export interface AgentProviderKeyStatus {
+  /** Whether this provider has an API key (from settings or environment). */
+  configured: boolean;
+  /** Where the active key comes from. */
+  source: 'setting' | 'env' | null;
+  /** Availability of the active key: 'personal' = only the current user,
+   * 'all' = everyone on the project (shared key or env var). */
+  scope: AgentKeyScope | null;
+  /** Masked hint of the configured key (e.g. "sk-ant-...wxyz"), never the full key. */
+  maskedKey: string | null;
+}
+
+export interface AgentSettingsStatus {
+  /** Whether at least one provider has an API key. */
+  configured: boolean;
+  /** Whether the agent is enabled in the builder (defaults to true). */
+  agentEnabled: boolean;
+  /** Per-provider key status. */
+  providers: Record<AgentProviderId, AgentProviderKeyStatus>;
+  /** Default model id. */
+  model: string;
+  /** Model ids the builder is allowed to use. */
+  enabledModels: string[];
+}
+
+export interface UpdateAgentSettingsData {
+  /** Per-provider keys; null removes the stored key; undefined keeps the current one. */
+  keys?: Partial<Record<AgentProviderId, string | null>>;
+  /** Per-provider key availability. With a new key: where to store it. Without
+   * a key: moves the existing stored key to the given scope. */
+  keyScopes?: Partial<Record<AgentProviderId, AgentKeyScope>>;
+  model?: string;
+  enabledModels?: string[];
+  agentEnabled?: boolean;
+}
+
 // Color Variables
 export interface ColorVariable {
   id: string;
@@ -1477,6 +1533,10 @@ export interface CollectionPaginationMeta {
   // Treated as a max total: clamps `totalItems` and stops `load_more` once
   // reached, even if the underlying collection has more matching rows.
   maxTotal?: number;
+  // The collection's configured `offset` — number of leading records to skip
+  // BEFORE paginating. `totalItems` already excludes these, and the client
+  // (load_more) must forward it so continued paging stays past the offset.
+  baseOffset?: number;
 }
 
 // Conditional Visibility Types
@@ -1792,6 +1852,32 @@ export interface PublishTableStats {
   added: number;
   updated: number;
   deleted: number;
+}
+
+/**
+ * AI builder chat history, stored server-side so conversations are shared
+ * across the team and survive browser data clearing.
+ *
+ * `messages` is the stripped transcript (text, tool calls, parts, mentions —
+ * no image data or revert checkpoints). Its canonical shape is `ChatMessage`
+ * in `stores/useAiChatStore.ts`; the server persists it as opaque JSON and
+ * never inspects individual entries, hence `unknown[]`.
+ */
+export interface AiChatSummary {
+  id: string;
+  title: string;
+  updated_at: string;
+}
+
+export interface AiChat extends AiChatSummary {
+  messages: unknown[];
+  created_at: string;
+}
+
+export interface UpsertAiChatData {
+  id: string;
+  title: string;
+  messages: unknown[];
 }
 
 /** Aggregated publishing statistics returned by the publish API */

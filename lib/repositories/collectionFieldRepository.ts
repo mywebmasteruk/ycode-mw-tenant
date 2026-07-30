@@ -100,19 +100,20 @@ export async function getAllFields(
  * @param collection_id - Collection UUID
  * @param is_published - Filter for draft (false) or published (true) fields. Defaults to false (draft).
  * @param filters - Optional search filters
+ * @param tenantId - Optional tenant scope (ignored in single-tenant deployments)
  */
 export async function getFieldsByCollectionId(
   collection_id: string,
   is_published: boolean = false,
-  filters?: FieldFilters
+  filters?: FieldFilters,
+  tenantId?: string
 ): Promise<CollectionField[]> {
+  const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
-
-  const effectiveTenantId = await resolveEffectiveTenantId();
 
   let query = client
     .from('collection_fields')

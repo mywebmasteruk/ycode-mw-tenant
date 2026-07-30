@@ -12,9 +12,11 @@ import {
   getTiptapTextContent,
   buildTiptapDoc,
   applyDesignToLayer,
+  applyBackgroundImageDesign,
 } from '@/lib/mcp/utils';
 import type { RichTextBlock } from '@/lib/mcp/utils';
 import { layerToExportHtml } from '@/lib/html-layer-converter';
+import { collectFontFamiliesFromDesign, ensureFontsInstalled, fontWarnings } from '@/lib/mcp/font-install';
 import { getCachedLayers as getPageLayers, saveCachedLayers } from '@/lib/mcp/page-layers';
 import { designSchema, richTextBlockSchema, templateEnum } from './shared-schemas';
 
@@ -44,8 +46,13 @@ ELEMENT TYPES:
 - Content: heading (h1), text (paragraph), richText (rich text block with formatting)
 - Media: image, video, audio, icon, iframe
 - Actions: button
-- Forms: form, input, textarea
+- Forms: form, input, textarea, select, checkbox, radio, label — native, ready-to-use fields.
+  The "form" template arrives pre-populated with native fields, a submit button, and alerts.
 - Utilities: htmlEmbed, slider, lightbox
+
+FORMS:
+- ALWAYS build forms from these native form elements. NEVER simulate inputs/fields with
+  div, styled text, or htmlEmbed — only native fields are wired for submission and editing.
 
 NESTING RULES:
 - Leaf elements (image, text, input, video, icon, etc.) CANNOT have children
@@ -138,6 +145,12 @@ For gradient text: also set backgroundClip: "text" and color to "transparent".`,
 
       await savePageLayers(page_id, updated);
 
+      // Auto-install any Google Font this edit referenced but never added.
+      const fontFamilies = new Set<string>();
+      collectFontFamiliesFromDesign(design as Record<string, unknown>, fontFamilies);
+      const fonts = await ensureFontsInstalled(fontFamilies);
+      const warnings = fontWarnings(fonts);
+
       const updatedLayer = findLayerById(updated, layer_id);
       const stateLabel = ui_state !== 'neutral' ? ` (${ui_state} state)` : '';
       const bpLabel = breakpoint !== 'desktop' ? ` [${breakpoint}]` : '';
@@ -149,6 +162,8 @@ For gradient text: also set backgroundClip: "text" and color to "transparent".`,
             layer_id,
             classes: updatedLayer?.classes,
             design: updatedLayer?.design,
+            fonts_auto_installed: fonts.installed.length > 0 ? fonts.installed : undefined,
+            design_warnings: warnings.length > 0 ? warnings : undefined,
           }),
         }],
       };
@@ -433,13 +448,26 @@ LINK TYPES:
         ? { type: 'asset' as const, data: { asset_id } }
         : { type: 'dynamic_text' as const, data: { content: url! } };
 
-      const updated = updateLayerById(layers, layer_id, (l) => ({
+      // Set the variable AND the design/classes that render it — the variable
+      // alone only supplies the --bg-img value, nothing displays it without
+      // the bg-[image:var(--bg-img)] class.
+      const updated = updateLayerById(layers, layer_id, (l) => applyBackgroundImageDesign({
         ...l,
         variables: { ...l.variables, backgroundImage: { src } },
       }));
 
       await savePageLayers(page_id, updated);
-      return { content: [{ type: 'text' as const, text: `Set background image for "${layer.customName || layer.name}"` }] };
+      const updatedLayer = findLayerById(updated, layer_id);
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            message: `Set background image for "${layer.customName || layer.name}"`,
+            layer_id,
+            classes: updatedLayer?.classes,
+          }),
+        }],
+      };
     },
   );
 

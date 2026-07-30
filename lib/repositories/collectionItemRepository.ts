@@ -486,8 +486,8 @@ export async function getAllItemsByCollectionId(
  * @param id - Item UUID
  * @param isPublished - Get draft (false) or published (true) version. Defaults to false (draft).
  */
-export async function getItemById(id: string, isPublished: boolean = false): Promise<CollectionItem | null> {
-  const tenantId = await resolveEffectiveTenantId();
+export async function getItemById(id: string, isPublished: boolean = false, tenantId?: string | null): Promise<CollectionItem | null> {
+  const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -499,7 +499,7 @@ export async function getItemById(id: string, isPublished: boolean = false): Pro
     .select('*')
     .eq('id', id)
     .eq('is_published', isPublished)
-    .single(), tenantId);
+    .single(), effectiveTenantId);
 
   if (error && error.code !== 'PGRST116') {
     throw new Error(`Failed to fetch collection item: ${error.message}`);
@@ -569,8 +569,8 @@ export async function getItemsByIds(ids: string[], isPublished: boolean = false,
  * @param id - Item UUID
  * @param is_published - Get draft (false) or published (true) values. Defaults to false (draft).
  */
-export async function getItemWithValues(id: string, is_published: boolean = false): Promise<CollectionItemWithValues | null> {
-  const tenantId = await resolveEffectiveTenantId();
+export async function getItemWithValues(id: string, is_published: boolean = false, tenantId?: string | null): Promise<CollectionItemWithValues | null> {
+  const effectiveTenantId = tenantId ?? await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -578,7 +578,7 @@ export async function getItemWithValues(id: string, is_published: boolean = fals
   }
 
   // Get the item
-  const item = await getItemById(id, is_published);
+  const item = await getItemById(id, is_published, effectiveTenantId);
   if (!item) return null;
 
   // Build query for values with field type info
@@ -587,7 +587,7 @@ export async function getItemWithValues(id: string, is_published: boolean = fals
     .select('value, field_id, collection_fields!inner(type)')
     .eq('item_id', id)
     .eq('is_published', is_published);
-  valuesQuery = applyTenantEq(valuesQuery, tenantId);
+  valuesQuery = applyTenantEq(valuesQuery, effectiveTenantId);
 
   // If the item itself is deleted, include deleted values (to show name in UI)
   // Otherwise, exclude deleted values

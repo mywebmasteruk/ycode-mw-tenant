@@ -6,7 +6,10 @@
   "installCommand": "npm install",
   "framework": "nextjs",
   "functions": {
-    "app/ycode/api/**/*.ts": {
+    "app/(builder)/ycode/api/ai/chat/route.ts": {
+      "maxDuration": 300
+    },
+    "app/(builder)/ycode/api/**/*.ts": {
       "maxDuration": 60
     },
     "app/(builder)/ycode/mcp/*/route.ts": {

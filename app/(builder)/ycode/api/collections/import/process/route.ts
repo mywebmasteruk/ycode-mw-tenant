@@ -6,8 +6,9 @@ import {
   completeImport,
 } from '@/lib/repositories/collectionImportRepository';
 import { createItemsBulk, deleteItem, getMaxIdValue, getMaxManualOrder } from '@/lib/repositories/collectionItemRepository';
-import { insertValuesBulk, insertValuesDirectPg } from '@/lib/repositories/collectionItemValueRepository';
+import { insertValuesBulk, insertValuesDirectPg, getValuesByFieldId } from '@/lib/repositories/collectionItemValueRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
+import { generateUniqueSlug } from '@/lib/collection-utils';
 import {
   convertValueForFieldType,
   SKIP_COLUMN,
@@ -129,6 +130,7 @@ function prepareRow(
   columnMapping: Record<string, string>,
   fieldMap: Map<string, CollectionField>,
   autoFields: { idField?: CollectionField; createdAtField?: CollectionField; updatedAtField?: CollectionField },
+  slugContext: { slugField?: CollectionField; nameField?: CollectionField; usedSlugs: Set<string> },
   currentMaxId: number,
   manualOrder: number,
   now: string,
@@ -185,6 +187,30 @@ function prepareRow(
       warnings.push(
         `Row ${rowNumber}, column "${csvColumn}": value "${truncateValue(rawValue)}" is not a valid ${field.type} for field "${field.name}", skipped`
       );
+    }
+  }
+
+  // Ensure the slug is always populated. When the slug column isn't mapped (or
+  // its cell is empty) derive a unique slug from the name field so items remain
+  // routable instead of ending up with an empty slug.
+  if (slugContext.slugField) {
+    const slugFieldId = slugContext.slugField.id;
+    const slugValue = values.find(v => v.field_id === slugFieldId);
+    const hasSlug = !!slugValue?.value && slugValue.value.trim() !== '';
+
+    if (hasSlug) {
+      slugContext.usedSlugs.add(slugValue!.value!.trim());
+    } else {
+      const nameValue = slugContext.nameField
+        ? values.find(v => v.field_id === slugContext.nameField!.id)?.value ?? ''
+        : '';
+      const generatedSlug = generateUniqueSlug(nameValue, slugContext.usedSlugs);
+
+      if (slugValue) {
+        slugValue.value = generatedSlug;
+      } else {
+        values.push({ item_id: itemId, field_id: slugFieldId, value: generatedSlug, is_published: false });
+      }
     }
   }
 
@@ -341,6 +367,20 @@ export async function POST(request: NextRequest) {
       updatedAtField: fields.find(f => f.key === AUTO_FIELD_KEYS[2]),
     };
 
+    // Slug fallback: seed already-used slugs so auto-generated ones stay unique
+    // across batches (each collection has its own slug field, so filtering by
+    // field_id effectively scopes to this collection).
+    const slugField = fields.find(f => f.key === 'slug');
+    const nameField = fields.find(f => f.key === 'name');
+    const usedSlugs = new Set<string>();
+    if (slugField) {
+      const existingSlugValues = await getValuesByFieldId(slugField.id, false);
+      for (const v of existingSlugValues) {
+        if (v.value) usedSlugs.add(v.value.trim());
+      }
+    }
+    const slugContext = { slugField, nameField, usedSlugs };
+
     // Get max ID and max manual_order in parallel (2 queries)
     const [currentMaxIdResult, currentMaxOrderResult] = await Promise.all([
       getMaxIdValue(importJob.collection_id, false),
@@ -364,7 +404,7 @@ export async function POST(request: NextRequest) {
       try {
         const { prepared, newMaxId } = prepareRow(
           row, rowNumber, importJob.collection_id,
-          importJob.column_mapping, fieldMap, autoFields,
+          importJob.column_mapping, fieldMap, autoFields, slugContext,
           currentMaxId, manualOrderOffset + i, now, errors
         );
         currentMaxId = newMaxId;

@@ -132,10 +132,13 @@ async function convertImageToWebP(file: File): Promise<{
   height: number | null;
 } | null> {
   try {
-    // Only convert raster images (skip SVG, GIF with animations, etc.)
+    // Only convert raster images. Skip SVG, animated GIFs, and AVIF — AVIF is
+    // already a highly-compressed modern format, so re-encoding to WebP would
+    // typically inflate size and lose quality for no benefit.
     if (!isAssetOfType(file.type, ASSET_CATEGORIES.IMAGES) ||
         file.type === 'image/svg+xml' ||
-        file.type === 'image/gif') {
+        file.type === 'image/gif' ||
+        file.type === 'image/avif') {
       return null;
     }
 

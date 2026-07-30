@@ -43,12 +43,14 @@ export const CONTENT_TABLES = [
   'form_submissions',
   'color_variables',
   'global_variables',
+  'ai_chats',
 ];
 
 /**
  * Tables to truncate before import (children first for FK safety).
  */
 export const TABLES_TO_TRUNCATE = [
+  'ai_chats',
   'global_variables',
   'color_variables',
   'webhook_deliveries',

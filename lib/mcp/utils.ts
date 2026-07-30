@@ -3,8 +3,9 @@
  * These are simplified versions focused on the MCP tool use case.
  */
 
-import type { Layer, DesignProperties, Breakpoint, UIState } from '@/types';
+import type { Layer, DesignProperties, Breakpoint, UIState, CollectionFieldType } from '@/types';
 import { generateId } from '@/lib/utils';
+import { markdownToTiptapJson } from '@/lib/markdown-to-tiptap';
 import {
   designToClassString,
   propertyToClass,
@@ -209,6 +210,68 @@ export interface RichTextBlock {
   component_id?: string;
 }
 
+/**
+ * Coerce a single collection-item `rich_text` value into the serialized Tiptap
+ * JSON string the CMS editor and renderer expect. Accepts, in order:
+ *  - an already-built Tiptap doc object → stringified;
+ *  - a JSON string that parses to a Tiptap doc → passed through unchanged;
+ *  - an array of RichTextBlock → built via buildTiptapDoc;
+ *  - any other string → treated as markdown and converted.
+ * Empty / nullish values become null.
+ *
+ * Agents naturally produce markdown, so a plain string "## Title\n\nBody" is
+ * turned into proper rich text instead of being stored verbatim (which renders
+ * empty/broken because castValue expects a Tiptap document).
+ */
+export function coerceRichTextValue(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+
+  if (isTiptapDoc(value)) {
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    return JSON.stringify(buildTiptapDoc(value as RichTextBlock[]));
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed === '') return null;
+    // A pre-built Tiptap doc supplied as a JSON string passes through untouched.
+    if (trimmed.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (isTiptapDoc(parsed)) return trimmed;
+      } catch {
+        // Not JSON — fall through and treat as markdown.
+      }
+    }
+    return markdownToTiptapJson(value);
+  }
+
+  // Unknown object shape: stringify so it at least round-trips through storage.
+  return JSON.stringify(value);
+}
+
+/**
+ * Pre-process a collection item's `{ fieldId: value }` map so `rich_text`
+ * fields are stored as valid Tiptap JSON. Non-rich-text fields pass through
+ * untouched. Used by the create/update collection item tools before handing
+ * values to setValuesByFieldName.
+ */
+export function coerceCollectionItemValues(
+  values: Record<string, unknown>,
+  fieldTypeById: Record<string, CollectionFieldType>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [fieldId, value] of Object.entries(values)) {
+    result[fieldId] = fieldTypeById[fieldId] === 'rich_text'
+      ? coerceRichTextValue(value)
+      : value;
+  }
+  return result;
+}
+
 function parseInlineMarks(text: string): TiptapNode[] {
   const nodes: TiptapNode[] = [];
   const regex = /\*\*(.+?)\*\*|\*(.+?)\*|\[(.+?)\]\((.+?)\)/g;
@@ -352,7 +415,7 @@ function normalizeDesignValues(
       'space-evenly': 'evenly',
     };
 
-    for (const prop of ['justifyContent', 'alignItems', 'alignContent'] as const) {
+    for (const prop of ['justifyContent', 'alignItems', 'alignSelf', 'alignContent'] as const) {
       const val = layout[prop];
       if (typeof val === 'string' && flexValueMap[val]) {
         layout[prop] = flexValueMap[val];
@@ -376,11 +439,16 @@ export function applyDesignToLayer(
   // Normalize CSS values (flex-start→start, Flex→flex, etc.) before processing
   design = normalizeDesignValues(design);
 
-  // Extract bgGradientVars before processing — it's not a simple design property
+  // Extract bgGradientVars/bgImageVars before processing — they hold raw CSS
+  // values (not simple design properties) and need the backgroundImage design
+  // property + bg-[image:var(--bg-img)] class wired up to actually render.
   const bgGradientVars = (design.backgrounds as Record<string, unknown>)?.bgGradientVars as Record<string, string> | undefined;
+  const bgImageVars = normalizeBgImageVars(
+    (design.backgrounds as Record<string, unknown>)?.bgImageVars as Record<string, string> | undefined,
+  );
   const inputDesign = { ...design };
   if (inputDesign.backgrounds) {
-    const { bgGradientVars: _, ...restBg } = inputDesign.backgrounds as Record<string, unknown>;
+    const { bgGradientVars: _, bgImageVars: __, ...restBg } = inputDesign.backgrounds as Record<string, unknown>;
     inputDesign.backgrounds = restBg;
   }
 
@@ -396,12 +464,13 @@ export function applyDesignToLayer(
       }
     }
 
-    // Handle gradient vars
-    if (bgGradientVars) {
+    // Handle gradient/image vars
+    if (bgGradientVars || bgImageVars) {
       const bgDesign = mergedDesign.backgrounds || {};
-      bgDesign.bgGradientVars = { ...bgDesign.bgGradientVars, ...bgGradientVars };
+      if (bgGradientVars) bgDesign.bgGradientVars = { ...bgDesign.bgGradientVars, ...bgGradientVars };
+      if (bgImageVars) bgDesign.bgImageVars = { ...bgDesign.bgImageVars, ...bgImageVars };
       const varName = buildBgImgVarName('desktop', 'neutral');
-      if (bgGradientVars[varName]) {
+      if (bgGradientVars?.[varName] || bgImageVars?.[varName]) {
         bgDesign.backgroundImage = varName;
       }
       mergedDesign.backgrounds = bgDesign;
@@ -433,12 +502,13 @@ export function applyDesignToLayer(
     }
   }
 
-  // Handle gradient vars for non-neutral states
-  if (bgGradientVars) {
+  // Handle gradient/image vars for non-neutral states
+  if (bgGradientVars || bgImageVars) {
     const bgDesign = { ...(layer.design?.backgrounds || {}) };
-    bgDesign.bgGradientVars = { ...bgDesign.bgGradientVars, ...bgGradientVars };
+    if (bgGradientVars) bgDesign.bgGradientVars = { ...bgDesign.bgGradientVars, ...bgGradientVars };
+    if (bgImageVars) bgDesign.bgImageVars = { ...bgDesign.bgImageVars, ...bgImageVars };
     const varName = buildBgImgVarName(breakpoint, uiState);
-    if (bgGradientVars[varName]) {
+    if (bgGradientVars?.[varName] || bgImageVars?.[varName]) {
       bgDesign.backgroundImage = bgDesign.backgroundImage || buildBgImgVarName('desktop', 'neutral');
       const bgImgClass = buildBgImgClass(varName);
       classes = setBreakpointClass(classes, 'backgroundImage', bgImgClass, breakpoint, uiState);
@@ -448,6 +518,41 @@ export function applyDesignToLayer(
   }
 
   return { ...layer, classes: classes.join(' ') };
+}
+
+/**
+ * Wrap bare image URLs in `url(...)` so bgImageVars values are always valid
+ * CSS background-image values (gradients and already-wrapped values pass through).
+ */
+function normalizeBgImageVars(vars?: Record<string, string>): Record<string, string> | undefined {
+  if (!vars) return vars;
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(vars)) {
+    const needsWrap = typeof value === 'string' && !value.startsWith('url(') && !value.includes('gradient(');
+    result[key] = needsWrap ? `url(${value})` : value;
+  }
+  return result;
+}
+
+/**
+ * Ensure a layer's design + classes actually render its `variables.backgroundImage`.
+ *
+ * Setting the variable alone only provides the `--bg-img` CSS value at render time —
+ * nothing consumes it until the layer also has `design.backgrounds.backgroundImage`
+ * pointing at the var (which generates the `bg-[image:var(--bg-img)]` class).
+ * Mirrors what the builder's BackgroundsControls does when picking an image.
+ * Cover/center/no-repeat defaults are only applied when not already set.
+ */
+export function applyBackgroundImageDesign(layer: Layer): Layer {
+  const bg = layer.design?.backgrounds || {};
+  const patch: Record<string, unknown> = {
+    isActive: true,
+    backgroundImage: buildBgImgVarName('desktop', 'neutral'),
+  };
+  if (!bg.backgroundSize) patch.backgroundSize = 'cover';
+  if (!bg.backgroundPosition) patch.backgroundPosition = 'center';
+  if (!bg.backgroundRepeat) patch.backgroundRepeat = 'no-repeat';
+  return applyDesignToLayer(layer, { backgrounds: patch });
 }
 
 // ── Element Templates ────────────────────────────────────────────────────────
@@ -618,44 +723,18 @@ export const ELEMENT_TEMPLATES: Record<string, ElementTemplateEntry> = {
   },
   form: {
     name: 'Form',
-    description: 'Form container',
-    template: {
-      name: 'form',
-      classes: ['flex', 'flex-col', 'gap-8', 'w-full'],
-      settings: { id: 'contact-form' },
-      attributes: { method: 'POST', action: '' },
-      design: {
-        sizing: { isActive: true, width: '100%' },
-        layout: { isActive: true, display: 'Flex', flexDirection: 'column', gap: '2rem' },
-      },
-      children: [],
-    },
+    description: 'Native form, pre-populated with name/email/message fields, a submit button, and success/error alerts. Configure submission behavior via update_form_settings. Add or remove native field children (input, textarea, select, etc.) to customize.',
+    useBlocksTemplate: true,
   },
   input: {
     name: 'Input',
-    description: 'Text input with label',
-    template: {
-      name: 'div',
-      classes: ['w-full', 'flex', 'flex-col', 'gap-1'],
-      design: {
-        sizing: { isActive: true, width: '100%' },
-        layout: { isActive: true, display: 'Flex', flexDirection: 'column', gap: '0.25rem' },
-      },
-      children: [],
-    },
+    description: 'Native text input with a label wrapper. Set the field type/placeholder/name via update_layer_settings.',
+    useBlocksTemplate: true,
   },
   textarea: {
     name: 'Textarea',
-    description: 'Multi-line text area',
-    template: {
-      name: 'div',
-      classes: ['w-full', 'flex', 'flex-col', 'gap-1'],
-      design: {
-        sizing: { isActive: true, width: '100%' },
-        layout: { isActive: true, display: 'Flex', flexDirection: 'column', gap: '0.25rem' },
-      },
-      children: [],
-    },
+    description: 'Native multi-line textarea with a label wrapper.',
+    useBlocksTemplate: true,
   },
   htmlEmbed: {
     name: 'Code Embed',

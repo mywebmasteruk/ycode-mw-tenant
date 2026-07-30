@@ -2569,6 +2569,13 @@ export async function resolveCollectionLayers(
             const isMultiAssetPaginated = multiAssetPagination?.enabled
               && (multiAssetPagination?.mode === 'pages' || multiAssetPagination?.mode === 'load_more');
 
+            // The collection's configured offset skips leading assets before
+            // pagination; fold it into the page offset so it composes with
+            // pagination instead of being replaced by it.
+            const multiAssetBaseOffset = typeof collectionVariable.offset === 'number' && collectionVariable.offset > 0
+              ? collectionVariable.offset
+              : 0;
+
             let multiAssetLimit: number | undefined;
             let multiAssetOffset: number | undefined;
             let multiAssetCurrentPage = 1;
@@ -2578,7 +2585,7 @@ export async function resolveCollectionLayers(
                 ?? paginationContext?.defaultPage
                 ?? 1;
               multiAssetLimit = itemsPerPage;
-              multiAssetOffset = (multiAssetCurrentPage - 1) * itemsPerPage;
+              multiAssetOffset = multiAssetBaseOffset + (multiAssetCurrentPage - 1) * itemsPerPage;
             } else {
               multiAssetLimit = collectionVariable.limit;
               multiAssetOffset = collectionVariable.offset;
@@ -2685,10 +2692,12 @@ export async function resolveCollectionLayers(
             let multiAssetPaginationMeta: CollectionPaginationMeta | undefined;
             if (isMultiAssetPaginated && multiAssetPagination) {
               const itemsPerPage = multiAssetPagination.items_per_page || 10;
+              // Offset skips leading assets, so the paginated total excludes them.
+              const multiAssetDisplayTotal = Math.max(0, multiAssetTotal - multiAssetBaseOffset);
               multiAssetPaginationMeta = {
                 currentPage: multiAssetCurrentPage,
-                totalPages: Math.ceil(multiAssetTotal / itemsPerPage),
-                totalItems: multiAssetTotal,
+                totalPages: Math.ceil(multiAssetDisplayTotal / itemsPerPage),
+                totalItems: multiAssetDisplayTotal,
                 itemsPerPage,
                 layerId: layer.id,
                 collectionId: collectionVariable.id,
@@ -2697,6 +2706,7 @@ export async function resolveCollectionLayers(
                 isPublished,
                 // No sort: multi-asset order is the image order in the field.
                 maxTotal: multiAssetMaxTotal,
+                baseOffset: multiAssetBaseOffset,
               };
             }
 
@@ -2722,6 +2732,13 @@ export async function resolveCollectionLayers(
           const paginationConfig = collectionVariable.pagination;
           const isPaginated = paginationConfig?.enabled && (paginationConfig?.mode === 'pages' || paginationConfig?.mode === 'load_more');
 
+          // The collection's configured offset skips this many leading records
+          // BEFORE pagination. It composes with pagination rather than being
+          // replaced by it: page N shows records [baseOffset + (N-1)*perPage ...].
+          const baseOffset = typeof collectionVariable.offset === 'number' && collectionVariable.offset > 0
+            ? collectionVariable.offset
+            : 0;
+
           // Determine limit and offset based on pagination settings
           let limit: number | undefined;
           let offset: number | undefined;
@@ -2734,7 +2751,9 @@ export async function resolveCollectionLayers(
               ?? paginationContext?.defaultPage
               ?? 1;
             limit = itemsPerPage;
-            offset = (currentPage - 1) * itemsPerPage;
+            // Fold the base offset into the page offset so the first record is
+            // still skipped on every page (not just when pagination is off).
+            offset = baseOffset + (currentPage - 1) * itemsPerPage;
           } else {
             // Use legacy limit/offset from collection variable
             limit = collectionVariable.limit;
@@ -2953,10 +2972,14 @@ export async function resolveCollectionLayers(
           let paginationMeta: CollectionPaginationMeta | undefined;
           if (isPaginated && paginationConfig) {
             const itemsPerPage = paginationConfig.items_per_page || 10;
+            // `totalItems` counts the capped pool; the offset skips leading
+            // records, so the paginated total (and page count) is the pool
+            // minus the offset.
+            const displayTotal = Math.max(0, totalItems - baseOffset);
             paginationMeta = {
               currentPage,
-              totalPages: Math.ceil(totalItems / itemsPerPage),
-              totalItems,
+              totalPages: Math.ceil(displayTotal / itemsPerPage),
+              totalItems: displayTotal,
               itemsPerPage,
               layerId: layer.id,
               collectionId: collectionVariable.id,
@@ -2971,6 +2994,7 @@ export async function resolveCollectionLayers(
               sortBy: collectionVariable.sort_by,
               sortOrder: collectionVariable.sort_order,
               maxTotal,
+              baseOffset,
             };
           }
 
@@ -3013,6 +3037,7 @@ export async function resolveCollectionLayers(
               sortOrderInputLayerId: collectionVariable.sort_order_inputLayerId,
               limit: isPaginated ? paginationConfig.items_per_page : collectionVariable.limit,
               maxTotal,
+              baseOffset,
               paginationMode: isPaginated ? paginationConfig.mode : undefined,
               layerTemplate: layer.children || [],
               collectionLayerClasses: Array.isArray(layer.classes) ? layer.classes : (layer.classes ? [layer.classes] : []),
@@ -4821,8 +4846,11 @@ export function layerToHtml(
     attrs.push(`id="${escapeHtml(layer.attributes.id)}"`);
   }
 
-  // Hide elements marked as hiddenGenerated (e.g. alerts, slider fraction placeholder)
-  if (layer.hiddenGenerated) {
+  // Hide elements marked as hiddenGenerated. Scoped to alerts only: the flag is
+  // meant for form success/error alerts, whose reveal path clears inline display.
+  // Non-alert layers (e.g. animated dropdowns) manage visibility via
+  // data-gsap-hidden and must not be pinned to display:none here.
+  if (layer.hiddenGenerated && layer.alertType) {
     const existingDynamic = layer._dynamicStyles || {};
     layer = { ...layer, _dynamicStyles: { ...existingDynamic, display: 'none' } };
   }
