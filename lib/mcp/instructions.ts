@@ -86,7 +86,12 @@ Each layer has:
 - \`label\` — Form label
 
 **Utility**:
-- \`htmlEmbed\` — Custom HTML/CSS/JS code block. Set code via update_layer_settings.
+- \`htmlEmbed\` — Custom HTML/CSS/JS code block. Set code via update_layer_settings. Renders inside a
+  sandboxed, auto-resizing iframe on the published site: position absolute/fixed cannot escape the
+  embed's own box, its CSS never cascades to the page, and its scripts cannot reach the parent DOM.
+  For overlays/scrims/textures build native \`div\` layers instead (positioning + effects.mixBlendMode +
+  backgrounds.backgroundImage); for scripts that must touch the page, inject them via page custom code
+  (update_page_settings custom_code) rather than an embed.
 - \`slider\` — Image/content carousel. Configure via update_layer_settings.
 - \`lightbox\` — Fullscreen image gallery. Configure via update_layer_settings.
 - \`map\` — Interactive map element. Configure via update_layer_settings.
@@ -142,16 +147,24 @@ Each layer's \`design\` object controls its appearance. Use update_layer_design 
 - borderColor: "#e5e7eb", "rgba(0,0,0,0.1)"
 - borderRadius: "12px", "9999px" (pill), "0"
 
-**backgrounds** — Background colors and gradients
+**backgrounds** — Background colors, images and gradients
 - backgroundColor: "#ffffff", "#0a0a0a", "transparent"
+- backgroundImage: any CSS background-image value — "url(https://…)" or an inline data URI
+  (e.g. an SVG fractalNoise texture for film-grain overlays). URL-encode spaces inside data URIs.
+- backgroundSize / backgroundPosition / backgroundRepeat: "cover", "center", "no-repeat"
 - backgroundClip: "text" (for gradient text effect — also set typography color "transparent")
 - bgGradientVars: { "--bg-img": "linear-gradient(135deg, #667eea 0%, #764ba2 100%)" } — CSS gradient values
 
-**effects** — Shadows, opacity, blur
+**effects** — Shadows, opacity, blur, filters, blend modes
 - opacity: "0" to "1"
 - boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)"
 - blur: "4px"
 - backdropBlur: "8px"
+- filter: any CSS filter, e.g. "grayscale(1)", "brightness(0.5)"
+- backdropFilter: any CSS backdrop-filter, e.g. "saturate(180%)"
+- mixBlendMode: "multiply" | "screen" | "overlay" | "darken" | "lighten" | … — blends a layer into
+  whatever is beneath it. Combine with an absolutely-positioned div for color tints (multiply) and
+  grain/texture overlays (overlay) — no htmlEmbed needed.
 
 **positioning** — Position, z-index
 - position: "relative" | "absolute" | "fixed" | "sticky"
@@ -167,6 +180,9 @@ Each layer's \`design\` object controls its appearance. Use update_layer_design 
 link pointing at the page being viewed — use it for active nav-link and pagination styling.
 **Breakpoints:** pass \`breakpoint\` ("desktop" default, "tablet", "mobile"). Both work in
 update_layer_design and in batch_operations update_design operations.
+**Beyond these properties:** CSS the design schema doesn't cover (e.g. pointer-events) can be set
+per-layer with update_layer_settings custom_attributes, e.g. { "style": "pointer-events:none" } for
+decorative overlays that must not block clicks or text selection.
 
 ### Rich Text
 

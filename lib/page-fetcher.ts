@@ -4286,9 +4286,10 @@ function resolveLayerAssets(
     }
   }
 
-  // Resolve richTextImage src URLs inside Tiptap content
+  // Resolve richTextImage src URLs inside Tiptap content. The value is read
+  // from persisted layer JSON, so guard against a primitive before probing it.
   const textVar = layer.variables?.text;
-  if (textVar && 'type' in textVar && textVar.type === 'dynamic_rich_text') {
+  if (textVar && typeof textVar === 'object' && 'type' in textVar && textVar.type === 'dynamic_rich_text') {
     const resolvedContent = resolveRichTextImageAssets((textVar as any).data?.content, assetMap);
     if (resolvedContent !== (textVar as any).data?.content) {
       variableUpdates.text = {
