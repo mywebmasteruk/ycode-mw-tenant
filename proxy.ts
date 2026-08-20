@@ -6,6 +6,7 @@ import {
   requestHostname,
   supabaseCookieOptionsForRequestHeaders,
 } from '@/lib/supabase-cookie-domain';
+import { overlayTestHostname } from '@/lib/masjidweb/overlay-test-host';
 import { tenantJwtHeaderMismatchReason } from '@/lib/masjidweb/tenant-session-alignment';
 import {
   extractSubdomain,
@@ -96,7 +97,7 @@ async function verifyApiAuth(request: NextRequest): Promise<ApiAuthResult> {
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  const host = requestHostname(request.headers);
+  const host = overlayTestHostname(request.headers) ?? requestHostname(request.headers);
 
   // MCP endpoints use their own token-based authentication — skip session auth.
   // Cloud overlay proxies MUST also exempt these paths to avoid login redirects.

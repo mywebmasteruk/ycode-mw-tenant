@@ -32,6 +32,7 @@ TENANT_ISOLATION_TESTS=(
   lib/masjidweb/provisioned-tenant-rbac.test.ts
   lib/masjidweb/auth-users-tenant-scope.test.ts
   lib/masjidweb/apply-tenant-eq.test.ts
+  lib/masjidweb/overlay-test-host.test.ts
   lib/masjidweb/tenant-isolation-gate.test.ts
   lib/masjidweb/tenant-scope-codemod.test.ts
   scripts/core-update/run-tenant-codemod-resolver.test.ts
