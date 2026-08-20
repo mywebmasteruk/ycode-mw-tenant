@@ -4,6 +4,7 @@ import type { NextRequest } from 'next/server';
 import type { User } from '@supabase/supabase-js';
 import {
   requestHostname,
+  supabaseCookieOptionsForHost,
   supabaseCookieOptionsForRequestHeaders,
 } from '@/lib/supabase-cookie-domain';
 import { overlayTestHostname } from '@/lib/masjidweb/overlay-test-host';
@@ -45,7 +46,10 @@ type CookieToSet = {
 /**
  * Verify Supabase session for protected API / preview routes.
  */
-async function verifyApiAuth(request: NextRequest): Promise<ApiAuthResult> {
+async function verifyApiAuth(
+  request: NextRequest,
+  cookieHost?: string,
+): Promise<ApiAuthResult> {
   if (isPublicApiRoute(request.nextUrl.pathname, request.method)) {
     return { kind: 'public' };
   }
@@ -57,11 +61,13 @@ async function verifyApiAuth(request: NextRequest): Promise<ApiAuthResult> {
 
   let response = NextResponse.next({ request });
 
-  const cookieOpts = supabaseCookieOptionsForRequestHeaders(
-    request.headers,
-    undefined,
-    config.url,
-  );
+  const cookieOpts = cookieHost
+    ? supabaseCookieOptionsForHost(cookieHost, undefined, config.url)
+    : supabaseCookieOptionsForRequestHeaders(
+      request.headers,
+      undefined,
+      config.url,
+    );
 
   const supabase = createServerClient(config.url, config.anonKey, {
     cookies: {
@@ -190,8 +196,8 @@ export async function proxy(request: NextRequest) {
     const sbConfig = getSupabaseEnvConfig();
     if (sbConfig) {
       try {
-        const apexCookieOpts = supabaseCookieOptionsForRequestHeaders(
-          request.headers,
+        const apexCookieOpts = supabaseCookieOptionsForHost(
+          host,
           undefined,
           sbConfig.url,
         );
@@ -239,7 +245,7 @@ export async function proxy(request: NextRequest) {
   if (!skipPreviewAuth && (pathname.startsWith('/ycode/api') || pathname.startsWith('/ycode/preview') || isProtectedSiteApi)) {
     // MASJIDWEB_SEAM: tenant-jwt-alignment — see docs/masjidweb-core-seams.md#auth
     if (!isProvisionPublish) {
-      const auth = await verifyApiAuth(request);
+      const auth = await verifyApiAuth(request, host);
       if (auth.kind === 'unauthenticated') {
         if (pathname.startsWith('/ycode/preview')) {
           return NextResponse.redirect(new URL('/ycode', request.url));

@@ -58,6 +58,28 @@ const CANARIES = {
   B: { label: 'assasx7', host: 'assasx7.masjidweb.com', userId: '99834db8-ff95-43b5-892e-680ac6cccd19', email: 'demox7@masjidweb.com', tenantId: '3ef8bf9e-4341-426c-9696-ba2c2db7adfa' },
 };
 
+/** When set with MW_OVERLAY_TEST_SECRET, API calls hit an experiment deploy as that tenant host. */
+const ISOLATION_BASE_URL = process.env.ISOLATION_BASE_URL?.replace(/\/$/, '') ?? '';
+const OVERLAY_TEST_SECRET = process.env.MW_OVERLAY_TEST_SECRET?.trim() ?? '';
+
+function isolationUrl(host: string, path: string): string {
+  if (ISOLATION_BASE_URL && OVERLAY_TEST_SECRET) {
+    return `${ISOLATION_BASE_URL}${path}`;
+  }
+  return `https://${host}${path}`;
+}
+
+function isolationHeaders(host: string, extra: Record<string, string> = {}): Record<string, string> {
+  if (ISOLATION_BASE_URL && OVERLAY_TEST_SECRET) {
+    return {
+      ...extra,
+      'x-mw-overlay-test-secret': OVERLAY_TEST_SECRET,
+      'x-mw-overlay-test-host': host,
+    };
+  }
+  return extra;
+}
+
 type Result = { area: string; step: string; ok: boolean; status?: number; detail?: string };
 const results: Result[] = [];
 function record(area: string, step: string, ok: boolean, status?: number, detail?: string) {
@@ -129,9 +151,13 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 async function api(tenant: Tenant, method: string, path: string, body?: unknown): Promise<{ status: number; json: any; text: string }> {
   const attempt = async () => {
-    const res = await fetch(`https://${tenant.host}${path}`, {
+    const res = await fetch(isolationUrl(tenant.host, path), {
       method,
-      headers: { Cookie: tenant.cookie, 'Content-Type': 'application/json', Accept: 'application/json' },
+      headers: isolationHeaders(tenant.host, {
+        Cookie: tenant.cookie,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      }),
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     const text = await res.text();
@@ -292,9 +318,12 @@ async function keysAndTokens(t: Tenant, created: Record<string, string>) {
   const mtToken = mt.json?.data?.token;
 
   if (mtToken) {
-    const mcpRes = await fetch(`https://${t.host}/ycode/mcp/${mtToken}`, {
+    const mcpRes = await fetch(isolationUrl(t.host, `/ycode/mcp/${mtToken}`), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+      headers: isolationHeaders(t.host, {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      }),
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'canary', version: '1' } } }),
     });
     record(area, 'MCP token authenticates + initializes', mcpRes.status === 200, mcpRes.status, mcpRes.status === 200 ? undefined : await mcpRes.text().catch(() => undefined));
@@ -371,7 +400,9 @@ async function crossTenantChecks(attacker: Tenant, victim: Tenant, victimIds: Re
     record(area, `${a.label} (${a.method} ${a.path})`, ok, r.status, detail);
   }
 
-  const crossHost = await fetch(`https://${victim.host}/ycode/api/auth/users`, { headers: { Cookie: attacker.cookie } });
+  const crossHost = await fetch(isolationUrl(victim.host, '/ycode/api/auth/users'), {
+    headers: isolationHeaders(victim.host, { Cookie: attacker.cookie }),
+  });
   const crossHostText = await crossHost.text();
   const leaked = crossHost.status === 200 && crossHostText.includes(victim.tenantId) && !crossHostText.includes(attacker.tenantId);
   record(area, `cross-host: attacker cookie sent to ${victim.host}`, crossHost.status !== 200 || !leaked, crossHost.status);
@@ -479,7 +510,9 @@ async function main() {
     // service_role (seams re-arm, still safe) — but that degradation must ALERT, not
     // linger unnoticed. /ycode/api/mw-rls-health actively proves key→sign→JWKS trust.
     try {
-      const healthRes = await fetch(`https://${A.host}/ycode/api/mw-rls-health`);
+      const healthRes = await fetch(isolationUrl(A.host, '/ycode/api/mw-rls-health'), {
+        headers: isolationHeaders(A.host),
+      });
       const health = (await healthRes.json()) as {
         healthy?: boolean; enforce?: boolean; seamsRetired?: boolean;
         keyLoaded?: boolean; signOk?: boolean; jwksTrusted?: boolean | null;

@@ -1,3 +1,5 @@
+import { overlayTestHostname } from '@/lib/masjidweb/overlay-test-host';
+
 /**
  * MASJIDWEB_SEAM: per-tenant-auth-cookie — see docs/masjidweb-core-seams.md#tier-1
  *
@@ -36,7 +38,12 @@ export function tenantDomainSuffixFromEnv(): string | undefined {
 }
 
 /** First host from x-forwarded-host or Host (Netlify / reverse proxies). */
-export function requestHostname(headers: Headers): string {
+export function requestHostname(
+  headers: Headers,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const overlay = overlayTestHostname(headers, env);
+  if (overlay) return overlay;
   const xf = headers.get('x-forwarded-host');
   if (xf) {
     const first = xf.split(',')[0]?.trim() ?? '';
@@ -97,9 +104,10 @@ export function supabaseCookieOptionsForRequestHeaders(
   headers: Headers,
   tenantDomainSuffix: string | undefined = tenantDomainSuffixFromEnv(),
   projectUrl?: string,
+  env: NodeJS.ProcessEnv = process.env,
 ): SupabaseCookieOptions | undefined {
   return supabaseCookieOptionsForHost(
-    requestHostname(headers),
+    requestHostname(headers, env),
     tenantDomainSuffix,
     projectUrl,
   );

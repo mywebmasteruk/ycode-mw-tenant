@@ -31,6 +31,10 @@ describe('tenantDomainSuffixFromEnv', () => {
 });
 
 describe('requestHostname', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('prefers the first x-forwarded-host value and strips the port', () => {
     const headers = new Headers({
       'x-forwarded-host': 'tenant.masjidweb.com:443, internal.local:3000',
@@ -48,6 +52,34 @@ describe('requestHostname', () => {
 
   it('returns an empty string when no host headers are present', () => {
     expect(requestHostname(new Headers())).toBe('');
+  });
+
+  it('uses the overlay test host so experiment cookies match the tenant name', () => {
+    vi.stubEnv('MW_OVERLAY_FAIL_CLOSED', 'true');
+    vi.stubEnv('MW_OVERLAY_TEST_SECRET', 'expected');
+    const headers = new Headers({
+      host: 'experiment-overlay-fail-closed--masjidweb-tenants.netlify.app',
+      'x-forwarded-host': 'experiment-overlay-fail-closed--masjidweb-tenants.netlify.app',
+      'x-mw-overlay-test-secret': 'expected',
+      'x-mw-overlay-test-host': 'high900.masjidweb.com',
+    });
+
+    expect(requestHostname(headers)).toBe('high900.masjidweb.com');
+    expect(
+      supabaseCookieOptionsForRequestHeaders(headers, 'masjidweb.com', PROJECT_URL),
+    ).toEqual({ name: 'sb-abc123-high900-masjidweb-com-auth-token' });
+  });
+
+  it('ignores overlay headers when fail-closed is off (production)', () => {
+    vi.stubEnv('MW_OVERLAY_FAIL_CLOSED', '');
+    vi.stubEnv('MW_OVERLAY_TEST_SECRET', 'expected');
+    const headers = new Headers({
+      'x-forwarded-host': 'high900.masjidweb.com',
+      'x-mw-overlay-test-secret': 'expected',
+      'x-mw-overlay-test-host': 'assasx7.masjidweb.com',
+    });
+
+    expect(requestHostname(headers)).toBe('high900.masjidweb.com');
   });
 });
 
