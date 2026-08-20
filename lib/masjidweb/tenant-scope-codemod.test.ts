@@ -115,6 +115,42 @@ export async function f(client, tenantId) {
     expect(code).toContain('const tenantId = await resolveEffectiveTenantId();');
     expect(code).toContain('import { applyTenantId }');
   });
+
+  it('declares tenantId on the outer function even if a nested function already has one', () => {
+    const upstream = `export async function insertValuesBulk(client, values) {
+  async function stamp() {
+    const tenantId = await resolveEffectiveTenantId();
+    return tenantId;
+  }
+  const valuesToInsert = values.map(v => ({ item_id: v.item_id, value: v.value }));
+  await client.from('collection_item_values').insert(valuesToInsert);
+}`;
+    const { code, residual } = reapplyTenantScoping(upstream, 'lib/repositories/collectionItemValueRepository.ts');
+    expect(residual).toHaveLength(0);
+    expect(code).toMatch(
+      /export async function insertValuesBulk[\s\S]*const tenantId = await resolveEffectiveTenantId\(\);[\s\S]*insert\(valuesToInsert\)/,
+    );
+    expect(analyzeTenantIsolation('lib/repositories/collectionItemValueRepository.ts', code)).toEqual([]);
+    expect(isSyntacticallyValid(code)).toBe(true);
+  });
+
+  it('scopes a mapped insert payload and declares tenantId in the same function', () => {
+    const upstream = `export async function insertValuesBulk(client, values) {
+  const valuesToInsert = values.map(v => ({
+    item_id: v.item_id,
+    field_id: v.field_id,
+    value: v.value,
+  }));
+  const { error } = await client.from('collection_item_values').insert(valuesToInsert);
+  if (error) throw error;
+}`;
+    const { code, residual } = reapplyTenantScoping(upstream, 'lib/repositories/collectionItemValueRepository.ts');
+    expect(residual).toHaveLength(0);
+    expect(code).toContain('const tenantId = await resolveEffectiveTenantId();');
+    expect(code).toMatch(/tenant_id:\s*tenantId/);
+    expect(analyzeTenantIsolation('lib/repositories/collectionItemValueRepository.ts', code)).toEqual([]);
+    expect(isSyntacticallyValid(code)).toBe(true);
+  });
 });
 
 describe('reapplyTenantScoping — real settingsRepository round-trip', () => {

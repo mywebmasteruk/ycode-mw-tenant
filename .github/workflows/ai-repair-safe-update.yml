@@ -92,6 +92,8 @@ jobs:
             scripts/core-update/run-premium-ai-repair.ts \
             scripts/core-update/run-tenant-codemod-resolver.ts \
             scripts/core-update/run-tenant-codemod-resolver.test.ts \
+            scripts/core-update/heal-typecheck-tenant-id.ts \
+            scripts/core-update/heal-typecheck-tenant-id.test.ts \
             scripts/core-update/run-tenant-isolation-gate.ts \
             scripts/core-update/absolute-isolation-audit.ts \
             scripts/core-update/create-copilot-escalation.ts \
@@ -383,6 +385,20 @@ jobs:
         run: npm run updates:isolation-audit
 
       - name: Type-check repaired branch
+        id: typecheck
+        continue-on-error: true
+        run: npm run type-check
+
+      # Same-run heal: undeclared tenantId after a merge/codemod/AI repair used to
+      # fail this job and send the dashboard back to "click Fix again". Insert the
+      # missing declaration and type-check once more in this job. Approval stays
+      # locked if the second type-check still fails.
+      - name: Heal undeclared tenantId after type-check
+        if: steps.typecheck.outcome == 'failure'
+        run: npx --yes tsx scripts/core-update/heal-typecheck-tenant-id.ts
+
+      - name: Type-check repaired branch after heal
+        if: steps.typecheck.outcome == 'failure'
         run: npm run type-check
 
       - name: Upload Autopilot guard report
