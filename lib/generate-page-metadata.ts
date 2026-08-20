@@ -279,19 +279,9 @@ export async function generatePageMetadata(
   }
 
   // Build description - resolve field variables if collection item is available
-<<<<<<< HEAD
-  let description = seo?.description || fallbackDescription || `${page.name} - ${MASJIDWEB_BUILT_WITH}`;
-  if (collectionItem && seo?.description) {
-    description = resolveInlineVariables(seo.description, collectionItem) || fallbackDescription || `${page.name} - ${MASJIDWEB_BUILT_WITH}`;
-||||||| 8ea161e2
-  let description = seo?.description || fallbackDescription || page.name;
-  if (collectionItem && seo?.description) {
-    description = resolveInlineVariables(seo.description, collectionItem) || fallbackDescription || page.name;
-=======
-  let description = seoDescription || fallbackDescription || page.name;
+  let description = seoDescription || fallbackDescription || `${page.name} - ${MASJIDWEB_BUILT_WITH}`;
   if (collectionItem && seoDescription) {
-    description = resolveInlineVariables(seoDescription, collectionItem) || fallbackDescription || page.name;
->>>>>>> upstream/main
+    description = resolveInlineVariables(seoDescription, collectionItem) || fallbackDescription || `${page.name} - ${MASJIDWEB_BUILT_WITH}`;
   }
 
   // Base metadata

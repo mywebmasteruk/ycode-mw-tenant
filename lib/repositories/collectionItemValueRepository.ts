@@ -66,18 +66,14 @@ export async function insertValuesBulk(
 
   if (values.length === 0) return;
 
-<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
-||||||| 8ea161e2
-=======
+
   // Hoist inline base64 rich-text images to the asset manager so importers never
   // persist multi-MB data URIs inline (safe no-op for non-rich-text values).
   // Dynamically imported to keep the upload deps (sharp/file-upload) out of the
   // read/render module graph that also pulls in this repository.
   const { uploadInlineRichTextImagesInRows } = await import('@/lib/rich-text-image-upload');
   await uploadInlineRichTextImagesInRows(values);
-
->>>>>>> upstream/main
   const now = new Date().toISOString();
   const valuesToInsert = values.map(v => ({
     id: randomUUID(),
