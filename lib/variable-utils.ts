@@ -116,6 +116,25 @@ export function createTextComponentVariableValue(tiptapContent: object): Compone
 }
 
 /**
+ * Coerce a persisted component variable value into its object form.
+ *
+ * Text values are expected to be `{ type, data }` objects, but a bare string
+ * can reach the database — the MCP component tools accept an unvalidated
+ * `default_value`, so an agent can store `"Accessories"` instead of
+ * `{ type: 'dynamic_text', data: { content: 'Accessories' } }`. Callers probe
+ * these values with the `in` operator, which throws on a primitive, so
+ * normalize before inspecting. Returns undefined for values that can never
+ * be a variable value.
+ */
+export function normalizeComponentVariableValue(value: unknown): ComponentVariableValue | undefined {
+  if (typeof value === 'string') {
+    return { type: 'dynamic_text', data: { content: value } };
+  }
+  if (typeof value !== 'object' || value === null) return undefined;
+  return value as ComponentVariableValue;
+}
+
+/**
  * Extract Tiptap JSON content from text ComponentVariableValue
  * Returns the Tiptap content object or a default empty document
  * Handles both DynamicRichTextVariable (with formatting) and DynamicTextVariable (plain text)
@@ -123,16 +142,17 @@ export function createTextComponentVariableValue(tiptapContent: object): Compone
 export function extractTiptapFromComponentVariable(value?: ComponentVariableValue): object {
   const emptyDoc = { type: 'doc', content: [{ type: 'paragraph' }] };
 
-  if (!value) return emptyDoc;
+  const normalized = normalizeComponentVariableValue(value);
+  if (!normalized) return emptyDoc;
 
   // Check if value is a text variable (has 'type' property) vs ImageSettingsValue (has 'src' property)
-  if ('type' in value && value.type === 'dynamic_rich_text') {
-    return (value as DynamicRichTextVariable).data.content;
+  if ('type' in normalized && normalized.type === 'dynamic_rich_text') {
+    return (normalized as DynamicRichTextVariable).data.content;
   }
 
-  if ('type' in value && value.type === 'dynamic_text') {
+  if ('type' in normalized && normalized.type === 'dynamic_text') {
     // Convert plain text to Tiptap format
-    return stringToTiptapContent((value as DynamicTextVariable).data.content);
+    return stringToTiptapContent((normalized as DynamicTextVariable).data.content);
   }
 
   return emptyDoc;

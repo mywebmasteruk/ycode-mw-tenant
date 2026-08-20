@@ -290,7 +290,17 @@ function parseInlineMarks(text: string): TiptapNode[] {
       nodes.push({
         type: 'text',
         text: match[3],
-        marks: [{ type: 'richTextLink', attrs: { href: match[4], linkType: 'url' } }],
+        // Match the canonical LinkSettings shape the renderer resolves via
+        // getLinkSettingsFromMark/generateLinkHref — a bare { href } is ignored.
+        marks: [{
+          type: 'richTextLink',
+          attrs: {
+            type: 'url',
+            url: { type: 'dynamic_text', data: { content: match[4] } },
+            target: '_blank',
+            rel: 'noopener noreferrer nofollow',
+          },
+        }],
       });
     }
     lastIndex = match.index + match[0].length;
