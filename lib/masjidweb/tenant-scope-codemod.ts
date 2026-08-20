@@ -93,10 +93,25 @@ function enclosingFunctionBody(node: ts.Node): ts.Block | null {
   return null;
 }
 
+function isNestedFunctionLike(node: ts.Node, body: ts.Block): boolean {
+  return (
+    node !== body &&
+    (ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isMethodDeclaration(node))
+  );
+}
+
 /** Existing `const <x> = await? resolveEffectiveTenantId()` name in this body, or null. */
 function existingTenantVar(body: ts.Block): string | null {
   let found: string | null = null;
   const visit = (n: ts.Node): void => {
+    // Nested functions have their own scope. Reusing an inner `tenantId` as if
+    // it belonged to the outer function is what produced TS2304 on core updates
+    // (`Cannot find name 'tenantId'` after adding `tenant_id: tenantId` to a
+    // write payload).
+    if (isNestedFunctionLike(n, body)) return;
     if (
       ts.isVariableDeclaration(n) &&
       ts.isIdentifier(n.name) &&
@@ -128,6 +143,7 @@ function nameTakenInFunction(body: ts.Block, name: string): boolean {
   }
   let taken = false;
   const visit = (n: ts.Node): void => {
+    if (isNestedFunctionLike(n, body)) return;
     if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === name) taken = true;
     if (!taken) ts.forEachChild(n, visit);
   };
