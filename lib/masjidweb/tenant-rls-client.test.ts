@@ -14,7 +14,12 @@ vi.mock('@supabase/supabase-js', async (importOriginal) => {
 
 import { createClient } from '@supabase/supabase-js';
 import { MW_RLS_ENFORCED_HEADER } from '@/lib/masjidweb/apply-tenant-eq';
-import { tenantRlsEnforceEnabled, maybeGetTenantScopedClient } from './tenant-rls-client';
+import {
+  overlayFailClosedEnabled,
+  pickTenantDataClient,
+  tenantRlsEnforceEnabled,
+  maybeGetTenantScopedClient,
+} from './tenant-rls-client';
 import { resolveEffectiveTenantId } from '@/lib/masjidweb/effective-tenant-id';
 
 const fetchStub = (() => Promise.resolve(new Response())) as unknown as typeof globalThis.fetch;
@@ -83,5 +88,29 @@ describe('tenant-rls-client safety contract', () => {
     };
     expect(options.global?.headers?.[MW_RLS_ENFORCED_HEADER]).toBe('1');
     expect(options.global?.headers?.Authorization).toMatch(/^Bearer /);
+  });
+});
+
+describe('overlay fail-closed (no unscoped service-role fallback)', () => {
+  const ORIGINAL = process.env;
+  beforeEach(() => {
+    process.env = { ...ORIGINAL };
+  });
+  afterEach(() => {
+    process.env = ORIGINAL;
+  });
+
+  it('flag unset → overlay off; mint miss still uses service-role', () => {
+    delete process.env.MW_OVERLAY_FAIL_CLOSED;
+    expect(overlayFailClosedEnabled()).toBe(false);
+    expect(pickTenantDataClient({ id: 'rls' }, { id: 'service' })).toEqual({ id: 'rls' });
+    expect(pickTenantDataClient(null, { id: 'service' })).toEqual({ id: 'service' });
+  });
+
+  it('flag ON + mint miss → null (Users/auth still use getSupabaseServiceRole directly)', () => {
+    process.env.MW_OVERLAY_FAIL_CLOSED = 'true';
+    expect(overlayFailClosedEnabled()).toBe(true);
+    expect(pickTenantDataClient({ id: 'rls' }, { id: 'service' })).toEqual({ id: 'rls' });
+    expect(pickTenantDataClient(null, { id: 'service' })).toBeNull();
   });
 });

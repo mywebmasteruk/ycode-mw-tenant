@@ -36,6 +36,25 @@ export function tenantRlsEnforceEnabled(): boolean {
   return process.env.MW_TENANT_RLS_ENFORCE === 'true';
 }
 
+/**
+ * Overlay experiment: tenant-data paths must not fall back to unscoped service-role.
+ * Auth/admin callers still use getSupabaseServiceRole() directly (the July Users-page fix).
+ * Production stays unset. Enable only on the experiment Netlify branch deploy.
+ */
+export function overlayFailClosedEnabled(): boolean {
+  return process.env.MW_OVERLAY_FAIL_CLOSED === 'true';
+}
+
+/** Choose the tenant-data client. Never used by auth.admin / registry callers. */
+export function pickTenantDataClient<T>(
+  tenantClient: T | null,
+  serviceRoleClient: T | null,
+): T | null {
+  if (tenantClient) return tenantClient;
+  if (overlayFailClosedEnabled()) return null;
+  return serviceRoleClient;
+}
+
 let warned = false;
 function warnOnce(reason: string): void {
   if (warned) return;

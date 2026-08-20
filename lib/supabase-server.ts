@@ -8,7 +8,11 @@ import type { SupabaseConfig, SupabaseCredentials } from '@/types';
 import { withLimit } from './supabase-limiter';
 import { supabaseServerRealtimeOptions } from './supabase-server-options';
 // MASJIDWEB_SEAM: tenant-rls-enforcement — see docs/masjidweb-core-seams.md#tier-1
-import { maybeGetTenantScopedClient, tenantRlsEnforceEnabled } from '@/lib/masjidweb/tenant-rls-client';
+import {
+  maybeGetTenantScopedClient,
+  pickTenantDataClient,
+  tenantRlsEnforceEnabled,
+} from '@/lib/masjidweb/tenant-rls-client';
 // MASJIDWEB_SEAM_END
 
 /**
@@ -121,8 +125,9 @@ export async function getSupabaseServiceRole(): Promise<SupabaseClient | null> {
 export async function getSupabaseAdmin(_tenantId?: string): Promise<SupabaseClient | null> {
   // MASJIDWEB_SEAM: tenant-rls-enforcement — flag-gated (MW_TENANT_RLS_ENFORCE).
   // OFF (default) → service-role (getSupabaseServiceRole), unchanged behaviour.
-  // ON → per-tenant RLS client; returns null (→ service-role fallback) on any problem.
-  // Rollback = unset the flag + redeploy. See lib/masjidweb/tenant-rls-client.ts.
+  // ON → per-tenant RLS client; mint failure falls back to service-role unless
+  // MW_OVERLAY_FAIL_CLOSED=true (experiment: no unscoped fallback).
+  // Auth/admin must keep using getSupabaseServiceRole().
   if (tenantRlsEnforceEnabled()) {
     const creds = await getSupabaseCredentials();
     if (creds) {
@@ -131,6 +136,7 @@ export async function getSupabaseAdmin(_tenantId?: string): Promise<SupabaseClie
       const tenantClient = await maybeGetTenantScopedClient(creds.projectUrl, creds.anonKey, tenantFetch);
       if (tenantClient) return tenantClient;
     }
+    return pickTenantDataClient(null, await getSupabaseServiceRole());
   }
   // MASJIDWEB_SEAM_END
 
