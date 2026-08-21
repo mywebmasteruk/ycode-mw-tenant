@@ -53,6 +53,7 @@ export default function UsersSettingsPage() {
   const [activeUsers, setActiveUsers] = useState<ActiveUser[]>([]);
   const [pendingInvites, setPendingInvites] = useState<PendingInvite[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [serverCanManageMembers, setServerCanManageMembers] = useState<boolean | null>(null);
 
   const [inviteEmail, setInviteEmail] = useState('');
@@ -70,17 +71,23 @@ export default function UsersSettingsPage() {
 
   const fetchUsers = async () => {
     try {
-      const response = await fetch('/ycode/api/auth/users');
+      const response = await fetch('/ycode/api/auth/users', { credentials: 'same-origin' });
       const result = await response.json();
 
       if (!response.ok || result.error) {
         if (isSessionInvalidError(result.error)) {
-          await useAuthStore.getState().signOut();
+          // Do not signOut() here. A cookie/host mismatch on this one API
+          // used to kill a working editor session when opening Settings → Users.
+          setLoadError(
+            'Could not load users for this site. You are still signed in — refresh, or open Login link from the admin dashboard if this keeps happening.',
+          );
           return;
         }
+        setLoadError(result.error || response.statusText || 'Failed to fetch users');
         console.error('Failed to fetch users:', result.error || response.statusText);
         return;
       }
+      setLoadError(null);
 
       if (result.data) {
         setActiveUsers(result.data.activeUsers || []);
@@ -258,6 +265,10 @@ export default function UsersSettingsPage() {
         <header className="pt-8 pb-3">
           <span className="text-base font-medium">Users</span>
         </header>
+
+        {loadError && (
+          <p className="text-sm text-destructive mb-4">{loadError}</p>
+        )}
 
         {canManage && (
         <div className="flex flex-col gap-6 bg-secondary/20 p-8 rounded-lg">
