@@ -11,7 +11,7 @@ on:
         description: Only rerere + lockfile regen (no LLM)
         required: false
         type: boolean
-        default: true
+        default: false
       max_llm_files:
         description: Max files to send to OpenRouter per run
         required: false
@@ -21,7 +21,7 @@ on:
         description: Repair mode for blocked safe-update PRs
         required: false
         type: choice
-        default: autopilot
+        default: premium_ai
         options:
           - autopilot
           - premium_ai
@@ -45,6 +45,14 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+
+# One repair per PR. A second Fix click (or operator + dashboard) used to
+# race: both verified, then the later `git push` was rejected and the
+# verified tree never landed (PR #44, 2026-08-21). Cancel the older run so
+# only one writer remains.
+concurrency:
+  group: safe-update-repair-${{ inputs.pr_number }}
+  cancel-in-progress: true
 
 jobs:
   ai-repair:
@@ -94,6 +102,7 @@ jobs:
             scripts/core-update/run-tenant-codemod-resolver.test.ts \
             scripts/core-update/heal-typecheck-tenant-id.ts \
             scripts/core-update/heal-typecheck-tenant-id.test.ts \
+            scripts/core-update/push-repair-branch.sh \
             scripts/core-update/run-tenant-isolation-gate.ts \
             scripts/core-update/absolute-isolation-audit.ts \
             scripts/core-update/create-copilot-escalation.ts \
@@ -290,8 +299,7 @@ jobs:
             else
               git add package-lock.json
               git commit -m "fix(deps): resolve package-lock.json for safe update [automated]" || true
-              git push origin HEAD || true
-              echo "Resolved + committed package-lock.json."
+              echo "Resolved + committed package-lock.json (push is deferred to the final step)."
             fi
           else
             echo "package-lock.json not conflicted; nothing to do."
@@ -321,7 +329,7 @@ jobs:
             exit 0
           fi
           git commit -m "fix(ai): persist partial safe-update repairs for resume [automated]"
-          git push origin HEAD
+          bash scripts/core-update/push-repair-branch.sh
 
       - name: Stop when repair remains blocked
         if: >-
@@ -427,19 +435,28 @@ jobs:
         id: push
         if: steps.safety_tests.outcome == 'success' && steps.build.outcome == 'success'
         run: |
-          if git diff --quiet && git diff --cached --quiet; then
+          # Stage remaining uncommitted repair output, then push every local
+          # commit that origin does not have (including a lockfile-only commit
+          # from earlier in this job). A bare `git push` lost the verified
+          # tree on PR #44 when Copilot/another Fix run moved the remote tip.
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "fix(ai): resolve safe update conflicts [automated]"
+          fi
+          BEFORE="$(git rev-parse HEAD)"
+          bash scripts/core-update/push-repair-branch.sh
+          AFTER="$(git rev-parse HEAD)"
+          REMOTE="$(git rev-parse "origin/$(git rev-parse --abbrev-ref HEAD)")"
+          if [ "$AFTER" != "$REMOTE" ]; then
+            echo "Push helper returned success but HEAD is not on origin." >&2
+            exit 1
+          fi
+          if [ "$BEFORE" != "$REMOTE" ] || [ "$BEFORE" != "$AFTER" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "No file changes to push."
-            exit 0
           fi
-          # Stage everything the repair produced. Unstaged-only changes (e.g. the
-          # deterministic lockfile resolve touching package-lock.json with no code
-          # repairs) previously passed the diff check but made `git commit` fail
-          # with "no changes added to commit" (PR #35, 2026-07-05).
-          git add -A
-          git commit -m "fix(ai): resolve safe update conflicts [automated]"
-          git push origin HEAD
-          echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Re-run update safety check
         if: steps.push.outputs.changed == 'true'
@@ -450,8 +467,7 @@ jobs:
 
       - name: Mark PR ready after successful repair
         if: >-
-          steps.push.outputs.changed == 'true'
-          && steps.safety_tests.outcome == 'success'
+          steps.safety_tests.outcome == 'success'
           && steps.build.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

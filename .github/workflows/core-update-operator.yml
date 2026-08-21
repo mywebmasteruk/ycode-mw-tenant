@@ -2,21 +2,10 @@
 # Dispatches conflict repair (escalating from mechanical to LLM-assisted when
 # needed) and emails the platform admin.
 #
-# Root cause this file fixes: previously this always dispatched
-# ai-repair-safe-update.yml with mechanical_only=true and never escalated.
-# Deterministic repair is, by design, incapable of resolving conflicts that
-# need real judgment — it correctly refuses and exits non-zero every time it
-# hits one. With no escalation path, every PR that needed real conflict
-# resolution died blocked (see PR #27: "8 conflicts in tenant-sensitive
-# files", never resolved, closed unmerged). Now: try mechanical-only first
-# (cheap, fast, no LLM cost), and only escalate to repair_mode=premium_ai if
-# that doesn't fully clear the conflicts. premium_ai is required (not the
-# plain autopilot LLM mode) because ai-repair-safe-update.yml's "Run AI
-# conflict repair" step only fires when deterministic status is exactly
-# 'failed' — a deterministic status of 'blocked' (Autopilot protecting
-# tenant-sensitive files, e.g. PR #27's actual case) skips straight past it
-# and only the premium_ai path (isolation-gate-verified, handles both
-# 'failed' and 'blocked') can attempt it.
+# Repair is a single Premium AI run. Mechanical-only always exits blocked on
+# tenant-sensitive conflicts (proxy.ts, repositories), then a second dispatch
+# raced the first one's Copilot escalation and lost the push (PR #44). Do not
+# stack mechanical → premium → dashboard Fix on the same branch.
 
 name: Core update operator
 
@@ -34,13 +23,8 @@ jobs:
   operate:
     if: ${{ github.event.workflow_run.conclusion != 'skipped' }}
     runs-on: ubuntu-latest
-    # ai-repair-safe-update.yml itself allows up to 70 minutes (LLM repair +
-    # verification). Worst case here is mechanical (fast) then a full LLM
-    # escalation run, plus polling overhead to locate each dispatched run —
-    # padded above the theoretical 2x70min+overhead worst case so a slow
-    # mechanical run can't cause a silent hard-cancel that skips the "Notify
-    # MasjidWeb admin" step (no email at all is worse than a late one).
-    timeout-minutes: 160
+    # One premium_ai repair (job ceiling 70 min) plus dispatch/poll overhead.
+    timeout-minutes: 80
     steps:
       # sync-upstream.yml's own conclusion is "success" even when its
       # create-update-pr job was skipped by check-existing (an existing PR was
@@ -92,7 +76,7 @@ jobs:
             core.setOutput('draft', pr.draft ? 'true' : 'false');
             core.setOutput('mergeable', pr.mergeable === false ? 'false' : 'true');
 
-      - name: Repair with escalation (mechanical, then LLM-assisted if needed)
+      - name: Repair with Premium AI (one run)
         if: steps.sync.outputs.should_operate == 'true' && steps.pr.outputs.found == 'true' && steps.pr.outputs.draft == 'true'
         id: repair
         env:
@@ -101,56 +85,42 @@ jobs:
         run: |
           set -uo pipefail
 
-          find_and_watch_run() {
-            local mechanical_only="$1"
-            local repair_mode="$2"
-            local before
-            before="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-            gh workflow run ai-repair-safe-update.yml \
-              --repo "$GITHUB_REPOSITORY" \
-              -f "pr_number=${PR_NUMBER}" \
-              -f "mechanical_only=${mechanical_only}" \
-              -f "repair_mode=${repair_mode}" >&2
-
-            local run_id=""
-            for _ in $(seq 1 24); do
-              sleep 5
-              run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ai-repair-safe-update.yml \
-                --json databaseId,createdAt,event \
-                --jq "[.[] | select(.event==\"workflow_dispatch\" and .createdAt > \"$before\")] | sort_by(.createdAt) | .[0].databaseId // empty")"
-              if [ -n "$run_id" ]; then
-                break
-              fi
-            done
-
-            if [ -z "$run_id" ]; then
-              echo "Could not locate the dispatched ai-repair run (mechanical_only=$mechanical_only, repair_mode=$repair_mode)." >&2
-              return 1
-            fi
-
-            echo "Watching ai-repair run $run_id (mechanical_only=$mechanical_only, repair_mode=$repair_mode)..." >&2
-            gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status >&2
-            local watch_status=$?
-            echo "$run_id"
-            return $watch_status
-          }
-
-          mech_run_id="$(find_and_watch_run true autopilot)"
-          mech_status=$?
-          echo "mechanical_run_id=${mech_run_id:-unknown}" >> "$GITHUB_OUTPUT"
-
-          if [ "$mech_status" -eq 0 ]; then
-            echo "outcome=mechanical_succeeded" >> "$GITHUB_OUTPUT"
+          # If the admin already clicked Fix, do not start a second writer.
+          in_flight="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ai-repair-safe-update.yml \
+            --json status,databaseId --jq '[.[] | select(.status=="in_progress" or .status=="queued")] | length')"
+          if [ "${in_flight:-0}" -gt 0 ]; then
+            echo "A Fix run is already in flight — not dispatching another."
+            echo "outcome=already_running" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "Mechanical-only repair did not fully resolve conflicts (exit $mech_status) — escalating to premium_ai repair." >&2
-          llm_run_id="$(find_and_watch_run false premium_ai)"
-          llm_status=$?
-          echo "llm_run_id=${llm_run_id:-unknown}" >> "$GITHUB_OUTPUT"
+          before="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run ai-repair-safe-update.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            -f "pr_number=${PR_NUMBER}" \
+            -f "mechanical_only=false" \
+            -f "repair_mode=premium_ai"
 
-          if [ "$llm_status" -eq 0 ]; then
+          run_id=""
+          for _ in $(seq 1 24); do
+            sleep 5
+            run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ai-repair-safe-update.yml \
+              --json databaseId,createdAt,event \
+              --jq "[.[] | select(.event==\"workflow_dispatch\" and .createdAt > \"$before\")] | sort_by(.createdAt) | .[-1].databaseId // empty")"
+            if [ -n "$run_id" ]; then
+              break
+            fi
+          done
+
+          if [ -z "$run_id" ]; then
+            echo "Could not locate the dispatched premium_ai run." >&2
+            echo "outcome=still_blocked" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "llm_run_id=${run_id}" >> "$GITHUB_OUTPUT"
+          echo "Watching ai-repair run $run_id (premium_ai only)..."
+          if gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status; then
             echo "outcome=llm_succeeded" >> "$GITHUB_OUTPUT"
           else
             echo "outcome=still_blocked" >> "$GITHUB_OUTPUT"
@@ -177,14 +147,14 @@ jobs:
             EVENT="update_failed"
           elif [ "$IS_DRAFT" = "true" ]; then
             case "$REPAIR_OUTCOME" in
-              mechanical_succeeded)
-                MSG="A new safe-update PR was opened with conflicts. Mechanical repair resolved them and pushed the fix — checks are running now. You'll see it on the admin dashboard once green."
+              mechanical_succeeded|llm_succeeded)
+                MSG="A new safe-update PR was opened with conflicts. Automated repair resolved them and pushed the fix — checks are running now. You'll see it on the admin dashboard once green."
                 ;;
-              llm_succeeded)
-                MSG="A new safe-update PR was opened with conflicts too complex for mechanical repair. LLM-assisted repair resolved them and pushed the fix — checks are running now."
+              already_running)
+                MSG="A new safe-update PR was opened. A Fix run is already in progress — wait for it to finish rather than clicking Fix again."
                 ;;
               still_blocked)
-                MSG="A new safe-update PR has conflicts that automated repair (mechanical + LLM-assisted) could NOT resolve. This needs a developer to look at it directly — see the PR for details."
+                MSG="A new safe-update PR has conflicts that automated repair could NOT resolve. This needs a developer to look at it directly — see the PR for details."
                 ;;
               *)
                 MSG="A new safe-update PR was opened (draft). Automated repair ran — check the PR for the outcome."
