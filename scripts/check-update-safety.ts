@@ -46,7 +46,9 @@ const baseRef = process.env.UPDATE_BASE_REF || 'origin/main';
 const outputPath = process.env.UPDATE_SAFETY_REPORT_PATH;
 const jsonOutputPath = process.env.UPDATE_SAFETY_REPORT_JSON_PATH;
 const changedFiles = listAllowFailure(`git diff --name-only ${baseRef}...HEAD`);
-const conflictFiles = listAllowFailure('git diff --name-only --diff-filter=U');
+const unmerged = listAllowFailure('git diff --name-only --diff-filter=U');
+const markerFiles = listAllowFailure('git grep -l "^<<<<<<<" -- . ":(exclude)node_modules"');
+const conflictFiles = [...new Set([...unmerged, ...markerFiles])].sort();
 const result = classifyUpdateRisk(changedFiles, conflictFiles);
 const report = formatUpdateSafetyReport(result);
 
