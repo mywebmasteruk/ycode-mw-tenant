@@ -899,12 +899,11 @@ export function collectLayerAssetIds(
     const linkAssetId = layer.variables?.link?.asset?.id;
     addAssetId(linkAssetId);
 
-    // Lightbox file assets
-    if (layer.settings?.lightbox?.files) {
+    // Lightbox file assets (addAssetId guards non-string/non-UUID values,
+    // so nested arrays or external URLs are safely ignored)
+    if (Array.isArray(layer.settings?.lightbox?.files)) {
       for (const fileId of layer.settings.lightbox.files) {
-        if (fileId && !fileId.startsWith('http') && !fileId.startsWith('/')) {
-          addAssetId(fileId);
-        }
+        addAssetId(fileId);
       }
     }
 

@@ -494,7 +494,7 @@ COMMON USES:
       layer_id: z.string().describe('The layer ID'),
       tag: z.string().optional().describe('HTML tag override: h1, h2, h3, h4, h5, h6, p, span, div, section, nav, footer, header, main, aside, article'),
       html_id: z.string().optional().describe('Custom HTML element ID (for anchor links, CSS targeting)'),
-      html_embed_code: z.string().optional().describe('For htmlEmbed layers: the HTML/CSS/JS code to embed'),
+      html_embed_code: z.string().optional().describe('For htmlEmbed layers: the HTML/CSS/JS code to embed. Runs in a sandboxed iframe on the published site — it cannot overlay the page or access the parent DOM'),
       custom_attributes: z.record(z.string(), z.string()).optional().describe('Custom HTML attributes as { name: value } pairs'),
       custom_name: z.string().optional().describe('Display name for the layer in the builder'),
       hidden: z.boolean().optional().describe('Hide the layer on the canvas (still renders on the published site).'),

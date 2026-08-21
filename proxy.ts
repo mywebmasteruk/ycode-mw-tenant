@@ -22,6 +22,7 @@ import {
   isTenantPageRewritablePath,
   shouldRewriteToTenantRoute,
 } from '@/lib/masjidweb/route-tenant-resolution';
+import { applySecurityHeaders } from '@/lib/security-headers-server';
 
 const TENANT_DOMAIN_SUFFIX = process.env.TENANT_DOMAIN_SUFFIX || '';
 
@@ -271,8 +272,8 @@ export async function proxy(request: NextRequest) {
     const rewriteResponse = NextResponse.rewrite(rewriteUrl, { request });
     rewriteResponse.headers.set('x-pathname', pathname);
     attachTenantNetlifyCacheTag(rewriteResponse, request, pathname);
-    return rewriteResponse;
-  }
+    await applySecurityHeaders(rewriteResponse);
+    return rewriteResponse;  }
 
   // MASJIDWEB_SEAM: route-based-tenant-resolution rewrite — see
   // lib/masjidweb/route-tenant-resolution.ts. Flag-gated (default off). When
@@ -302,6 +303,11 @@ export async function proxy(request: NextRequest) {
 
   response.headers.set('x-pathname', pathname);
   attachTenantNetlifyCacheTag(response, request, pathname);
+
+  // Apply configurable security headers to public pages only (not builder/API).
+  if (isPublicPage(pathname)) {
+    await applySecurityHeaders(response);
+  }
 
   return response;
 }

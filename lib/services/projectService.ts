@@ -188,13 +188,203 @@ export function isEncrypted(data: Buffer): boolean {
 }
 
 /**
+ * Serialize export data to a UTF-8 Buffer without ever holding the whole
+ * document as a single JS string. Rows and asset files are stringified one at
+ * a time and concatenated as Buffers, so the payload can exceed V8's max string
+ * length (~512MB) that `JSON.stringify` on the full object would hit. Output is
+ * byte-identical to `JSON.stringify(exportData)`.
+ */
+function serializeExportToBuffer(exportData: ProjectExportData): Buffer {
+  const chunks: Buffer[] = [];
+  const push = (str: string) => chunks.push(Buffer.from(str, 'utf-8'));
+
+  push('{"manifest":');
+  push(JSON.stringify(exportData.manifest));
+
+  push(',"data":{');
+  const tables = Object.keys(exportData.data);
+  tables.forEach((table, tableIndex) => {
+    if (tableIndex > 0) push(',');
+    push(`${JSON.stringify(table)}:[`);
+    const rows = exportData.data[table];
+    rows.forEach((row, rowIndex) => {
+      if (rowIndex > 0) push(',');
+      push(JSON.stringify(row));
+    });
+    push(']');
+  });
+  push('}');
+
+  if (exportData.files) {
+    push(',"files":[');
+    exportData.files.forEach((file, fileIndex) => {
+      if (fileIndex > 0) push(',');
+      push(JSON.stringify(file));
+    });
+    push(']');
+  }
+  push('}');
+
+  return Buffer.concat(chunks);
+}
+
+/**
  * Pack export data into a .ycode file buffer.
  * Gzip-compresses the JSON; optionally encrypts with a password.
  */
 export function packExport(exportData: ProjectExportData, password?: string): Buffer {
-  const json = JSON.stringify(exportData);
-  const compressed = gzipSync(Buffer.from(json, 'utf-8'));
+  const compressed = gzipSync(serializeExportToBuffer(exportData));
   return password ? encryptBuffer(compressed, password) : compressed;
+}
+
+// JSON structural byte codes (all ASCII, safe to scan over UTF-8 content).
+const CH_QUOTE = 0x22;
+const CH_BACKSLASH = 0x5c;
+const CH_OPEN_BRACE = 0x7b;
+const CH_CLOSE_BRACE = 0x7d;
+const CH_OPEN_BRACKET = 0x5b;
+const CH_CLOSE_BRACKET = 0x5d;
+const CH_COLON = 0x3a;
+const CH_COMMA = 0x2c;
+
+/** Advance past JSON whitespace, returning the next significant byte index. */
+function skipWhitespace(buf: Buffer, i: number): number {
+  while (i < buf.length) {
+    const c = buf[i];
+    if (c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d) i++;
+    else break;
+  }
+  return i;
+}
+
+/** Given a `"` at index `i`, return the index just past the closing quote. */
+function skipString(buf: Buffer, i: number): number {
+  let j = i + 1;
+  while (j < buf.length) {
+    const c = buf[j];
+    if (c === CH_BACKSLASH) j += 2;
+    else if (c === CH_QUOTE) return j + 1;
+    else j++;
+  }
+  throw new Error('Unterminated string in backup JSON');
+}
+
+/** Return the index just past the JSON value starting at `i` (first non-ws byte). */
+function skipValue(buf: Buffer, i: number): number {
+  const c = buf[i];
+  if (c === CH_QUOTE) return skipString(buf, i);
+  if (c === CH_OPEN_BRACE || c === CH_OPEN_BRACKET) {
+    let depth = 0;
+    let j = i;
+    while (j < buf.length) {
+      const ch = buf[j];
+      if (ch === CH_QUOTE) {
+        j = skipString(buf, j);
+      } else if (ch === CH_OPEN_BRACE || ch === CH_OPEN_BRACKET) {
+        depth++;
+        j++;
+      } else if (ch === CH_CLOSE_BRACE || ch === CH_CLOSE_BRACKET) {
+        depth--;
+        j++;
+        if (depth === 0) return j;
+      } else {
+        j++;
+      }
+    }
+    throw new Error('Unterminated container in backup JSON');
+  }
+  // Primitive (number/true/false/null): read until a structural delimiter.
+  let j = i;
+  while (j < buf.length) {
+    const ch = buf[j];
+    if (ch === CH_COMMA || ch === CH_CLOSE_BRACE || ch === CH_CLOSE_BRACKET ||
+      ch === 0x20 || ch === 0x09 || ch === 0x0a || ch === 0x0d) break;
+    j++;
+  }
+  return j;
+}
+
+/** JSON.parse a single value slice — kept small so it never hits the string cap. */
+function parseSlice(buf: Buffer, start: number, end: number): unknown {
+  return JSON.parse(buf.toString('utf-8', start, end));
+}
+
+/**
+ * Parse a project export from its decompressed JSON buffer without ever
+ * materializing the whole document as one JS string. The manifest, each table
+ * row, and each asset file are parsed from their own small slices, so payloads
+ * larger than V8's max string length (~512MB) — which `JSON.parse` on the full
+ * text would reject — are handled. Accepts any standard JSON produced by
+ * `JSON.stringify(exportData)`, regardless of key order or whitespace.
+ */
+function parseExportFromBuffer(buf: Buffer): ProjectExportData {
+  const data: Record<string, Record<string, unknown>[]> = {};
+  let manifest: ProjectManifest | undefined;
+  let files: ExportFile[] | undefined;
+
+  let i = skipWhitespace(buf, 0);
+  if (buf[i] !== CH_OPEN_BRACE) throw new Error('Expected object at root');
+  i++;
+
+  while (true) {
+    i = skipWhitespace(buf, i);
+    if (buf[i] === CH_CLOSE_BRACE) break;
+
+    if (buf[i] !== CH_QUOTE) throw new Error('Expected object key');
+    const keyEnd = skipString(buf, i);
+    const key = JSON.parse(buf.toString('utf-8', i, keyEnd)) as string;
+    i = skipWhitespace(buf, keyEnd);
+    if (buf[i] !== CH_COLON) throw new Error('Expected colon after key');
+    i = skipWhitespace(buf, i + 1);
+
+    if (key === 'data') {
+      if (buf[i] !== CH_OPEN_BRACE) throw new Error('Expected object for "data"');
+      i = skipWhitespace(buf, i + 1);
+      while (buf[i] !== CH_CLOSE_BRACE) {
+        const tableKeyEnd = skipString(buf, i);
+        const table = JSON.parse(buf.toString('utf-8', i, tableKeyEnd)) as string;
+        i = skipWhitespace(buf, tableKeyEnd);
+        if (buf[i] !== CH_COLON) throw new Error('Expected colon after table name');
+        i = skipWhitespace(buf, i + 1);
+        if (buf[i] !== CH_OPEN_BRACKET) throw new Error('Expected array for table rows');
+        i = skipWhitespace(buf, i + 1);
+        const rows: Record<string, unknown>[] = [];
+        while (buf[i] !== CH_CLOSE_BRACKET) {
+          const rowEnd = skipValue(buf, i);
+          rows.push(parseSlice(buf, i, rowEnd) as Record<string, unknown>);
+          i = skipWhitespace(buf, rowEnd);
+          if (buf[i] === CH_COMMA) i = skipWhitespace(buf, i + 1);
+        }
+        data[table] = rows;
+        i = skipWhitespace(buf, i + 1);
+        if (buf[i] === CH_COMMA) i = skipWhitespace(buf, i + 1);
+      }
+      i++;
+    } else if (key === 'files') {
+      if (buf[i] !== CH_OPEN_BRACKET) throw new Error('Expected array for "files"');
+      i = skipWhitespace(buf, i + 1);
+      const collected: ExportFile[] = [];
+      while (buf[i] !== CH_CLOSE_BRACKET) {
+        const fileEnd = skipValue(buf, i);
+        collected.push(parseSlice(buf, i, fileEnd) as ExportFile);
+        i = skipWhitespace(buf, fileEnd);
+        if (buf[i] === CH_COMMA) i = skipWhitespace(buf, i + 1);
+      }
+      files = collected;
+      i++;
+    } else {
+      const valueEnd = skipValue(buf, i);
+      const value = parseSlice(buf, i, valueEnd);
+      if (key === 'manifest') manifest = value as ProjectManifest;
+      i = valueEnd;
+    }
+
+    i = skipWhitespace(buf, i);
+    if (buf[i] === CH_COMMA) i++;
+  }
+
+  if (!manifest) throw new Error('Missing manifest');
+  return files ? { manifest, data, files } : { manifest, data };
 }
 
 /**
@@ -221,14 +411,20 @@ export function unpackImport(
     compressed = buffer;
   }
 
-  const jsonString = gunzipSync(compressed).toString('utf-8');
-  const parsed = JSON.parse(jsonString);
+  const decompressed = gunzipSync(compressed);
+
+  let parsed: ProjectExportData;
+  try {
+    parsed = parseExportFromBuffer(decompressed);
+  } catch {
+    throw new ToastError('Invalid backup file', 'The backup file structure is not valid');
+  }
 
   if (!parsed.manifest || !parsed.data) {
     throw new ToastError('Invalid backup file', 'The backup file structure is not valid');
   }
 
-  return parsed as ProjectExportData;
+  return parsed;
 }
 
 // ─── Schema Cache ───────────────────────────────────────────────────
