@@ -1,7 +1,6 @@
 import { createServerClient, type CookieOptions } from '@supabase/ssr';
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-<<<<<<< HEAD
 import type { User } from '@supabase/supabase-js';
 import {
   requestHostname,
@@ -23,6 +22,7 @@ import {
   isTenantPageRewritablePath,
   shouldRewriteToTenantRoute,
 } from '@/lib/masjidweb/route-tenant-resolution';
+import { applySecurityHeaders } from '@/lib/security-headers-server';
 
 const TENANT_DOMAIN_SUFFIX = process.env.TENANT_DOMAIN_SUFFIX || '';
 
@@ -41,10 +41,6 @@ type CookieToSet = {
   value: string;
   options: CookieOptions;
 };
-||||||| 8ea161e2
-=======
-import { applySecurityHeaders } from '@/lib/security-headers-server';
->>>>>>> upstream/main
 
 /**
  * Verify Supabase session for protected API / preview routes.
@@ -232,7 +228,6 @@ export async function proxy(request: NextRequest) {
   const skipPreviewAuth = process.env.DISABLE_PREVIEW_AUTH === 'true'
     && pathname.startsWith('/ycode/preview');
 
-<<<<<<< HEAD
   // MASJIDWEB_SEAM: site-api-auth — extend the auth chokepoint to cover the
   // destructive `(site)/api/templates` POSTs. Upstream Ycode leaves these
   // unauthenticated (single-tenant assumption); on MasjidWeb they face the
@@ -246,21 +241,6 @@ export async function proxy(request: NextRequest) {
     if (!isProvisionPublish) {
       const auth = await verifyApiAuth(request);
       if (auth.kind === 'unauthenticated') {
-||||||| 8ea161e2
-  // Protect API and preview routes with auth
-  if (!skipPreviewAuth && (pathname.startsWith('/ycode/api') || pathname.startsWith('/ycode/preview'))) {
-    const authResponse = await verifyApiAuth(request);
-    if (authResponse) {
-      if (authResponse.status === 401) {
-=======
-  // Protect API and preview routes with auth. `/api/templates` lives outside the
-  // `/ycode` tree (public site route group) but exposes destructive builder-only
-  // operations (apply/export), so it must be gated here too.
-  if (!skipPreviewAuth && (pathname.startsWith('/ycode/api') || pathname.startsWith('/ycode/preview') || pathname.startsWith('/api/templates'))) {
-    const authResponse = await verifyApiAuth(request);
-    if (authResponse) {
-      if (authResponse.status === 401) {
->>>>>>> upstream/main
         if (pathname.startsWith('/ycode/preview')) {
           return NextResponse.redirect(new URL('/ycode', request.url));
         }
@@ -291,12 +271,8 @@ export async function proxy(request: NextRequest) {
 
     const rewriteResponse = NextResponse.rewrite(rewriteUrl, { request });
     rewriteResponse.headers.set('x-pathname', pathname);
-<<<<<<< HEAD
     attachTenantNetlifyCacheTag(rewriteResponse, request, pathname);
-||||||| 8ea161e2
-=======
     await applySecurityHeaders(rewriteResponse);
->>>>>>> upstream/main
     return rewriteResponse;
   }
 
@@ -330,7 +306,7 @@ export async function proxy(request: NextRequest) {
   attachTenantNetlifyCacheTag(response, request, pathname);
 
   // Apply configurable security headers to public pages only (not builder/API).
-  if (isPublicPage) {
+  if (isPublicPage(pathname)) {
     await applySecurityHeaders(response);
   }
 
