@@ -81,6 +81,29 @@ describe('requestHostname', () => {
 
     expect(requestHostname(headers)).toBe('high900.masjidweb.com');
   });
+
+  it('prefers the tenant Host over a pooled x-forwarded-host so auth cookies match the browser', () => {
+    vi.stubEnv('TENANT_DOMAIN_SUFFIX', 'masjidweb.com');
+    const headers = new Headers({
+      host: 'high900.masjidweb.com',
+      'x-forwarded-host': 'tenants.masjidweb.com',
+    });
+
+    expect(requestHostname(headers)).toBe('high900.masjidweb.com');
+    expect(
+      supabaseCookieOptionsForRequestHeaders(headers, 'masjidweb.com', PROJECT_URL),
+    ).toEqual({ name: 'sb-abc123-high900-masjidweb-com-auth-token' });
+  });
+
+  it('prefers the tenant Host over a Netlify deploy host in x-forwarded-host', () => {
+    vi.stubEnv('TENANT_DOMAIN_SUFFIX', 'masjidweb.com');
+    const headers = new Headers({
+      host: 'assasx7.masjidweb.com',
+      'x-forwarded-host': 'experiment-overlay-fail-closed--masjidweb-tenants.netlify.app',
+    });
+
+    expect(requestHostname(headers)).toBe('assasx7.masjidweb.com');
+  });
 });
 
 describe('supabaseAuthCookieName', () => {
