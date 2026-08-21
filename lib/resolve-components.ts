@@ -6,6 +6,7 @@
 
 import type { Layer, Component, ComponentVariable, ComponentVariableValue, LayerVariables, VariantSettingsValue } from '@/types';
 import { getComponentVariantLayers } from './component-variant-utils';
+import { normalizeComponentVariableValue } from './variable-utils';
 
 /**
  * Remap collection_layer_id in a FieldVariable using the ID map.
@@ -386,7 +387,7 @@ export function applyComponentOverrides(
       const variableDef = componentVariables?.find(v => v.id === linkedTextVariableId);
       const overrideCategory = (variableDef?.type === 'rich_text' ? 'rich_text' : 'text') as OverrideCategory;
       const overrideValue = overrides?.[overrideCategory]?.[linkedTextVariableId];
-      const valueToApply = overrideValue ?? variableDef?.default_value;
+      const valueToApply = normalizeComponentVariableValue(overrideValue ?? variableDef?.default_value);
 
       // Only apply if it's a text variable (has 'type' property, not ImageSettingsValue)
       if (valueToApply && 'type' in valueToApply) {
