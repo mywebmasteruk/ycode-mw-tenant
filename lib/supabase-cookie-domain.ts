@@ -1,3 +1,5 @@
+import { extractSubdomain } from '@/lib/tenant/middleware-utils';
+
 /**
  * MASJIDWEB_SEAM: per-tenant-auth-cookie — see docs/masjidweb-core-seams.md#tier-1
  *
@@ -35,15 +37,39 @@ export function tenantDomainSuffixFromEnv(): string | undefined {
   return s || undefined;
 }
 
-/** First host from x-forwarded-host or Host (Netlify / reverse proxies). */
-export function requestHostname(headers: Headers): string {
+function stripPort(value: string): string {
+  return value.replace(/:\d+$/, '').toLowerCase();
+}
+
+function firstForwardedHost(headers: Headers): string {
   const xf = headers.get('x-forwarded-host');
-  if (xf) {
-    const first = xf.split(',')[0]?.trim() ?? '';
-    if (first) return first.replace(/:\d+$/, '');
+  if (!xf) return '';
+  const first = xf.split(',')[0]?.trim() ?? '';
+  return first ? stripPort(first) : '';
+}
+
+/**
+ * Public hostname for tenant routing and per-host auth cookies.
+ *
+ * Prefer x-forwarded-host, except when that value is the pooled site / apex
+ * (`tenants.masjidweb.com`, `*.netlify.app`) and Host is the real tenant
+ * subdomain the browser used to name the auth cookie. A mismatch here
+ * makes `/ycode/api/auth/users` return 401 and the Users page sign the
+ * editor out.
+ */
+export function requestHostname(headers: Headers): string {
+  const xf = firstForwardedHost(headers);
+  const host = stripPort(headers.get('host')?.trim() ?? '');
+  const suffix = tenantDomainSuffixFromEnv();
+
+  if (xf && host && xf !== host && suffix) {
+    const xfTenant = extractSubdomain(xf, suffix);
+    const hostTenant = extractSubdomain(host, suffix);
+    if (hostTenant && !xfTenant) return host;
   }
-  const host = headers.get('host')?.trim() ?? '';
-  return host.replace(/:\d+$/, '');
+
+  if (xf) return xf;
+  return host;
 }
 
 export type SupabaseCookieOptions = {

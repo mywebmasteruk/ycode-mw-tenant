@@ -166,6 +166,13 @@ export async function getValuesByItemIds(
       .whereIn('item_id', safeItemIds)
       .andWhere('is_published', is_published)
       .whereNull('deleted_at');
+    // Knex connects as `postgres`, which has BYPASSRLS, so RLS never scopes this
+    // query — unlike the PostgREST fallback below, this filter is the only tenant
+    // control on the direct-PG path. Mirrors applyTenantEq: filter only when a
+    // tenant is resolved, so single-tenant self-hosted installs are unaffected.
+    if (tenantId) {
+      query = query.andWhere('tenant_id', tenantId);
+    }
     if (safeFieldIds) {
       query = query.whereIn('field_id', safeFieldIds);
     }

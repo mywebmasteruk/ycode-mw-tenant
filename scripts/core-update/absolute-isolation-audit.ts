@@ -7,9 +7,14 @@
  * SCOPE: lib/ + app/ — i.e. every file that runs in a tenant request. It does
  * NOT scan `database/` (migrations + manual maintenance scripts like
  * backfill-content-hashes.ts) or top-level `scripts/`: those are admin/cron
- * tools that operate cross-tenant by design, not request-path code. Also does
- * NOT parse the Knex `knex('<table>')` path (no `.from()` entrypoint) — that is
- * covered file-level by autopilot-tenant-invariants.ts.
+ * tools that operate cross-tenant by design, not request-path code.
+ *
+ * Both query dialects ARE parsed: supabase-js `<expr>.from('<table>')` and the
+ * Knex direct-PG `knex('<table>')` path. Knex used to be skipped here and left to
+ * a file-level substring check in autopilot-tenant-invariants.ts; that check is
+ * satisfied by a matching string anywhere in the file, so it missed genuinely
+ * unscoped Knex reads. Knex is the higher-risk dialect, not the lower: it connects
+ * as `postgres` (BYPASSRLS), so no RLS policy applies to it at all.
  *
  * Exit 1 if any unscoped access is found (so CI blocks the merge); exit 0 when
  * every tenant-table query is scoped or carries an `// isolation-ok:` reason.

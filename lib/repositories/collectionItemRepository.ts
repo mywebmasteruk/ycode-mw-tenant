@@ -693,17 +693,28 @@ export async function getItemsSortedByField(
 ): Promise<{ items: CollectionItemWithValues[], total: number }> {
   const knex = await getKnexClient();
 
+  // Knex connects as `postgres`, which has BYPASSRLS, so Postgres applies no
+  // tenant policy on this path — these filters are the only isolation control.
+  const tenantId = await resolveEffectiveTenantId();
+
   const safeSortOrder = sortOrder === 'desc' ? 'DESC' : 'ASC';
   const nullsPosition = safeSortOrder === 'ASC' ? 'NULLS LAST' : 'NULLS FIRST';
 
   let searchItemIds: string[] | null = null;
   if (search?.trim()) {
     const searchTerm = `%${search.trim()}%`;
-    const matchRows = await knex('collection_item_values')
+    let matchQuery = knex('collection_item_values')
       .distinct('item_id')
       .where('is_published', is_published)
       .whereNull('deleted_at')
       .andWhereILike('value', searchTerm);
+    // Without this the search scans every tenant's values. The collection_id
+    // predicate below discards foreign items, so this is not an active leak, but
+    // it makes the scan proportional to the whole table instead of one tenant.
+    if (tenantId) {
+      matchQuery = matchQuery.andWhere('tenant_id', tenantId);
+    }
+    const matchRows = await matchQuery;
 
     if (matchRows.length === 0) return { items: [], total: 0 };
     searchItemIds = matchRows.map((r: { item_id: string }) => r.item_id);
@@ -720,6 +731,9 @@ export async function getItemsSortedByField(
     .andWhere('ci.is_published', is_published)
     .whereNull('ci.deleted_at');
 
+  if (tenantId) {
+    baseQuery = baseQuery.andWhere('ci.tenant_id', tenantId);
+  }
   if (is_published) {
     baseQuery = baseQuery.andWhere('ci.is_publishable', true);
   }

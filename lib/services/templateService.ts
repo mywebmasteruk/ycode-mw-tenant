@@ -124,19 +124,32 @@ export async function getTemplate(id: string): Promise<TemplateDetails | null> {
  *
  * @param knex - Knex transaction or client
  */
-async function copyTemplateAssetsToUserStorage(knex: ReturnType<typeof getKnexClient> extends Promise<infer T> ? T : never): Promise<void> {
+async function copyTemplateAssetsToUserStorage(
+  knex: ReturnType<typeof getKnexClient> extends Promise<infer T> ? T : never,
+  tenantId?: string,
+): Promise<void> {
   const supabase = await getSupabaseAdmin();
   if (!supabase) {
     console.warn('[copyTemplateAssets] Supabase not configured, skipping asset copy');
     return;
   }
 
+  // Knex connects as `postgres` (BYPASSRLS), so Postgres enforces no tenant policy
+  // here. Unscoped, this selects every tenant's un-copied template assets and then
+  // REWRITES their storage_path/public_url to files uploaded into this tenant's
+  // storage — a cross-tenant write, not just a read. `tenantId` is absent in
+  // single-tenant self-hosted installs, where there is no tenant to scope to.
+
   // Find all template assets that need to be copied (have public_url but no storage_path)
-  const templateAssets = await knex('assets')
+  let assetQuery = knex('assets')
     .whereNotNull('public_url')
     .whereNull('storage_path')
     .where('source', 'like', 'template:%')
     .select('id', 'filename', 'public_url', 'mime_type');
+  if (tenantId) {
+    assetQuery = assetQuery.andWhere('tenant_id', tenantId);
+  }
+  const templateAssets = await assetQuery;
 
   if (templateAssets.length === 0) {
     return;
@@ -192,12 +205,14 @@ async function copyTemplateAssetsToUserStorage(knex: ReturnType<typeof getKnexCl
         .getPublicUrl(data.path);
 
       // Update asset record with new storage path and URL
-      await knex('assets')
-        .where('id', asset.id)
-        .update({
-          storage_path: data.path,
-          public_url: urlData.publicUrl,
-        });
+      let assetUpdate = knex('assets').where('id', asset.id);
+      if (tenantId) {
+        assetUpdate = assetUpdate.andWhere('tenant_id', tenantId);
+      }
+      await assetUpdate.update({
+        storage_path: data.path,
+        public_url: urlData.publicUrl,
+      });
     } catch (err) {
       console.warn(`[copyTemplateAssets] Error copying ${asset.filename}:`, err);
     }
@@ -206,10 +221,14 @@ async function copyTemplateAssetsToUserStorage(knex: ReturnType<typeof getKnexCl
   // Copy custom font files (fonts with url from template CDN but no storage_path)
   const fontsTableExists = await knex.schema.hasTable('fonts');
   if (fontsTableExists) {
-    const templateFonts = await knex('fonts')
+    let fontQuery = knex('fonts')
       .whereNotNull('url')
       .whereNull('storage_path')
       .select('id', 'name', 'kind', 'url');
+    if (tenantId) {
+      fontQuery = fontQuery.andWhere('tenant_id', tenantId);
+    }
+    const templateFonts = await fontQuery;
 
     for (const font of templateFonts) {
       try {
@@ -256,12 +275,14 @@ async function copyTemplateAssetsToUserStorage(knex: ReturnType<typeof getKnexCl
           .from(STORAGE_BUCKET)
           .getPublicUrl(data.path);
 
-        await knex('fonts')
-          .where('id', font.id)
-          .update({
-            storage_path: data.path,
-            url: urlData.publicUrl,
-          });
+        let fontUpdate = knex('fonts').where('id', font.id);
+        if (tenantId) {
+          fontUpdate = fontUpdate.andWhere('tenant_id', tenantId);
+        }
+        await fontUpdate.update({
+          storage_path: data.path,
+          url: urlData.publicUrl,
+        });
       } catch (err) {
         console.warn(`[copyTemplateAssets] Error copying font ${font.name}:`, err);
       }
@@ -429,7 +450,7 @@ export async function applyTemplate(
     // 3. Copy template assets to user's storage (outside transaction)
     // This happens after template data is committed, so partial asset failures
     // won't roll back the template
-    await copyTemplateAssetsToUserStorage(knex);
+    await copyTemplateAssetsToUserStorage(knex, tenantId);
 
     // 4. Run any pending migrations for this template
     // This transforms template data to match the current schema

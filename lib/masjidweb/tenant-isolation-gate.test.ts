@@ -187,11 +187,80 @@ describe('recognized scope mechanisms (beyond applyTenantEq)', () => {
     expect(analyzeTenantIsolation('translationRepository.ts', src)).toEqual([]);
   });
 
-  it("does NOT analyze the Knex knex('table') entrypoint (no .from()) — known limitation, covered file-level by the autopilot guard", () => {
-    // A bare, totally-unscoped Knex query yields 0 findings because the analyzer
-    // only sees `<expr>.from('<table>')`, not `knex('<table>')`. Documents the gap.
+  it("DOES analyze the Knex knex('table') entrypoint (previously a known gap)", () => {
+    // This used to assert 0 findings, documenting the blind spot as accepted and
+    // deferring to the file-level autopilot guard. That guard is a substring check
+    // and passed upstream 1.30.3's unscoped cross-tenant Knex read, so the gap is
+    // now closed here at the query site.
     const bareKnex = `async function f(){ const knex=()=>{}; return await knex('translations').select('*'); }`;
-    expect(analyzeTenantIsolation('translationRepository.ts', bareKnex)).toEqual([]);
+    const findings = analyzeTenantIsolation('translationRepository.ts', bareKnex);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ table: 'translations', op: 'read' });
+    expect(findings[0].reason).toMatch(/Knex/);
+  });
+
+  it('flags the unscoped Knex read that slipped through the 1.30.3 merge', () => {
+    const src = `export async function getValuesByItemIds(itemIds) {
+      const knex = await getKnexClient();
+      let query = knex('collection_item_values')
+        .select('item_id', 'value')
+        .whereIn('item_id', itemIds);
+      return await query;
+    }`;
+    const findings = analyzeTenantIsolation('lib/repositories/collectionItemValueRepository.ts', src);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ table: 'collection_item_values', op: 'read' });
+  });
+
+  it('accepts a Knex read scoped with .andWhere on tenant_id', () => {
+    const src = `export async function f(tenantId) {
+      const knex = await getKnexClient();
+      return await knex('pages').select('*').andWhere('tenant_id', tenantId);
+    }`;
+    expect(analyzeTenantIsolation('lib/repositories/pageRepository.ts', src)).toEqual([]);
+  });
+
+  it('accepts a Knex read scoped via addTenantFilter (builder is arg 1)', () => {
+    const src = `export async function f(knex) {
+      let query = knex('settings').where('key', 'site_name');
+      query = await addTenantFilter(knex, query, 'settings');
+      return await query.first('value');
+    }`;
+    expect(analyzeTenantIsolation('lib/services/projectService.ts', src)).toEqual([]);
+  });
+
+  it('accepts a Knex insert whose payload is built in the outer function', () => {
+    // The payload is assembled outside the transaction callback, so write evidence
+    // must be gathered at the named-function level or this false-positives.
+    const src = `export async function insertValuesDirectPg(values, tenantId) {
+      const knex = await getKnexClient();
+      const rows = values.map(v => ({ item_id: v.item_id, tenant_id: tenantId }));
+      await knex.transaction(async (trx) => {
+        await trx('collection_item_values').insert(rows);
+      });
+    }`;
+    expect(analyzeTenantIsolation('lib/repositories/collectionItemValueRepository.ts', src)).toEqual([]);
+  });
+
+  it('does not let a comment mentioning tenant_id vouch for a Knex insert', () => {
+    const src = `export async function insertValuesDirectPg(values) {
+      const knex = await getKnexClient();
+      // Sets tenant context so DB triggers can populate tenant_id.
+      const rows = values.map(v => ({ item_id: v.item_id }));
+      await knex.transaction(async (trx) => {
+        await trx('collection_item_values').insert(rows);
+      });
+    }`;
+    const findings = analyzeTenantIsolation('lib/repositories/collectionItemValueRepository.ts', src);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ op: 'write' });
+  });
+
+  it('ignores migrations, which are legitimately cross-tenant', () => {
+    const src = `export async function up(knex) {
+      await knex('pages').update({ slug: '' });
+    }`;
+    expect(analyzeTenantIsolation('database/migrations/20250101000003_x.ts', src)).toEqual([]);
   });
 
   it('treats scopeCollectionItemTimestampUpdate(query, itemId, tid) as scoped', () => {
