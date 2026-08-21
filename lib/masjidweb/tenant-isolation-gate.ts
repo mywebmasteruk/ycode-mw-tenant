@@ -17,12 +17,25 @@
  *
  * Pure (string in → findings out) so it is unit-testable without a live Supabase.
  *
- * SCOPE LIMITATION: this analyzer only sees supabase-js `<expr>.from('<table>')`
- * chains. It does NOT parse the Knex direct-PG path (`knex('<table>')…`), which
- * has no `.from()` entrypoint — those queries are covered file-level by
- * `autopilot-tenant-invariants.ts` ("knex tenant filter present"). The
- * `.where('tenant_id')` recognition below applies only if a Knex chain is ever
- * routed through here; it is not a claim that Knex queries are gate-analyzed.
+ * Two query dialects are analyzed, because tenant data reaches Postgres by two
+ * routes and NEITHER is covered by database-side isolation today:
+ *
+ *  1. supabase-js / PostgREST — `<expr>.from('<table>')`, via the service-role key
+ *     (`rolbypassrls = true`).
+ *  2. Knex direct-PG — `knex('<table>')` / `trx('<table>')`, as `postgres`, which
+ *     also has `rolbypassrls = true`. Not even FORCE ROW LEVEL SECURITY constrains
+ *     a BYPASSRLS role, so app-layer scoping is the only control on this path.
+ *
+ * Knex used to be unanalyzed here, deferred to a file-level substring check in
+ * `autopilot-tenant-invariants.ts` ("knex tenant filter present"). That check is
+ * satisfied by the string `getTenantIdFromHeaders` appearing ANYWHERE in the file,
+ * so it passed upstream 1.30.3's `getValuesByItemIds()` — which read
+ * `collection_item_values` over Knex with no tenant filter — because the file
+ * happened to contain a scoped Knex query elsewhere. Verified 2026-08-21: the only
+ * reason that merge was caught at all was an incidental `getSupabaseAdmin(tenantId)`
+ * signature rule; normalising that one call made the file pass every check with the
+ * unscoped cross-tenant read still in place. Hence per-query-site AST analysis for
+ * Knex too.
  */
 import ts from 'typescript';
 
@@ -110,29 +123,45 @@ const ESCAPE_HATCH = /isolation-ok:/;
 
 /** Method names that make a `.from(table)` chain a write rather than a read. */
 const WRITE_METHODS = new Set(['insert', 'upsert']);
-/** Methods that still require row-level tenant filtering (treated as reads here). */
-const FILTERED_WRITE_METHODS = new Set(['update', 'delete']);
+/** Methods that still require row-level tenant filtering (treated as reads here).
+ *  `del` is Knex's alias for `delete`. */
+const FILTERED_WRITE_METHODS = new Set(['update', 'delete', 'del']);
+
+/**
+ * Identifiers that denote a Knex query builder, so `<id>('table')` is a direct-PG
+ * query. Covers `const knex = await getKnexClient()` and the transaction callback
+ * parameter in `knex.transaction(async (trx) => trx('table')…)`.
+ */
+const KNEX_BINDINGS = new Set(['knex', 'trx', 'tx', 'db']);
+
+/** Which route a query takes to Postgres. Recorded so findings name the real risk. */
+type Dialect = 'postgrest' | 'knex';
 
 interface FromCall {
   node: ts.CallExpression;
   table: string;
   line: number;
+  dialect: Dialect;
 }
 
-/** Collect every `<expr>.from('literal')` call in the file. */
+/**
+ * Collect every tenant-table query entrypoint: supabase-js `<expr>.from('literal')`
+ * and Knex `knex('literal')` / `trx('literal')`.
+ */
 function collectFromCalls(sf: ts.SourceFile): FromCall[] {
   const out: FromCall[] = [];
   const visit = (node: ts.Node): void => {
-    if (
-      ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      node.expression.name.text === 'from' &&
-      node.arguments.length === 1 &&
-      ts.isStringLiteralLike(node.arguments[0])
-    ) {
+    if (ts.isCallExpression(node) && node.arguments.length >= 1 && ts.isStringLiteralLike(node.arguments[0])) {
       const table = node.arguments[0].text;
       const line = sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1;
-      out.push({ node, table, line });
+      const isPostgrest =
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === 'from' &&
+        node.arguments.length === 1;
+      // Knex is a bare identifier call, not a property access.
+      const isKnex = ts.isIdentifier(node.expression) && KNEX_BINDINGS.has(node.expression.text);
+      if (isPostgrest) out.push({ node, table, line, dialect: 'postgrest' });
+      else if (isKnex) out.push({ node, table, line, dialect: 'knex' });
     }
     ts.forEachChild(node, visit);
   };
@@ -157,6 +186,32 @@ function enclosingFunctionName(node: ts.Node, sf: ts.SourceFile): string {
     cur = cur.parent;
   }
   return '<module>';
+}
+
+/**
+ * Nearest enclosing NAMED function (declaration, method, or arrow/function bound to
+ * a variable), falling back to the source file.
+ *
+ * Write evidence must be gathered at this granularity, not at `enclosingScope()`.
+ * Knex writes run inside a transaction callback — `knex.transaction(async (trx) =>
+ * trx('t').insert(rows))` — while `rows` is built in the OUTER function. Using the
+ * immediate arrow scope there reports a false positive on correctly-scoped code.
+ */
+function enclosingNamedFunctionScope(node: ts.Node): ts.Node {
+  let cur: ts.Node | undefined = node.parent;
+  while (cur) {
+    if (ts.isFunctionDeclaration(cur) || ts.isMethodDeclaration(cur) || ts.isConstructorDeclaration(cur)) return cur;
+    if (
+      (ts.isArrowFunction(cur) || ts.isFunctionExpression(cur)) &&
+      cur.parent &&
+      ts.isVariableDeclaration(cur.parent)
+    ) {
+      return cur;
+    }
+    if (ts.isSourceFile(cur)) return cur;
+    cur = cur.parent;
+  }
+  return node.getSourceFile();
 }
 
 /** Nearest enclosing function-like node (or the source file if top-level). */
@@ -209,6 +264,13 @@ function scopeText(scope: ts.Node, sf: ts.SourceFile): string {
 
 const ID_RE = /[A-Za-z_$][\w$]*/;
 
+/**
+ * Filter methods that NARROW a query to a tenant. supabase-js contributes `eq`;
+ * Knex contributes `where` / `andWhere` / `whereIn`. `orWhere` is deliberately
+ * excluded — it WIDENS the result set, so `.orWhere('tenant_id', …)` is not a scope.
+ */
+const SCOPE_METHOD_ALT = '(?:eq|where|andWhere|whereIn)';
+
 /** Top of the fluent query chain that this `.from(...)` call belongs to. */
 function chainTop(fromCall: ts.CallExpression): ts.Node {
   let cur: ts.Node = fromCall;
@@ -256,18 +318,29 @@ const SCOPE_HELPERS = new Set([
 ]);
 const SCOPE_HELPER_ALT = '(?:applyTenantEq|applyTenantOrLegacyScope|scopeCollectionItemTimestampUpdate)';
 
-/** Is this chain the FIRST argument to a recognized tenant-scope helper? (inline scoping)
- *  Must be arg[0] — the helpers only scope their first argument, so a chain passed
- *  in any other position (e.g. `applyTenantEq(other, <chain>)`) is NOT scoped. */
+/**
+ * Knex-side equivalent: `addTenantFilter(knex, query, 'table')` (lib/knex-helpers.ts)
+ * appends the tenant predicate to a Knex builder. Its query argument is at index 1,
+ * NOT 0 — the builder is the second parameter, after the knex instance.
+ */
+const KNEX_SCOPE_HELPERS = new Set(['addTenantFilter']);
+const KNEX_SCOPE_HELPER_ALT = '(?:addTenantFilter)';
+
+/** Index of the query argument for a recognized scope helper, or -1 if not one. */
+function scopeHelperArgIndex(name: string): number {
+  if (SCOPE_HELPERS.has(name)) return 0;
+  if (KNEX_SCOPE_HELPERS.has(name)) return 1;
+  return -1;
+}
+
+/** Is this chain the query argument of a recognized tenant-scope helper? (inline scoping)
+ *  Position matters — a chain passed anywhere else (e.g. `applyTenantEq(other, <chain>)`)
+ *  is NOT scoped, so the expected index per helper is checked exactly. */
 function isWrappedInScopeHelper(top: ts.Node): boolean {
   const parent = top.parent;
-  return Boolean(
-    parent &&
-      ts.isCallExpression(parent) &&
-      ts.isIdentifier(parent.expression) &&
-      SCOPE_HELPERS.has(parent.expression.text) &&
-      parent.arguments[0] === top,
-  );
+  if (!parent || !ts.isCallExpression(parent) || !ts.isIdentifier(parent.expression)) return false;
+  const idx = scopeHelperArgIndex(parent.expression.text);
+  return idx >= 0 && parent.arguments[idx] === top;
 }
 
 /** Strip line/block comments so commented-out scope calls can't satisfy the
@@ -288,8 +361,8 @@ function stripComments(s: string): string {
  */
 function readIsScoped(top: ts.Node, sf: ts.SourceFile, scope: ts.Node): boolean {
   const chainText = top.getText(sf);
-  // Inline supabase-js `.eq('tenant_id', …)` or Knex direct-PG `.where('tenant_id', …)`.
-  if (/\.(?:eq|where)\(\s*['"]tenant_id['"]/.test(chainText)) return true;
+  // Inline supabase-js `.eq('tenant_id', …)` or Knex `.where/.andWhere('tenant_id', …)`.
+  if (new RegExp(`\\.${SCOPE_METHOD_ALT}\\(\\s*['"]tenant_id['"]`).test(chainText)) return true;
   if (isWrappedInScopeHelper(top)) return true;
 
   const v = assignedVar(top);
@@ -299,9 +372,13 @@ function readIsScoped(top: ts.Node, sf: ts.SourceFile, scope: ts.Node): boolean 
   const text = stripComments(scopeText(scope, sf));
   // Helper name must not be a suffix of a longer identifier (e.g. `xapplyTenantEq`).
   const passedToHelper = new RegExp(`(?<![\\w$])${SCOPE_HELPER_ALT}\\(\\s*${id}\\b`).test(text);
-  const reassignedEq = new RegExp(`\\b${id}\\s*=\\s*${id}\\.(?:eq|where)\\(\\s*['"]tenant_id['"]`).test(text);
-  const directEq = new RegExp(`\\b${id}\\.(?:eq|where)\\(\\s*['"]tenant_id['"]`).test(text);
-  return passedToHelper || reassignedEq || directEq;
+  // Knex helper takes the builder as its SECOND argument: addTenantFilter(knex, q, 'table').
+  const passedToKnexHelper = new RegExp(
+    `(?<![\\w$])${KNEX_SCOPE_HELPER_ALT}\\(\\s*[^,()]+,\\s*${id}\\b`,
+  ).test(text);
+  const reassignedEq = new RegExp(`\\b${id}\\s*=\\s*${id}\\.${SCOPE_METHOD_ALT}\\(\\s*['"]tenant_id['"]`).test(text);
+  const directEq = new RegExp(`\\b${id}\\.${SCOPE_METHOD_ALT}\\(\\s*['"]tenant_id['"]`).test(text);
+  return passedToHelper || passedToKnexHelper || reassignedEq || directEq;
 }
 
 /**
@@ -310,10 +387,14 @@ function readIsScoped(top: ts.Node, sf: ts.SourceFile, scope: ts.Node): boolean 
  * property/assignment is the right granularity here.
  */
 function hasWriteScopeEvidence(text: string): boolean {
+  // Comments are stripped first: prose that merely mentions `tenant_id:` must not
+  // vouch for a write (upstream's Knex insert carries exactly such a comment while
+  // omitting the column).
+  const src = stripComments(text);
   return (
-    /\btenant_id\b\s*:/.test(text) ||
-    /\btenant_id\b\s*=/.test(text) ||
-    /\bapplyTenantId\s*\(/.test(text) // payload wrapped in the applyTenantId() helper
+    /\btenant_id\b\s*:/.test(src) ||
+    /\btenant_id\b\s*=/.test(src) ||
+    /\bapplyTenantId\s*\(/.test(src) // payload wrapped in the applyTenantId() helper
   );
 }
 
@@ -332,6 +413,11 @@ function escapeHatchLines(sf: ts.SourceFile): Set<number> {
  * Returns an empty array when the file proves isolation (or touches no tenant tables).
  */
 export function analyzeTenantIsolation(filePath: string, source: string): IsolationFinding[] {
+  // Migrations are inherently cross-tenant: they run once, as the schema owner,
+  // to reshape or backfill EVERY tenant's rows. Demanding a tenant filter there
+  // would be wrong, and blanket `isolation-ok` hatches would only add noise.
+  if (/(^|\/)database\/migrations\//.test(filePath)) return [];
+
   const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true);
   const froms = collectFromCalls(sf);
   if (froms.length === 0) return [];
@@ -339,9 +425,9 @@ export function analyzeTenantIsolation(filePath: string, source: string): Isolat
   const hatches = escapeHatchLines(sf);
   const findings: IsolationFinding[] = [];
 
-  for (const { node, table, line } of froms) {
+  for (const { node, table, line, dialect } of froms) {
     if (!TENANT_SCOPED_TABLES.has(table)) continue;
-    // Escape hatch on the .from line or the line above.
+    // Escape hatch on the query line or the line above.
     if (hatches.has(line) || hatches.has(line - 1)) continue;
 
     const op = classifyOp(node);
@@ -349,9 +435,10 @@ export function analyzeTenantIsolation(filePath: string, source: string): Isolat
 
     const ok =
       op === 'write'
-        ? hasWriteScopeEvidence(scopeText(scope, sf))
+        ? hasWriteScopeEvidence(scopeText(enclosingNamedFunctionScope(node), sf))
         : readIsScoped(chainTop(node), sf, scope);
     if (!ok) {
+      const via = dialect === 'knex' ? ' via direct-PG Knex (RLS does NOT apply)' : '';
       findings.push({
         file: filePath,
         line,
@@ -360,8 +447,8 @@ export function analyzeTenantIsolation(filePath: string, source: string): Isolat
         fn: enclosingFunctionName(node, sf),
         reason:
           op === 'write'
-            ? `insert/upsert into '${table}' has no tenant_id in its payload`
-            : `query on '${table}' is not scoped with applyTenantEq() or .eq('tenant_id', ...)`,
+            ? `insert/upsert into '${table}'${via} has no tenant_id in its payload`
+            : `query on '${table}'${via} is not scoped with applyTenantEq() or .eq/.where('tenant_id', ...)`,
       });
     }
   }
