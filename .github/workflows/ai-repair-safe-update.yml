@@ -91,6 +91,13 @@ jobs:
           git fetch origin "${{ steps.pr.outputs.head_ref }}"
           git checkout "${{ steps.pr.outputs.head_ref }}"
 
+      - name: Mark repair in progress
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create mw-repair-in-progress --repo "$GITHUB_REPOSITORY" --color "FBCA04" --description "A Fix run is writing this PR — do not start another writer" || true
+          gh pr edit "${{ inputs.pr_number }}" --repo "$GITHUB_REPOSITORY" --add-label mw-repair-in-progress
+
       - name: Copy AI repair tooling from main
         run: |
           git fetch origin main
@@ -103,6 +110,7 @@ jobs:
             scripts/core-update/heal-typecheck-tenant-id.ts \
             scripts/core-update/heal-typecheck-tenant-id.test.ts \
             scripts/core-update/push-repair-branch.sh \
+            scripts/core-update/sync-package-lock.sh \
             scripts/core-update/run-tenant-isolation-gate.ts \
             scripts/core-update/absolute-isolation-audit.ts \
             scripts/core-update/create-copilot-escalation.ts \
@@ -281,29 +289,12 @@ jobs:
           COPILOT_ESCALATION_ASSIGN_COPILOT: ${{ inputs.copilot_escalation_mode == 'assign' }}
         run: npx --yes tsx scripts/core-update/create-copilot-escalation.ts
 
-      # The AI/codemod repair only resolves .ts/.tsx; package-lock.json lands
-      # conflicted on nearly every update (upstream + fork both bump deps) and
-      # would otherwise stall the wizard with leftover conflict markers. Resolve
-      # it deterministically: take main's lockfile, then reconcile it to the
-      # merged package.json. No LLM, no cost. Runs regardless of repair outcome
-      # so even a blocked run leaves a clean lockfile for the next resume.
-      - name: Resolve package-lock.json conflict (deterministic)
-        run: |
-          if grep -qE '^(<<<<<<<|=======|>>>>>>>) ' package-lock.json 2>/dev/null \
-             || grep -qxE '(<<<<<<<|=======|>>>>>>>)' package-lock.json 2>/dev/null; then
-            echo "package-lock.json is conflicted — resolving deterministically."
-            git show origin/main:package-lock.json > package-lock.json
-            npm install --package-lock-only --ignore-scripts --no-audit --no-fund --legacy-peer-deps
-            if grep -qE '^(<<<<<<<|=======|>>>>>>>)' package-lock.json; then
-              echo "Lockfile still has markers after regen — leaving for manual review."
-            else
-              git add package-lock.json
-              git commit -m "fix(deps): resolve package-lock.json for safe update [automated]" || true
-              echo "Resolved + committed package-lock.json (push is deferred to the final step)."
-            fi
-          else
-            echo "package-lock.json not conflicted; nothing to do."
-          fi
+      # The AI/codemod repair only resolves .ts/.tsx. package-lock.json lands
+      # conflicted on nearly every update, and even a "resolved" lockfile can
+      # stay out of sync with package.json (PR #46 `npm ci` failure). Always
+      # regenerate it from package.json. No LLM, no cost.
+      - name: Sync package-lock.json to package.json
+        run: bash scripts/core-update/sync-package-lock.sh
 
       # Cross-run resume: the Premium AI step resolves a different subset of the
       # hard files each run (LLM nondeterminism). Without persisting partial
@@ -444,7 +435,23 @@ jobs:
             git commit -m "fix(ai): resolve safe update conflicts [automated]"
           fi
           BEFORE="$(git rev-parse HEAD)"
-          bash scripts/core-update/push-repair-branch.sh
+          PUSH_LOG="$(mktemp)"
+          set +e
+          bash scripts/core-update/push-repair-branch.sh | tee "$PUSH_LOG"
+          PUSH_RC=${PIPESTATUS[0]}
+          set -e
+          if grep -q 'used_remote_tip=true' "$PUSH_LOG"; then
+            echo "used_remote_tip=true" >> "$GITHUB_OUTPUT"
+            bash scripts/core-update/sync-package-lock.sh
+            bash scripts/core-update/push-repair-branch.sh
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Another writer already resolved conflicts. Lockfile synced. PR CI will gate approval."
+            exit 0
+          fi
+          echo "used_remote_tip=false" >> "$GITHUB_OUTPUT"
+          if [ "$PUSH_RC" -ne 0 ]; then
+            exit "$PUSH_RC"
+          fi
           AFTER="$(git rev-parse HEAD)"
           REMOTE="$(git rev-parse "origin/$(git rev-parse --abbrev-ref HEAD)")"
           if [ "$AFTER" != "$REMOTE" ]; then
@@ -459,7 +466,7 @@ jobs:
           fi
 
       - name: Re-run update safety check
-        if: steps.push.outputs.changed == 'true'
+        if: steps.push.outputs.changed == 'true' && steps.push.outputs.used_remote_tip != 'true'
         continue-on-error: true
         env:
           UPDATE_BASE_REF: origin/main
@@ -469,6 +476,7 @@ jobs:
         if: >-
           steps.safety_tests.outcome == 'success'
           && steps.build.outcome == 'success'
+          && steps.push.outputs.used_remote_tip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -477,11 +485,8 @@ jobs:
           # The repair resolved all conflicts and the branch passed the isolation
           # gate + tenant tests + production build above, so the autopilot
           # "Status: blocked" in the PR body is now stale. The admin dashboard
-          # derives its status from that line, so rewrite it to "ready" —
-          # otherwise the dashboard keeps showing "blocked / Fix with AI" and the
-          # Approve button never appears. (ci-build-check carries the same fix, but
-          # it is action_required on bot-authored PRs and may not run; this step
-          # always runs after a verified repair.)
+          # used to treat that line as "still conflicted" even after GitHub said
+          # the PR was mergeable (PR #46). Rewrite it to "ready".
           BODY=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body --jq '.body')
           if printf '%s' "$BODY" | grep -qE '^Status:[[:space:]]*blocked'; then
             printf '%s' "$BODY" \
@@ -491,6 +496,40 @@ jobs:
             gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/repair_pr_body.md
             echo "Rewrote PR #$PR_NUMBER body status: blocked -> ready."
           fi
+
+      - name: Clear stale blocked status when origin has no conflicts
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+        run: |
+          if [ -z "$HEAD_REF" ]; then
+            echo "No PR head ref; skip status rewrite."
+            exit 0
+          fi
+          git fetch origin "$HEAD_REF"
+          if git grep -l '^<<<<<<<' "origin/${HEAD_REF}" -- . ':(exclude)node_modules' >/dev/null 2>&1; then
+            echo "Origin still has conflict markers; leaving Status: blocked."
+            exit 0
+          fi
+          PR_NUMBER="${{ inputs.pr_number }}"
+          BODY=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body --jq '.body')
+          if ! printf '%s' "$BODY" | grep -qE '^Status:[[:space:]]*blocked'; then
+            echo "PR body is not Status: blocked."
+            exit 0
+          fi
+          printf '%s' "$BODY" \
+            | sed -E 's/^Status:[[:space:]]*blocked.*/Status: review_required (conflicts resolved on the PR branch; waiting for CI)/' \
+            | sed -E 's/^Legacy status:[[:space:]]*blocked.*/Legacy status: high/' \
+            | grep -vE '^-?[[:space:]]*Autopilot blocked this update' > /tmp/waiting_pr_body.md
+          gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/waiting_pr_body.md
+          echo "Rewrote PR #$PR_NUMBER body status: blocked -> review_required (origin is clean)."
+
+      - name: Clear repair-in-progress label
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr edit "${{ inputs.pr_number }}" --repo "$GITHUB_REPOSITORY" --remove-label mw-repair-in-progress || true
 
       - name: Comment on pull request
         if: always()
@@ -531,7 +570,7 @@ jobs:
               body += 'Do **not** merge until a developer resolves the blocked files and the normal PR checks finish green.\n';
             } else if (repairOutcome === 'failure') {
               body += 'AI repair **failed**. Check the workflow logs for OpenRouter or conflict resolution errors.\n';
-              body += 'If mechanical repair could not clear conflicts, the **Cursor core-update escalation** automation may run when PR CI fails (see `docs/CURSOR_CORE_UPDATE_ESCALATION.md`).\n';
+              body += 'Do **not** start a second writer (Cursor/Copilot) while a Fix run is in progress. If this run already finished, wait for PR CI or ask a developer.\n';
             } else if (!pushChanged) {
               body += 'AI repair found **no committable changes** (no conflict markers or already clean).\n';
             } else if (safetyOutcome === 'failure') {

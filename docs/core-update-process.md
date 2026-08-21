@@ -40,9 +40,9 @@ High-risk areas include:
 1. Open Admin Maintenance.
 2. Click the primary safe-update button.
 3. The system creates a separate update branch and pull request.
-4. If GitHub marks the PR as draft, blocked, failed, or needing developer review, click **Run Premium AI Update**.
-5. Premium AI uses OpenRouter's latest Claude frontier model by default, applies safe patch diffs to the PR branch only, and runs tenant safety checks, type-check, build, and PR CI.
-6. If the PR checks pass, preview the deploy preview and approve when ready.
+4. If the dashboard asks you to Fix, click **Fix with Premium AI once** and wait. Do not click it again while it is running, and do not start a second repair from GitHub or Cursor.
+5. Premium AI repairs the pull request, then tenant safety checks, type-check, build, and PR CI run.
+6. When the dashboard says preview/approve, check the deploy preview and approve. Production changes only after that merge.
 7. Production deploys only after the PR is merged into `main`.
 
 This is intentionally not one-click production approval. The safe button can prepare, repair, and test the PR; merging is the final approval step.

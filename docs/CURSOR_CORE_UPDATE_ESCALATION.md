@@ -10,6 +10,14 @@ Proceed **only if all** are true:
 2. The pull request head branch starts with `safe-ycode-update/`.
 3. CI or `AI repair safe update PR` workflow **failed** (do not act on green runs).
 
+**Stop immediately** (do not push) if any of these are true:
+
+- The PR has the label `mw-repair-in-progress`.
+- GitHub Actions workflow `ai-repair-safe-update.yml` is `queued` or `in_progress` for this PR.
+- A Premium AI / Fix run is already writing the same branch.
+
+Two writers on the same PR waste paid repair and lose the verified tree (PR #44, PR #46).
+
 If mechanical repair already fixed everything and CI is green, **stop** — no changes needed.
 
 ## Goal
@@ -26,7 +34,13 @@ Resolve **remaining** merge conflicts on the PR branch, preserve MasjidWeb tenan
 
 1. Check out the **PR head branch** (not `main`).
 2. List conflict markers: `git grep -l '^<<<<<<<' -- . ':(exclude)node_modules'` or `git diff --name-only --diff-filter=U`.
-3. **Mechanical tier-2 first** (no LLM guesswork for known repos):
+3. If **no conflict markers remain**, do **not** re-resolve source files. Only sync the lockfile:
+   ```bash
+   bash scripts/core-update/sync-package-lock.sh
+   git push
+   ```
+   Then stop.
+4. **Mechanical tier-2 first** (no LLM guesswork for known repos):
    ```bash
    git fetch origin main
    git remote add upstream https://github.com/ycode/ycode.git 2>/dev/null || true
@@ -34,8 +48,12 @@ Resolve **remaining** merge conflicts on the PR branch, preserve MasjidWeb tenan
    npx --yes tsx scripts/ai-repair-safe-update.ts
    ```
    Set `AI_REPAIR_MECHANICAL_ONLY=true` and `AI_REPAIR_SKIP_TIER2_LLM=true` if invoking the script directly.
-4. For remaining conflicts in routes/services/auth/proxy: merge manually or run full repair with OpenRouter only if `OPENROUTER_API_KEY` is available in the environment (otherwise fix by hand using seam doc).
-5. **Never** remove `tenant_id` filters, `applyTenantEq`, `resolveEffectiveTenantId`, cookie-domain helpers, or `/ycode/accept-invite` standalone behavior to “make it compile.”
+5. For remaining conflicts in routes/services/auth/proxy: merge manually or run full repair with OpenRouter only if `OPENROUTER_API_KEY` is available in the environment (otherwise fix by hand using seam doc).
+6. **Always** regenerate `package-lock.json` after source files are resolved:
+   ```bash
+   bash scripts/core-update/sync-package-lock.sh
+   ```
+7. **Never** remove `tenant_id` filters, `applyTenantEq`, `resolveEffectiveTenantId`, cookie-domain helpers, or `/ycode/accept-invite` standalone behavior to “make it compile.”
 
 ## Verification (must pass before push)
 
@@ -63,5 +81,6 @@ Also confirm **zero** conflict markers remain.
 - `check-repair-completeness.sh` fails (truncated file / missing exports)
 - Build or type-check still fails after one focused retry
 - Touching magic-link / invite / cookie domain without reading fragile-flow sources listed in workspace rules
+- Another Fix / Premium AI run is in progress on this PR
 
 In those cases: push nothing, comment on the PR with the blocker, and stop.
