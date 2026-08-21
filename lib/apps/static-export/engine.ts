@@ -13,8 +13,10 @@ import {
   buildCustomFontsCss,
   buildFontClassesCss,
   fetchGoogleFontsCss,
+  getCustomFontPreloads,
   getGoogleFontLinks,
 } from '@/lib/font-utils'
+import type { FontPreload } from '@/lib/font-utils'
 import { generateColorVariablesCss } from '@/lib/repositories/colorVariableRepository'
 import { getAssetById } from '@/lib/repositories/assetRepository'
 import { getPublishedFonts } from '@/lib/repositories/fontRepository'
@@ -186,6 +188,7 @@ export async function exportSite(presetJobId?: string): Promise<ExportJob> {
 
     // ---- Font CSS (Google inlined @font-face + custom @font-face + class rules)
     let fontsCss = ''
+    let fontPreloads: FontPreload[] = []
     if (fonts.length > 0) {
       const googleLinks = getGoogleFontLinks(fonts)
       const [googleCss] = await Promise.all([
@@ -196,6 +199,7 @@ export async function exportSite(presetJobId?: string): Promise<ExportJob> {
       fontsCss = [googleCss, buildCustomFontsCss(fonts), buildFontClassesCss(fonts)]
         .filter(Boolean)
         .join('\n')
+      fontPreloads = getCustomFontPreloads(fonts)
     }
 
     // ---- Render every page (default locale + per non-default locale) ----
@@ -217,6 +221,7 @@ export async function exportSite(presetJobId?: string): Promise<ExportJob> {
             publishedCss: publishedCss ?? null,
             colorVariablesCss: colorVariablesCss ?? null,
             fontsCss: fontsCss || null,
+            fontPreloads,
             includeSwiper: resolved.hasSlider,
             interactions: resolved.interactions,
             globalCustomCodeHead: globalCustomCodeHead ?? null,

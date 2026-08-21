@@ -68,6 +68,17 @@ function getElement(layerId: string): HTMLElement | null {
 }
 
 /**
+ * Whether a mutated node lives inside a Swiper slider. Swiper reshuffles
+ * existing slide nodes on transition/loop (childList mutations), which must
+ * not trigger an animation rebind — real new content arrives via the
+ * ITEMS_INJECTED_EVENT path instead.
+ */
+function isInsideSlider(node: Node | null): boolean {
+  const el = node instanceof Element ? node : node?.parentElement ?? null;
+  return !!el?.closest('[data-slider-id], .swiper-wrapper');
+}
+
+/**
  * Pre-paint each tween's `from` state so the element rests in its intended
  * initial appearance before the trigger fires. CSS via generateInitialAnimationCSS()
  * only covers intro triggers (load, scroll-into-view); for hover/click we apply
@@ -712,6 +723,10 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
     const remountObserver = new MutationObserver(mutations => {
       for (const m of mutations) {
         if (m.type !== 'childList') continue;
+        // Skip Swiper's internal slide reshuffling (loop/transition) so a
+        // slide change doesn't rebind animations and reset user-toggled
+        // click/hover states (e.g. an open nav menu) elsewhere on the page.
+        if (isInsideSlider(m.target)) continue;
         for (const n of m.addedNodes) {
           if (containsTrackedId(n)) {
             scheduleRebind();

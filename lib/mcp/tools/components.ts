@@ -29,6 +29,7 @@ import {
   replaceLayerWithComponentInstance,
 } from '@/lib/layer-utils';
 import { EMPTY_OVERRIDES, createTextComponentVariableValue } from '@/lib/variable-utils';
+import { stringToTiptapContent } from '@/lib/text-format-utils';
 import { collectFontFamiliesFromDesign, ensureFontsInstalled, fontWarnings } from '@/lib/mcp/font-install';
 import { getCachedLayers as getPageLayers, saveCachedLayers } from '@/lib/mcp/page-layers';
 import { getAllPages } from '@/lib/repositories/pageRepository';
@@ -60,13 +61,30 @@ const variableUpdateSchema = z.object({
   default_value: z.unknown().optional(),
 });
 
+/**
+ * Coerce a `default_value` into the object shape the renderer expects.
+ *
+ * `default_value` is intentionally untyped in the tool schema (its shape
+ * depends on the variable type), so callers routinely pass a bare string for
+ * text variables. Storing that verbatim breaks rendering for every page using
+ * the component, so wrap it in the matching variable value here.
+ */
+function normalizeDefaultValue(value: unknown, type: z.infer<typeof variableTypeEnum>): ComponentVariableValue {
+  if (typeof value === 'string') {
+    return type === 'rich_text'
+      ? createTextComponentVariableValue(stringToTiptapContent(value))
+      : { type: 'dynamic_text', data: { content: value } };
+  }
+  return value as ComponentVariableValue;
+}
+
 function normalizeVariables(input: Array<z.infer<typeof variableUpdateSchema>>): ComponentVariable[] {
   return input.map((v) => ({
     id: v.id || generateId(),
     name: v.name,
     type: v.type,
     ...(v.placeholder !== undefined && { placeholder: v.placeholder }),
-    ...(v.default_value !== undefined && { default_value: v.default_value as ComponentVariableValue }),
+    ...(v.default_value !== undefined && { default_value: normalizeDefaultValue(v.default_value, v.type) }),
   }));
 }
 

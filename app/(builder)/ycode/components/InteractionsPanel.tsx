@@ -903,21 +903,26 @@ export default function InteractionsPanel({
     (interactionId: string) => {
       // Clear inline preview styles (e.g. backgroundColor) that were applied via
       // gsap.set on every tween in this interaction, otherwise they persist on
-      // the canvas after the trigger is removed.
-      const removedInteraction = interactions.find((i) => i.id === interactionId);
-      if (removedInteraction) {
-        const keysByLayer = new Map<string, Set<string>>();
-        (removedInteraction.tweens || []).forEach((tween) => {
-          const set = keysByLayer.get(tween.layer_id) || new Set<string>();
-          Object.keys(tween.from || {}).forEach((k) => set.add(k));
-          Object.keys(tween.to || {}).forEach((k) => set.add(k));
-          keysByLayer.set(tween.layer_id, set);
-        });
-        keysByLayer.forEach((keys, layerId) => {
-          clearLiveStyleForKeys(layerId, Array.from(keys));
-        });
+      // the canvas after the trigger is removed. Wrapped in try/catch: preview
+      // cleanup is cosmetic and must never block the actual removal below.
+      try {
+        const removedInteraction = interactions.find((i) => i.id === interactionId);
+        if (removedInteraction) {
+          const keysByLayer = new Map<string, Set<string>>();
+          (removedInteraction.tweens || []).forEach((tween) => {
+            const set = keysByLayer.get(tween.layer_id) || new Set<string>();
+            Object.keys(tween.from || {}).forEach((k) => set.add(k));
+            Object.keys(tween.to || {}).forEach((k) => set.add(k));
+            keysByLayer.set(tween.layer_id, set);
+          });
+          keysByLayer.forEach((keys, layerId) => {
+            clearLiveStyleForKeys(layerId, Array.from(keys));
+          });
+        }
+        clearAllPreviewStyles();
+      } catch (error) {
+        console.warn('Failed to clear interaction preview styles:', error);
       }
-      clearAllPreviewStyles();
 
       const updatedInteractions = interactions.filter((i) => i.id !== interactionId);
       onLayerUpdate(triggerLayer.id, { interactions: updatedInteractions });
@@ -985,16 +990,21 @@ export default function InteractionsPanel({
 
       // Clear any inline preview styles (e.g. backgroundColor) that were applied
       // via gsap.set during editing — otherwise they persist on the canvas after
-      // the tween is removed.
-      const removedTween = (selectedInteraction.tweens || []).find((t) => t.id === tweenId);
-      if (removedTween) {
-        const keys = Array.from(new Set([
-          ...Object.keys(removedTween.from || {}),
-          ...Object.keys(removedTween.to || {}),
-        ]));
-        clearLiveStyleForKeys(removedTween.layer_id, keys);
+      // the tween is removed. Wrapped in try/catch: preview cleanup is cosmetic
+      // and must never block the actual removal below.
+      try {
+        const removedTween = (selectedInteraction.tweens || []).find((t) => t.id === tweenId);
+        if (removedTween) {
+          const keys = Array.from(new Set([
+            ...Object.keys(removedTween.from || {}),
+            ...Object.keys(removedTween.to || {}),
+          ]));
+          clearLiveStyleForKeys(removedTween.layer_id, keys);
+        }
+        clearAllPreviewStyles();
+      } catch (error) {
+        console.warn('Failed to clear tween preview styles:', error);
       }
-      clearAllPreviewStyles();
 
       const updatedInteractions = updateInteractionById(
         interactions,
@@ -1094,15 +1104,20 @@ export default function InteractionsPanel({
 
       // Clear any inline preview styles (e.g. backgroundColor) that were applied
       // via gsap.set during editing — otherwise they persist on the canvas after
-      // the property is removed.
-      const targetTween = (selectedInteraction.tweens || []).find((t) => t.id === tweenId);
-      if (targetTween) {
-        clearLiveStyleForKeys(
-          targetTween.layer_id,
-          propertyOption.properties.map((p) => p.key as string)
-        );
+      // the property is removed. Wrapped in try/catch: preview cleanup is
+      // cosmetic and must never block the actual removal below.
+      try {
+        const targetTween = (selectedInteraction.tweens || []).find((t) => t.id === tweenId);
+        if (targetTween) {
+          clearLiveStyleForKeys(
+            targetTween.layer_id,
+            propertyOption.properties.map((p) => p.key as string)
+          );
+        }
+        clearAllPreviewStyles();
+      } catch (error) {
+        console.warn('Failed to clear property preview styles:', error);
       }
-      clearAllPreviewStyles();
 
       const updatedInteractions = updateInteractionById(
         interactions,
