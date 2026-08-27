@@ -227,8 +227,13 @@ jobs:
           PREMIUM_AI_REPAIR_MAX_TOTAL_MS: "2700000"
           # Large repo files (e.g. pageRepository.ts ~44k chars) overflowed the
           # 24k full-file reply budget → finish_reason=length → invalid_json.
-          PREMIUM_AI_REPAIR_MAX_TOKENS: "32000"
-          PREMIUM_AI_REPAIR_MAX_HUNKS_PER_FILE: "2"
+          # 2026-08-27 (1.30.6): 32k was still short. collectionItemRepository.ts
+          # is 1847 lines conflicted; the full-file reply truncated twice, then the
+          # hunk fallback refused because that file has 3 hunks against a cap of 2 —
+          # so the repair blocked on a merge it could have finished. Raise the reply
+          # ceiling, and let the fallback cover a realistic hunk count.
+          PREMIUM_AI_REPAIR_MAX_TOKENS: "64000"
+          PREMIUM_AI_REPAIR_MAX_HUNKS_PER_FILE: "6"
           # Enable hunk fallback: if the whole-file repair still truncates, resolve
           # the conflict hunk-by-hunk (tiny output, cannot truncate). The tenant-
           # isolation gate verifies the result regardless, so this stays fail-closed.
