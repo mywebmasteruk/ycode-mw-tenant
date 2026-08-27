@@ -23,10 +23,33 @@ export interface HreflangAlternate {
 export interface DynamicSlugContext {
   /** Collection item ID (translation source_id). */
   itemId: string;
-  /** Slug field ID (translation content_key). */
-  fieldId: string;
   /** Default-locale slug value used as the fallback. */
   defaultValue: string;
+}
+
+/**
+ * Content keys under which a CMS item's slug translation is stored. Slug-only
+ * translation loaders (`getSlugTranslationsByLocale`) only ever return these,
+ * so URL builders resolve translated slugs by trying both formats.
+ */
+const CMS_SLUG_CONTENT_KEYS = ['field:key:slug', 'slug'] as const;
+
+/**
+ * Resolve a CMS item's translated slug for a locale, falling back to the
+ * default-locale slug when no translation exists. Handles both the current
+ * (`field:key:slug`) and legacy (`slug`) content-key formats.
+ */
+function resolveTranslatedSlug(
+  translations: Record<string, Translation> | undefined,
+  itemId: string,
+  fallback: string
+): string {
+  for (const contentKey of CMS_SLUG_CONTENT_KEYS) {
+    const key = getTranslatableKey({ source_type: 'cms', source_id: itemId, content_key: contentKey });
+    const value = translations?.[key]?.content_value;
+    if (value) return value;
+  }
+  return fallback;
 }
 
 /** Build the default-locale absolute URL for a dynamic item. */
@@ -59,12 +82,7 @@ function buildDynamicLocalizedUrl(
     ''
   ).replace(/\/$/, '');
 
-  const translatedSlugKey = getTranslatableKey({
-    source_type: 'cms',
-    source_id: dynamicSlug.itemId,
-    content_key: dynamicSlug.fieldId,
-  });
-  const translatedSlug = translations?.[translatedSlugKey]?.content_value || dynamicSlug.defaultValue;
+  const translatedSlug = resolveTranslatedSlug(translations, dynamicSlug.itemId, dynamicSlug.defaultValue);
 
   const localizedItemPath = localizedFolderPath
     ? `${localizedFolderPath}/${translatedSlug}`
