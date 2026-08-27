@@ -1228,17 +1228,18 @@ async function getChangedDraftPageSummaries(): Promise<UnpublishedPageChange[]> 
  * Soft-deleted draft pages that still have a published counterpart.
  */
 async function getDeletedPageSummaries(): Promise<UnpublishedPageChange[]> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase not configured');
   }
 
-  const { data: deletedDrafts, error: draftError } = await client
+  const { data: deletedDrafts, error: draftError } = await applyTenantEq(client
     .from('pages')
     .select('id, name')
     .eq('is_published', false)
-    .not('deleted_at', 'is', null);
+    .not('deleted_at', 'is', null), tenantId);
 
   if (draftError) {
     throw new Error(`Failed to fetch deleted draft pages: ${draftError.message}`);
@@ -1248,11 +1249,11 @@ async function getDeletedPageSummaries(): Promise<UnpublishedPageChange[]> {
     return [];
   }
 
-  const { data: publishedRows, error: pubError } = await client
+  const { data: publishedRows, error: pubError } = await applyTenantEq(client
     .from('pages')
     .select('id')
     .in('id', deletedDrafts.map((draft) => draft.id))
-    .eq('is_published', true);
+    .eq('is_published', true), tenantId);
 
   if (pubError) {
     throw new Error(`Failed to fetch published pages pending deletion: ${pubError.message}`);

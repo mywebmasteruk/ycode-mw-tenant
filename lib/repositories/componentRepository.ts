@@ -527,17 +527,18 @@ export async function getUnpublishedComponents(): Promise<Component[]> {
  * Selects only id/name/hash — not layer trees.
  */
 export async function getUnpublishedComponentChanges(): Promise<UnpublishedChange[]> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
   if (!client) {
     throw new Error('Failed to initialize Supabase client');
   }
 
   const [draftResult, deleted] = await Promise.all([
-    client
+    applyTenantEq(client
       .from('components')
       .select('id, name, content_hash')
       .eq('is_published', false)
-      .is('deleted_at', null),
+      .is('deleted_at', null), tenantId),
     getDeletedDraftSummaries('components'),
   ]);
 
@@ -549,11 +550,11 @@ export async function getUnpublishedComponentChanges(): Promise<UnpublishedChang
   const publishedHashById = new Map<string, string | null>();
 
   if (drafts.length > 0) {
-    const { data: publishedRows, error } = await client
+    const { data: publishedRows, error } = await applyTenantEq(client
       .from('components')
       .select('id, content_hash')
       .in('id', drafts.map((component) => component.id))
-      .eq('is_published', true);
+      .eq('is_published', true), tenantId);
 
     if (error) {
       throw new Error(`Failed to fetch published components: ${error.message}`);

@@ -1031,6 +1031,7 @@ async function cleanupOrphanedPublishedItems(
   collectionId: string,
   prefetched?: CollectionPrefetch,
 ): Promise<{ deletedCount: number; deletedSlugs: string[] }> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -1040,17 +1041,18 @@ async function cleanupOrphanedPublishedItems(
   // Paginated id-only fetch (published rows carry no is_publishable filter so
   // non-publishable orphans are caught too).
   const fetchItemIds = async (isPublished: boolean): Promise<string[]> => {
+    const tenantId = await resolveEffectiveTenantId();
     const PAGE_SIZE = 1000;
     const ids: string[] = [];
     let offset = 0;
     while (true) {
-      const { data, error } = await client
+      const { data, error } = await applyTenantEq(client
         .from('collection_items')
         .select('id')
         .eq('collection_id', collectionId)
         .eq('is_published', isPublished)
         .is('deleted_at', null)
-        .range(offset, offset + PAGE_SIZE - 1);
+        .range(offset, offset + PAGE_SIZE - 1), tenantId);
       if (error) {
         throw new Error(`Failed to read items for orphan cleanup: ${error.message}`);
       }
@@ -1078,25 +1080,25 @@ async function cleanupOrphanedPublishedItems(
   // Snapshot published slug values before deletion (for cache invalidation)
   let deletedSlugs: string[] = [];
   try {
-    const { data: slugField } = await client
+    const { data: slugField } = await applyTenantEq(client
       .from('collection_fields')
       .select('id')
       .eq('collection_id', collectionId)
       .eq('key', 'slug')
       .is('deleted_at', null)
       .limit(1)
-      .single();
+      .single(), tenantId);
 
     if (slugField) {
       const allSlugValues: Array<{ value: unknown }> = [];
       for (let i = 0; i < orphanIds.length; i += SUPABASE_IN_FILTER_CHUNK_SIZE) {
         const batch = orphanIds.slice(i, i + SUPABASE_IN_FILTER_CHUNK_SIZE);
-        const { data } = await client
+        const { data } = await applyTenantEq(client
           .from('collection_item_values')
           .select('value')
           .eq('field_id', slugField.id)
           .eq('is_published', true)
-          .in('item_id', batch);
+          .in('item_id', batch), tenantId);
         if (data) allSlugValues.push(...data);
       }
       deletedSlugs = allSlugValues.map(sv => sv.value as string).filter(Boolean);
@@ -1108,11 +1110,11 @@ async function cleanupOrphanedPublishedItems(
   // Batch hard delete orphaned published rows (CASCADE deletes their values)
   for (let i = 0; i < orphanIds.length; i += SUPABASE_IN_FILTER_CHUNK_SIZE) {
     const batch = orphanIds.slice(i, i + SUPABASE_IN_FILTER_CHUNK_SIZE);
-    await client
+    await applyTenantEq(client
       .from('collection_items')
       .delete()
       .in('id', batch)
-      .eq('is_published', true);
+      .eq('is_published', true), tenantId);
   }
 
   return { deletedCount: orphanIds.length, deletedSlugs };

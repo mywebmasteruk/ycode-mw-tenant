@@ -825,6 +825,7 @@ export async function getUnpublishedAssets(): Promise<Asset[]> {
  * Count unpublished assets from id/hash only — not file payloads or SVG content.
  */
 export async function getUnpublishedAssetsCount(): Promise<number> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -835,13 +836,13 @@ export async function getUnpublishedAssetsCount(): Promise<number> {
   let offset = 0;
 
   while (true) {
-    const { data, error } = await client
+    const { data, error } = await applyTenantEq(client
       .from('assets')
       .select('id, content_hash')
       .eq('is_published', false)
       .is('deleted_at', null)
       .order('id', { ascending: true })
-      .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
+      .range(offset, offset + SUPABASE_QUERY_LIMIT - 1), tenantId);
 
     if (error) {
       throw new Error(`Failed to fetch draft assets: ${error.message}`);
@@ -864,11 +865,11 @@ export async function getUnpublishedAssetsCount(): Promise<number> {
 
   for (let i = 0; i < draftIds.length; i += PUBLISHED_ASSET_HASH_BATCH_SIZE) {
     const batchIds = draftIds.slice(i, i + PUBLISHED_ASSET_HASH_BATCH_SIZE);
-    const { data: publishedAssets, error: publishedError } = await client
+    const { data: publishedAssets, error: publishedError } = await applyTenantEq(client
       .from('assets')
       .select('id, content_hash')
       .in('id', batchIds)
-      .eq('is_published', true);
+      .eq('is_published', true), tenantId);
 
     if (publishedError) {
       throw new Error(`Failed to fetch published assets: ${publishedError.message}`);

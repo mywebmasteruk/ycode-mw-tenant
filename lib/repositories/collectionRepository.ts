@@ -597,17 +597,18 @@ export async function getUnpublishedCollections(): Promise<Collection[]> {
  * Count unpublished collections without joining items or loading full rows.
  */
 export async function getUnpublishedCollectionsCount(): Promise<number> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
     throw new Error('Supabase client not configured');
   }
 
-  const { data: drafts, error } = await client
+  const { data: drafts, error } = await applyTenantEq(client
     .from('collections')
     .select('id, name, order')
     .eq('is_published', false)
-    .is('deleted_at', null);
+    .is('deleted_at', null), tenantId);
 
   if (error) {
     throw new Error(`Failed to fetch draft collections: ${error.message}`);
@@ -617,11 +618,11 @@ export async function getUnpublishedCollectionsCount(): Promise<number> {
     return 0;
   }
 
-  const { data: published, error: publishedError } = await client
+  const { data: published, error: publishedError } = await applyTenantEq(client
     .from('collections')
     .select('id, name, order')
     .in('id', drafts.map((collection) => collection.id))
-    .eq('is_published', true);
+    .eq('is_published', true), tenantId);
 
   if (publishedError) {
     throw new Error(`Failed to fetch published collections: ${publishedError.message}`);
