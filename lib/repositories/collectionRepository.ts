@@ -531,7 +531,10 @@ export async function publishCollection(id: string): Promise<Collection> {
 }
 
 /** Check if draft collection metadata differs from published */
-function hasCollectionChanged(draft: Collection, published: Collection): boolean {
+function hasCollectionChanged(
+  draft: Pick<Collection, 'name' | 'order'>,
+  published: Pick<Collection, 'name' | 'order'>
+): boolean {
   return (
     draft.name !== published.name ||
     draft.order !== published.order
@@ -588,6 +591,53 @@ export async function getUnpublishedCollections(): Promise<Collection[]> {
     }
     return hasCollectionChanged(draft, published);
   });
+}
+
+/**
+ * Count unpublished collections without joining items or loading full rows.
+ */
+export async function getUnpublishedCollectionsCount(): Promise<number> {
+  const client = await getSupabaseAdmin();
+
+  if (!client) {
+    throw new Error('Supabase client not configured');
+  }
+
+  const { data: drafts, error } = await client
+    .from('collections')
+    .select('id, name, order')
+    .eq('is_published', false)
+    .is('deleted_at', null);
+
+  if (error) {
+    throw new Error(`Failed to fetch draft collections: ${error.message}`);
+  }
+
+  if (!drafts || drafts.length === 0) {
+    return 0;
+  }
+
+  const { data: published, error: publishedError } = await client
+    .from('collections')
+    .select('id, name, order')
+    .in('id', drafts.map((collection) => collection.id))
+    .eq('is_published', true);
+
+  if (publishedError) {
+    throw new Error(`Failed to fetch published collections: ${publishedError.message}`);
+  }
+
+  const publishedById = new Map((published || []).map((collection) => [collection.id, collection]));
+  let count = 0;
+
+  for (const draft of drafts) {
+    const publishedCollection = publishedById.get(draft.id);
+    if (!publishedCollection || hasCollectionChanged(draft, publishedCollection)) {
+      count++;
+    }
+  }
+
+  return count;
 }
 
 /**

@@ -128,6 +128,9 @@ Each layer's \`design\` object controls its appearance. Use update_layer_design 
 - textWrap: "balance" (even line lengths — use on multi-line headings), "pretty" (avoids orphans — use on body copy), "wrap", "nowrap"
 - fontVariantNumeric: "tabular-nums" (equal-width digits — use for pricing, stats, tables, countdowns), "normal", "ordinal", "slashed-zero"
 - color: "#171717", "rgb(0,0,0)", "#ffffff"
+- textShadow: "0px_1px_2px_rgba(0,0,0,0.4)" (offset-x, offset-y, blur, color — underscores between
+  values). Use for light text on a light background. Named sizes "sm" / "md" / "lg" also work.
+  Apply on the text/heading/button layer, not a wrapping div.
 
 **spacing** — Padding and margin
 - padding/paddingTop/paddingRight/paddingBottom/paddingLeft: "24px", "2rem"
@@ -155,7 +158,7 @@ Each layer's \`design\` object controls its appearance. Use update_layer_design 
 - backgroundClip: "text" (for gradient text effect — also set typography color "transparent")
 - bgGradientVars: { "--bg-img": "linear-gradient(135deg, #667eea 0%, #764ba2 100%)" } — CSS gradient values
 
-**effects** — Shadows, opacity, blur, filters, blend modes
+**effects** — Shadows, opacity, blur, filters, blend modes, cursor
 - opacity: "0" to "1"
 - boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)"
 - blur: "4px"
@@ -165,6 +168,9 @@ Each layer's \`design\` object controls its appearance. Use update_layer_design 
 - mixBlendMode: "multiply" | "screen" | "overlay" | "darken" | "lighten" | … — blends a layer into
   whatever is beneath it. Combine with an absolutely-positioned div for color tints (multiply) and
   grain/texture overlays (overlay) — no htmlEmbed needed.
+- cursor: "pointer" | "default" | "text" | "grab" | "wait" | "not-allowed" | "auto"
+  Set on the clickable layer (button, link, card). Pair with ui_state "hover" when the
+  cursor should change only on hover.
 
 **positioning** — Position, z-index
 - position: "relative" | "absolute" | "fixed" | "sticky"
@@ -324,10 +330,12 @@ applies to. Before editing, call \`get_layers\` and walk the selected layer's su
 apply each change to the layer the property actually belongs to:
 
 - **Text properties** (color, fontSize, fontWeight, fontFamily, lineHeight, letterSpacing,
-  textAlign, textTransform, textWrap, fontVariantNumeric) → apply to the **text / heading /
+  textAlign, textTransform, textWrap, fontVariantNumeric, textShadow) → apply to the **text / heading /
   richText / button descendant(s)** inside the selection, NOT the wrapping div. A \`text-white\`
   class on a parent does NOT win when a child text layer has its own color set, so you must set
   it on the child layer itself.
+- **Cursor** (\`effects.cursor\`) → the clickable layer itself (button, link, or the selected
+  card/div). Do not put it on a nested text child.
 - **Background, border, border-radius, padding** → usually the selected container itself.
 - **Gap, alignment, flex direction, grid columns** → the flex/grid container.
 - **Image properties** (objectFit, aspectRatio, src, alt) → the \`image\` layer.
@@ -545,6 +553,8 @@ The values below are the safe defaults:
 
 - **Border radius**: "12px" or "16px" for cards, "8px" for buttons, "9999px" for pills
 - **Shadows on cards**: boxShadow "0 1px 3px rgba(0,0,0,0.08)"
+- **Text shadow**: typography.textShadow "0px_1px_2px_rgba(0,0,0,0.4)" when light text sits on a light background
+- **Cursor**: effects.cursor "pointer" on buttons, links, and other clickable layers
 - **Subtle borders**: borderWidth "1px", borderColor "rgba(0,0,0,0.06)"
 - **Button hover**: Use ui_state "hover" to darken background or add shadow
 - **Image aspect ratios**: Use aspectRatio "16/9" or "3/2" with objectFit "cover"

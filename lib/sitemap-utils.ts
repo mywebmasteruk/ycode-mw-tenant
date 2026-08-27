@@ -125,7 +125,7 @@ function buildDynamicPageUrls(
       baseUrl,
       locales,
       translationsByLocale,
-      dynamicSlug: { itemId: item.id, fieldId: slugFieldId, defaultValue: slugValue },
+      dynamicSlug: { itemId: item.id, defaultValue: slugValue },
     });
     if (alternates.length > 0) {
       sitemapUrl.alternates = alternates;
