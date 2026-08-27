@@ -299,4 +299,107 @@ describe('Premium AI per-file repair aggregation', () => {
     expect(result.appliedFiles).toEqual(['lib/a.ts']);
     expect(result.results).toMatchObject([{ filePath: 'lib/a.ts', status: 'hunk_fallback_applied', applied: true, retryUsed: true }]);
   });
+
+  it('sends a large conflicted file straight to hunk mode without a full-file attempt', async () => {
+    // Regression: 1.30.6 (2026-08-27). collectionItemRepository.ts was 1847 lines
+    // conflicted. The full-file re-emit truncated at a 32k reply cap, and raising the
+    // cap to 64k only traded truncation for a 300s per-call timeout. Four repair runs
+    // failed on that one file. Above HUNK_FIRST_MIN_CHARS we now go to hunks first.
+    const attempts: string[] = [];
+    const filler = `// padding line to exceed the hunk-first threshold\n`.repeat(2000);
+    let fileContent = [
+      'export function value() {',
+      '<<<<<<< HEAD',
+      '  return "ours";',
+      '=======',
+      '  return "theirs";',
+      '>>>>>>> upstream/main',
+      '}',
+      filler,
+    ].join('\n');
+    expect(fileContent.length).toBeGreaterThan(60_000);
+
+    const result = await repairFilesOneAtATime({
+      targetFiles: ['lib/big.ts'],
+      blockedFiles: ['lib/big.ts'],
+      requestFile: async (_filePath, attempt, promptOverride) => {
+        attempts.push(attempt);
+        if (attempt === 'hunk' && promptOverride?.includes('resolvedHunk')) {
+          return {
+            reply: JSON.stringify({
+              summary: 'Resolved one hunk safely.',
+              verdict: 'safe_candidate',
+              safetyConcerns: [],
+              resolvedHunk: '  return "ours";',
+            }),
+            model: 'test/model',
+            finishReason: 'stop',
+          };
+        }
+        throw new Error(`unexpected non-hunk attempt: ${attempt}`);
+      },
+      applyFile: (file: PremiumAiResolvedFile) => {
+        expect(file.content).not.toContain('<<<<<<<');
+        fileContent = file.content;
+        return file.filePath;
+      },
+      validateFile: () => undefined,
+      readFile: () => fileContent,
+      enableHunkFallback: true,
+    });
+
+    // No 'initial' / 'truncation_retry' - the expensive calls are skipped entirely.
+    expect(attempts).toEqual(['hunk']);
+    expect(result.appliedFiles).toEqual(['lib/big.ts']);
+    expect(result.results).toMatchObject([{ filePath: 'lib/big.ts', status: 'hunk_fallback_applied', applied: true }]);
+  });
+
+  it('reaches hunk mode when the full-file call is aborted rather than truncated', async () => {
+    // Regression: the 64k retry failed with invalid_json ("This operation was aborted"
+    // at the 300s per-call timeout). That is not a truncation error, so the old flow
+    // went initial -> json_repair -> give up, and hunk mode was never reachable.
+    const attempts: string[] = [];
+    let fileContent = [
+      'export function value() {',
+      '<<<<<<< HEAD',
+      '  return "ours";',
+      '=======',
+      '  return "theirs";',
+      '>>>>>>> upstream/main',
+      '}',
+      '',
+    ].join('\n');
+
+    const result = await repairFilesOneAtATime({
+      targetFiles: ['lib/a.ts'],
+      blockedFiles: ['lib/a.ts'],
+      requestFile: async (_filePath, attempt, promptOverride) => {
+        attempts.push(attempt);
+        if (attempt === 'hunk' && promptOverride?.includes('resolvedHunk')) {
+          return {
+            reply: JSON.stringify({
+              summary: 'Resolved one hunk safely.',
+              verdict: 'safe_candidate',
+              safetyConcerns: [],
+              resolvedHunk: '  return "ours";',
+            }),
+            model: 'test/model',
+            finishReason: 'stop',
+          };
+        }
+        throw new Error('This operation was aborted');
+      },
+      applyFile: (file: PremiumAiResolvedFile) => {
+        fileContent = file.content;
+        return file.filePath;
+      },
+      validateFile: () => undefined,
+      readFile: () => fileContent,
+      enableHunkFallback: true,
+    });
+
+    expect(attempts).toContain('hunk');
+    expect(result.appliedFiles).toEqual(['lib/a.ts']);
+    expect(result.results).toMatchObject([{ filePath: 'lib/a.ts', status: 'hunk_fallback_applied', applied: true }]);
+  });
 });
