@@ -51,6 +51,15 @@ const MAX_CALL_MS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_CALL_MS, 
 const MAX_TOTAL_MS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_TOTAL_MS, 2_700_000);
 const MAX_TRUNCATED_OR_INVALID = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_BAD_RESPONSES, 5);
 const MAX_HUNKS_PER_FILE = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_MAX_HUNKS_PER_FILE, 2);
+// Whole-file re-emission is the single most fragile call this script makes: the model
+// must reproduce every line of a large conflicted file exactly. On 2026-08-27 the
+// 1847-line collectionItemRepository.ts truncated at a 32k reply cap, and raising the
+// cap to 64k only traded truncation for a 300s per-call timeout (`invalid_json`,
+// "This operation was aborted"). Four consecutive repair runs failed on that one file.
+// Hunk mode sends a few hundred tokens per conflict instead, so it can neither truncate
+// nor time out. Above this size, go to hunks FIRST rather than after two failed
+// full-file attempts.
+const HUNK_FIRST_MIN_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_HUNK_FIRST_MIN_CHARS, 60_000);
 const ENABLE_HUNK_FALLBACK = parseBool(process.env.PREMIUM_AI_REPAIR_ENABLE_HUNK_FALLBACK);
 const HUGE_FILE_DENY_CHARS = parsePositiveInt(process.env.PREMIUM_AI_REPAIR_HUGE_FILE_DENY_CHARS, 180_000);
 const PATCH_ARTIFACT_PATH = process.env.PREMIUM_AI_REPAIR_PATCH_PATH || '/tmp/premium-ai-repair-checkpoint.patch';
@@ -979,11 +988,57 @@ async function repairSingleFile(args: {
     }
   }
 
+  let hunkModeUsed = false;
+
+  async function attemptHunkModeOnce(
+    fallbackResult: { result: PremiumAiFileRepairResult; assessments: PremiumAiFileAssessment[]; appliedFiles: string[] },
+  ): Promise<{ result: PremiumAiFileRepairResult; assessments: PremiumAiFileAssessment[]; appliedFiles: string[] }> {
+    // Only worth a call if hunk mode is enabled and has not already been tried. When it
+    // cannot apply, keep the ORIGINAL failure reason - it explains the real blocker.
+    if (hunkModeUsed || !args.enableHunkFallback) return fallbackResult;
+    hunkModeUsed = true;
+    const hunkResult = await attemptHunkFallback();
+    return hunkResult.result.applied ? hunkResult : fallbackResult;
+  }
+
+  /**
+   * Large conflicted files go to hunk mode FIRST. A whole-file re-emit of such a file
+   * either truncates or runs long enough to hit the per-call timeout, and both failure
+   * modes cost a full model call before we learn anything. Hunk mode's output is bounded
+   * by the conflict, not the file, so it is both cheaper and far more likely to succeed.
+   */
+  function shouldTryHunksFirst(): boolean {
+    if (!args.enableHunkFallback) return false;
+    try {
+      const content = args.readFile
+        ? args.readFile(args.filePath)
+        : readRepoFile(args.filePath, Number.MAX_SAFE_INTEGER);
+      if (content.length < HUNK_FIRST_MIN_CHARS) return false;
+      const hunks = extractConflictHunks(content);
+      return hunks.length > 0 && hunks.length <= MAX_HUNKS_PER_FILE;
+    } catch {
+      return false;
+    }
+  }
+
+  if (shouldTryHunksFirst()) {
+    hunkModeUsed = true;
+    const hunkFirst = await attemptHunkFallback();
+    if (hunkFirst.result.applied) return hunkFirst;
+    // Hunk mode could not finish it - fall through to the full-file path below.
+    retryUsed = false;
+  }
+
   try {
     return await attemptRepair('initial');
   } catch (error) {
     if (!isTruncationError(error)) {
-      return attemptJsonRepair(modelErrorMessage(error));
+      // A non-truncation failure (bad JSON, or a call aborted at the timeout) used to
+      // end here, so hunk mode was never reached for the exact failure that blocked the
+      // 1.30.6 repair. Try the JSON repair, then hunks, before giving up.
+      const repaired = await attemptJsonRepair(modelErrorMessage(error));
+      if (repaired.result.applied) return repaired;
+      return attemptHunkModeOnce(repaired);
     }
   }
 
@@ -992,9 +1047,24 @@ async function repairSingleFile(args: {
     return await attemptRepair('truncation_retry');
   } catch (error) {
     if (isTruncationError(error)) {
+      if (hunkModeUsed) {
+        return {
+          result: fileResult({
+            filePath: args.filePath,
+            status: 'model_truncated',
+            summary: 'Premium AI full-file repair was truncated, and hunk mode had already been tried without resolving this file.',
+            retryUsed,
+          }),
+          assessments: [],
+          appliedFiles: [],
+        };
+      }
+      hunkModeUsed = true;
       return attemptHunkFallback();
     }
-    return attemptJsonRepair(modelErrorMessage(error));
+    const repaired = await attemptJsonRepair(modelErrorMessage(error));
+    if (repaired.result.applied) return repaired;
+    return attemptHunkModeOnce(repaired);
   }
 }
 
