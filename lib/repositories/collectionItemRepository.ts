@@ -1408,11 +1408,55 @@ export async function publishItem(id: string): Promise<CollectionItem> {
 
 }
 
-/**
- * Get total count of collection items needing publishing across all collections.
- * Checks both metadata (manual_order) and value changes.
- */
-export async function getTotalPublishableItemsCount(): Promise<number> {
+interface PublishableItemRef {
+  id: string;
+  collection_id: string;
+  status: 'new' | 'modified';
+}
+
+async function fetchCollectionItemsForPublish(
+  collectionIds: string[],
+  isPublished: boolean
+): Promise<Array<{ id: string; collection_id: string; manual_order: number }>> {
+  const tenantId = await resolveEffectiveTenantId();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Supabase client not configured');
+  }
+
+  const rows: Array<{ id: string; collection_id: string; manual_order: number }> = [];
+  let offset = 0;
+
+  while (true) {
+    let query = client
+      .from('collection_items')
+      .select('id, collection_id, manual_order')
+      .in('collection_id', collectionIds)
+      .eq('is_published', isPublished)
+      .order('id', { ascending: true })
+      .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
+    query = applyTenantEq(query, tenantId);
+
+    if (!isPublished) {
+      query = query.eq('is_publishable', true).is('deleted_at', null);
+    }
+
+    const { data, error } = await query;
+    if (error) {
+      throw new Error(`Failed to fetch ${isPublished ? 'published' : 'draft'} items: ${error.message}`);
+    }
+
+    const batch = data || [];
+    rows.push(...batch);
+
+    if (batch.length < SUPABASE_QUERY_LIMIT) break;
+    offset += SUPABASE_QUERY_LIMIT;
+  }
+
+  return rows;
+}
+
+async function getPublishableItemRefs(): Promise<PublishableItemRef[]> {
   const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
@@ -1431,85 +1475,66 @@ export async function getTotalPublishableItemsCount(): Promise<number> {
   }
 
   if (!collections || collections.length === 0) {
-    return 0;
+    return [];
   }
 
-  const collectionIds = collections.map(c => c.id);
-
-  // Paginate both queries to avoid PostgREST's default 1000-row limit
-  const fetchAllItems = async (isPublished: boolean): Promise<Array<{ id: string; manual_order: number }>> => {
-    const tenantId = await resolveEffectiveTenantId();
-    const rows: Array<{ id: string; manual_order: number }> = [];
-    let offset = 0;
-
-    while (true) {
-      let query = client
-        .from('collection_items')
-        .select('id, manual_order')
-        .in('collection_id', collectionIds)
-        .eq('is_published', isPublished)
-        .order('id', { ascending: true })
-        .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
-      query = applyTenantEq(query, tenantId);
-
-      if (!isPublished) {
-        query = query.eq('is_publishable', true).is('deleted_at', null);
-      }
-
-      const { data, error } = await query;
-      if (error) {
-        throw new Error(`Failed to fetch ${isPublished ? 'published' : 'draft'} items: ${error.message}`);
-      }
-
-      const batch = data || [];
-      rows.push(...batch);
-
-      if (batch.length < SUPABASE_QUERY_LIMIT) break;
-      offset += SUPABASE_QUERY_LIMIT;
-    }
-
-    return rows;
-  };
-
+  const collectionIds = collections.map((collection) => collection.id);
   const [draftItems, publishedItems] = await Promise.all([
-    fetchAllItems(false),
-    fetchAllItems(true),
+    fetchCollectionItemsForPublish(collectionIds, false),
+    fetchCollectionItemsForPublish(collectionIds, true),
   ]);
 
   const publishedMap = new Map<string, number>();
-  for (const pub of publishedItems) {
-    publishedMap.set(pub.id, pub.manual_order);
+  for (const published of publishedItems) {
+    publishedMap.set(published.id, published.manual_order);
   }
 
-  // Count items with metadata changes (new or order changed)
-  let count = 0;
-  const matchingOrderItemIds: string[] = [];
+  const refs: PublishableItemRef[] = [];
+  const matchingOrderItems: PublishableItemRef[] = [];
 
   for (const draft of draftItems) {
-    const pubOrder = publishedMap.get(draft.id);
-    if (pubOrder === undefined || draft.manual_order !== pubOrder) {
-      count++;
-    } else {
-      matchingOrderItemIds.push(draft.id);
+    const publishedOrder = publishedMap.get(draft.id);
+    if (publishedOrder === undefined) {
+      refs.push({ id: draft.id, collection_id: draft.collection_id, status: 'new' });
+      continue;
+    }
+
+    if (draft.manual_order !== publishedOrder) {
+      refs.push({ id: draft.id, collection_id: draft.collection_id, status: 'modified' });
+      continue;
+    }
+
+    matchingOrderItems.push({ id: draft.id, collection_id: draft.collection_id, status: 'modified' });
+  }
+
+  if (matchingOrderItems.length > 0) {
+    const valueChangedIds = await getItemIdsWithValueChanges(matchingOrderItems.map((item) => item.id));
+    const matchingById = new Map(matchingOrderItems.map((item) => [item.id, item]));
+    for (const itemId of valueChangedIds) {
+      const match = matchingById.get(itemId);
+      if (match) refs.push(match);
     }
   }
 
-  // For items with matching metadata, check value changes
-  if (matchingOrderItemIds.length > 0) {
-    const valueChanges = await countItemsWithValueChanges(matchingOrderItemIds);
-    count += valueChanges;
-  }
-
-  return count;
+  return refs;
 }
 
 /**
- * Count items whose draft values differ from published. Reads all values via
+ * Get total count of collection items needing publishing across all collections.
+ * Checks both metadata (manual_order) and value changes.
+ */
+export async function getTotalPublishableItemsCount(): Promise<number> {
+  const refs = await getPublishableItemRefs();
+  return refs.length;
+}
+
+/**
+ * Item IDs whose draft values differ from published. Reads all values via
  * the direct-DB (Knex) path in two queries rather than paginated PostgREST
  * batches of 50 items.
  */
-async function countItemsWithValueChanges(itemIds: string[]): Promise<number> {
-  if (itemIds.length === 0) return 0;
+async function getItemIdsWithValueChanges(itemIds: string[]): Promise<string[]> {
+  if (itemIds.length === 0) return [];
 
   let draftValueRows: Awaited<ReturnType<typeof getValueRowsForItems>> = [];
   let publishedValueRows: Awaited<ReturnType<typeof getValueRowsForItems>> = [];
@@ -1520,7 +1545,7 @@ async function countItemsWithValueChanges(itemIds: string[]): Promise<number> {
       getValueRowsForItems(itemIds, true),
     ]);
   } catch {
-    return 0; // Treat read failure as "no detectable changes" for the count
+    return [];
   }
 
   const groupByItem = (
@@ -1536,14 +1561,14 @@ async function countItemsWithValueChanges(itemIds: string[]): Promise<number> {
 
   const draftValsByItem = groupByItem(draftValueRows);
   const pubValsByItem = groupByItem(publishedValueRows);
+  const changedIds: string[] = [];
 
-  let changedCount = 0;
   for (const itemId of itemIds) {
     const draftVals = draftValsByItem.get(itemId) || new Map();
     const pubVals = pubValsByItem.get(itemId) || new Map();
 
     if (draftVals.size !== pubVals.size) {
-      changedCount++;
+      changedIds.push(itemId);
       continue;
     }
 
@@ -1556,11 +1581,11 @@ async function countItemsWithValueChanges(itemIds: string[]): Promise<number> {
     }
 
     if (hasChange) {
-      changedCount++;
+      changedIds.push(itemId);
     }
   }
 
-  return changedCount;
+  return changedIds;
 }
 
 /**

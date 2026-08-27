@@ -11,7 +11,8 @@
 import type { FieldVariable, CollectionItemWithValues, CollectionField } from '@/types';
 import { isValidUUID } from '@/lib/utils';
 import { getAssetProxyUrl } from '@/lib/asset-utils';
-import { isAssetFieldType, isMultipleAssetField } from '@/lib/collection-field-utils';
+import { formatFieldValue } from '@/lib/cms-variables-utils';
+import { isAssetFieldType, isDateFieldType, isMultipleAssetField } from '@/lib/collection-field-utils';
 import { buildAbsoluteAssetUrl, getSiteBaseUrl } from '@/lib/url-utils';
 
 // Re-export client-safe inline variable resolver
@@ -58,6 +59,13 @@ async function resolveFieldDisplayValue(
     const url = await resolveImageUrl(String(rawValue), null, isPublished, tenantId);
     if (!url) return '';
     return buildAbsoluteAssetUrl(await getBaseUrl(), url) ?? url;
+  }
+
+  // Rich text is stored as a Tiptap object; serialize to plain text instead of
+  // "[object Object]". Other field types keep their raw stored string so values
+  // like ISO dates remain intact for JSON-LD and other custom code.
+  if (field.type === 'rich_text') {
+    return formatFieldValue(rawValue, field.type);
   }
 
   return String(rawValue);
@@ -125,6 +133,32 @@ async function resolvePlaceholderToken(
 }
 
 /**
+ * Return the item with its top-level date fields replaced by their raw stored
+ * ISO values. Item date values are pre-formatted for display (e.g. "Aug 20,
+ * 2026"), but custom code (JSON-LD, scripts) needs machine-readable ISO 8601.
+ * Other values (including translated text) are preserved.
+ */
+async function withRawDateFieldValues(
+  collectionItem: CollectionItemWithValues,
+  fields: CollectionField[],
+  isPublished: boolean,
+  tenantId?: string
+): Promise<CollectionItemWithValues> {
+  const dateFieldIds = fields.filter(field => isDateFieldType(field.type)).map(field => field.id);
+  if (dateFieldIds.length === 0) return collectionItem;
+
+  const { getItemWithValues } = await import('@/lib/repositories/collectionItemRepository');
+  const rawItem = await getItemWithValues(collectionItem.id, isPublished, tenantId);
+  if (!rawItem) return collectionItem;
+
+  const values = { ...collectionItem.values };
+  for (const fieldId of dateFieldIds) {
+    if (rawItem.values[fieldId] != null) values[fieldId] = rawItem.values[fieldId];
+  }
+  return { ...collectionItem, values };
+}
+
+/**
  * Resolve {{FieldName}} placeholders in custom code with actual field values.
  * Asset fields resolve to their public URL and references support the
  * {{ReferenceField.NestedField}} syntax. Unknown fields are left untouched.
@@ -138,9 +172,13 @@ export async function resolveCustomCodePlaceholders(
   isPublished: boolean = false,
   options: ResolveCustomCodeOptions = {}
 ): Promise<string> {
-  if (!collectionItem || !collectionItem.values || !fields.length) {
+  if (!collectionItem || !collectionItem.values || !fields.length || !code.includes('{{')) {
     return code;
   }
+
+  // Custom code emits machine-readable output, so resolve against raw ISO dates
+  // rather than the display-formatted values used for on-page rendering.
+  const effectiveItem = await withRawDateFieldValues(collectionItem, fields, isPublished, options.tenantId);
 
   const fieldsByName = new Map(fields.map(field => [field.name, field]));
 
@@ -157,7 +195,7 @@ export async function resolveCustomCodePlaceholders(
   for (const [, rawToken] of code.matchAll(PLACEHOLDER_REGEX)) {
     const token = rawToken.trim();
     if (resolvedTokens.has(token)) continue;
-    resolvedTokens.set(token, await resolvePlaceholderToken(token, collectionItem, fieldsByName, isPublished, getBaseUrl, options.tenantId));
+    resolvedTokens.set(token, await resolvePlaceholderToken(token, effectiveItem, fieldsByName, isPublished, getBaseUrl, options.tenantId));
   }
 
   return code.replace(PLACEHOLDER_REGEX, (match, rawToken) => {

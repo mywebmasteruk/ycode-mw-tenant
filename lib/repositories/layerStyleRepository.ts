@@ -568,11 +568,49 @@ export async function hardDeleteSoftDeletedLayerStyles(): Promise<{ count: numbe
 }
 
 /**
- * Get count of unpublished layer styles
+ * Count unpublished layer styles from id/hash only — not full design rows.
  */
 export async function getUnpublishedLayerStylesCount(): Promise<number> {
-  const styles = await getUnpublishedLayerStyles();
-  return styles.length;
+  const tenantId = await resolveEffectiveTenantId();
+  const client = await getSupabaseAdmin();
+  if (!client) {
+    throw new Error('Failed to initialize Supabase client');
+  }
+
+  const { data: drafts, error } = await applyTenantEq(client
+    .from('layer_styles')
+    .select('id, content_hash')
+    .eq('is_published', false)
+    .is('deleted_at', null), tenantId);
+
+  if (error) {
+    throw new Error(`Failed to fetch draft layer styles: ${error.message}`);
+  }
+
+  if (!drafts || drafts.length === 0) {
+    return 0;
+  }
+
+  const { data: published, error: publishedError } = await applyTenantEq(client
+    .from('layer_styles')
+    .select('id, content_hash')
+    .in('id', drafts.map((style) => style.id))
+    .eq('is_published', true), tenantId);
+
+  if (publishedError) {
+    throw new Error(`Failed to fetch published layer styles: ${publishedError.message}`);
+  }
+
+  const publishedHashById = new Map((published || []).map((style) => [style.id, style.content_hash]));
+  let count = 0;
+
+  for (const draft of drafts) {
+    if (!publishedHashById.has(draft.id) || draft.content_hash !== publishedHashById.get(draft.id)) {
+      count++;
+    }
+  }
+
+  return count;
 }
 
 /**
