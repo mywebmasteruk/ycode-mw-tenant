@@ -1144,12 +1144,11 @@ async function getChangedDraftPageSummaries(): Promise<UnpublishedPageChange[]> 
     throw new Error('Supabase not configured');
   }
 
-<<<<<<< HEAD
   const tenantId = await resolveEffectiveTenantId();
 
   let draftQ = client
     .from('pages')
-    .select('id, content_hash, page_folder_id, is_publishable, page_layers!inner(content_hash)')
+    .select('id, name, content_hash, page_folder_id, is_publishable, page_layers!inner(content_hash)')
     .eq('is_published', false)
     .eq('page_layers.is_published', false)
     .is('deleted_at', null)
@@ -1166,44 +1165,7 @@ async function getChangedDraftPageSummaries(): Promise<UnpublishedPageChange[]> 
   draftQ = applyTenantEq(draftQ, tenantId);
   pubQ = applyTenantEq(pubQ, tenantId);
 
-  // 2 bulk queries: all draft pages with layers + all published pages with layers
   const [draftResult, publishedResult] = await Promise.all([draftQ, pubQ]);
-||||||| 6aee7960
-  // 2 bulk queries: all draft pages with layers + all published pages with layers
-  const [draftResult, publishedResult] = await Promise.all([
-    client
-      .from('pages')
-      .select('id, content_hash, page_folder_id, is_publishable, page_layers!inner(content_hash)')
-      .eq('is_published', false)
-      .eq('page_layers.is_published', false)
-      .is('deleted_at', null)
-      .is('page_layers.deleted_at', null),
-    client
-      .from('pages')
-      .select('id, content_hash, page_folder_id, page_layers!inner(content_hash)')
-      .eq('is_published', true)
-      .eq('page_layers.is_published', true)
-      .is('deleted_at', null)
-      .is('page_layers.deleted_at', null),
-  ]);
-=======
-  const [draftResult, publishedResult] = await Promise.all([
-    client
-      .from('pages')
-      .select('id, name, content_hash, page_folder_id, is_publishable, page_layers!inner(content_hash)')
-      .eq('is_published', false)
-      .eq('page_layers.is_published', false)
-      .is('deleted_at', null)
-      .is('page_layers.deleted_at', null),
-    client
-      .from('pages')
-      .select('id, content_hash, page_folder_id, page_layers!inner(content_hash)')
-      .eq('is_published', true)
-      .eq('page_layers.is_published', true)
-      .is('deleted_at', null)
-      .is('page_layers.deleted_at', null),
-  ]);
->>>>>>> upstream/main
 
   if (draftResult.error) {
     throw new Error(`Failed to fetch draft pages: ${draftResult.error.message}`);
