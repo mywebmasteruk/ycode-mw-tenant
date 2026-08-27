@@ -1148,7 +1148,6 @@ export async function deleteItem(id: string, isPublished: boolean = false): Prom
     throw new Error(`Failed to delete collection item values: ${valuesError.message}`);
   }
 }
-<<<<<<< HEAD
 
 /**
  * Hard delete an item
@@ -1176,35 +1175,6 @@ export async function hardDeleteItem(id: string, isPublished: boolean = false): 
   }
 }
 
-||||||| 6aee7960
-
-/**
- * Hard delete an item
- * Permanently removes item and all associated collection_item_values via CASCADE
- * Used during publish to permanently remove soft-deleted items
- * @param id - Item UUID
- * @param isPublished - Which version to delete: draft (false) or published (true). Defaults to false (draft).
- */
-export async function hardDeleteItem(id: string, isPublished: boolean = false): Promise<void> {
-  const client = await getSupabaseAdmin();
-
-  if (!client) {
-    throw new Error('Supabase client not configured');
-  }
-
-  const { error } = await client
-    .from('collection_items')
-    .delete()
-    .eq('id', id)
-    .eq('is_published', isPublished);
-
-  if (error) {
-    throw new Error(`Failed to hard delete collection item: ${error.message}`);
-  }
-}
-
-=======
->>>>>>> upstream/main
 /**
  * Duplicate a collection item with its draft values
  * Creates a copy of the item with a new ID and modified values
@@ -1438,20 +1408,6 @@ export async function publishItem(id: string): Promise<CollectionItem> {
 
 }
 
-<<<<<<< HEAD
-/**
- * Get total count of collection items needing publishing across all collections.
- * Checks both metadata (manual_order) and value changes.
- */
-export async function getTotalPublishableItemsCount(): Promise<number> {
-  const tenantId = await resolveEffectiveTenantId();
-||||||| 6aee7960
-/**
- * Get total count of collection items needing publishing across all collections.
- * Checks both metadata (manual_order) and value changes.
- */
-export async function getTotalPublishableItemsCount(): Promise<number> {
-=======
 interface PublishableItemRef {
   id: string;
   collection_id: string;
@@ -1462,6 +1418,7 @@ async function fetchCollectionItemsForPublish(
   collectionIds: string[],
   isPublished: boolean
 ): Promise<Array<{ id: string; collection_id: string; manual_order: number }>> {
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
   if (!client) {
     throw new Error('Supabase client not configured');
@@ -1478,6 +1435,7 @@ async function fetchCollectionItemsForPublish(
       .eq('is_published', isPublished)
       .order('id', { ascending: true })
       .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
+    query = applyTenantEq(query, tenantId);
 
     if (!isPublished) {
       query = query.eq('is_publishable', true).is('deleted_at', null);
@@ -1499,7 +1457,7 @@ async function fetchCollectionItemsForPublish(
 }
 
 async function getPublishableItemRefs(): Promise<PublishableItemRef[]> {
->>>>>>> upstream/main
+  const tenantId = await resolveEffectiveTenantId();
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -1520,83 +1478,7 @@ async function getPublishableItemRefs(): Promise<PublishableItemRef[]> {
     return [];
   }
 
-<<<<<<< HEAD
-  const collectionIds = collections.map(c => c.id);
-
-  // Paginate both queries to avoid PostgREST's default 1000-row limit
-  const fetchAllItems = async (isPublished: boolean): Promise<Array<{ id: string; manual_order: number }>> => {
-    const tenantId = await resolveEffectiveTenantId();
-    const rows: Array<{ id: string; manual_order: number }> = [];
-    let offset = 0;
-
-    while (true) {
-      let query = client
-        .from('collection_items')
-        .select('id, manual_order')
-        .in('collection_id', collectionIds)
-        .eq('is_published', isPublished)
-        .order('id', { ascending: true })
-        .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
-      query = applyTenantEq(query, tenantId);
-
-      if (!isPublished) {
-        query = query.eq('is_publishable', true).is('deleted_at', null);
-      }
-
-      const { data, error } = await query;
-      if (error) {
-        throw new Error(`Failed to fetch ${isPublished ? 'published' : 'draft'} items: ${error.message}`);
-      }
-
-      const batch = data || [];
-      rows.push(...batch);
-
-      if (batch.length < SUPABASE_QUERY_LIMIT) break;
-      offset += SUPABASE_QUERY_LIMIT;
-    }
-
-    return rows;
-  };
-
-||||||| 6aee7960
-  const collectionIds = collections.map(c => c.id);
-
-  // Paginate both queries to avoid PostgREST's default 1000-row limit
-  const fetchAllItems = async (isPublished: boolean): Promise<Array<{ id: string; manual_order: number }>> => {
-    const rows: Array<{ id: string; manual_order: number }> = [];
-    let offset = 0;
-
-    while (true) {
-      let query = client
-        .from('collection_items')
-        .select('id, manual_order')
-        .in('collection_id', collectionIds)
-        .eq('is_published', isPublished)
-        .order('id', { ascending: true })
-        .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
-
-      if (!isPublished) {
-        query = query.eq('is_publishable', true).is('deleted_at', null);
-      }
-
-      const { data, error } = await query;
-      if (error) {
-        throw new Error(`Failed to fetch ${isPublished ? 'published' : 'draft'} items: ${error.message}`);
-      }
-
-      const batch = data || [];
-      rows.push(...batch);
-
-      if (batch.length < SUPABASE_QUERY_LIMIT) break;
-      offset += SUPABASE_QUERY_LIMIT;
-    }
-
-    return rows;
-  };
-
-=======
   const collectionIds = collections.map((collection) => collection.id);
->>>>>>> upstream/main
   const [draftItems, publishedItems] = await Promise.all([
     fetchCollectionItemsForPublish(collectionIds, false),
     fetchCollectionItemsForPublish(collectionIds, true),
