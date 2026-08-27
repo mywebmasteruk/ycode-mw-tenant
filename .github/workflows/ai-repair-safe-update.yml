@@ -274,10 +274,10 @@ jobs:
       - name: Create Copilot escalation request
         if: >-
           (
-            (steps.deterministic_repair.outputs.status == 'blocked' && (inputs.repair_mode != 'premium_ai' || !contains(fromJSON('["applied","content_replacement_applied"]'), steps.premium_repair.outputs.status)))
+            (steps.deterministic_repair.outputs.status == 'blocked' && (inputs.repair_mode != 'premium_ai' || !contains(fromJSON('["applied","content_replacement_applied","no_conflicts"]'), steps.premium_repair.outputs.status)))
             || (
               steps.deterministic_repair.outputs.status == 'failed'
-              && (inputs.mechanical_only == true || (inputs.repair_mode == 'autopilot' && steps.repair.outcome != 'success') || (inputs.repair_mode == 'premium_ai' && !contains(fromJSON('["applied","content_replacement_applied"]'), steps.premium_repair.outputs.status)))
+              && (inputs.mechanical_only == true || (inputs.repair_mode == 'autopilot' && steps.repair.outcome != 'success') || (inputs.repair_mode == 'premium_ai' && !contains(fromJSON('["applied","content_replacement_applied","no_conflicts"]'), steps.premium_repair.outputs.status)))
             )
           )
           && (
@@ -329,13 +329,13 @@ jobs:
 
       - name: Stop when repair remains blocked
         if: >-
-          (steps.deterministic_repair.outputs.status == 'blocked' && (inputs.repair_mode != 'premium_ai' || !contains(fromJSON('["applied","content_replacement_applied"]'), steps.premium_repair.outputs.status)))
+          (steps.deterministic_repair.outputs.status == 'blocked' && (inputs.repair_mode != 'premium_ai' || !contains(fromJSON('["applied","content_replacement_applied","no_conflicts"]'), steps.premium_repair.outputs.status)))
           || (
             steps.deterministic_repair.outputs.status == 'failed'
             && (
               inputs.mechanical_only == true
               || (inputs.repair_mode == 'autopilot' && steps.repair.outcome != 'success')
-              || (inputs.repair_mode == 'premium_ai' && !contains(fromJSON('["applied","content_replacement_applied"]'), steps.premium_repair.outputs.status))
+              || (inputs.repair_mode == 'premium_ai' && !contains(fromJSON('["applied","content_replacement_applied","no_conflicts"]'), steps.premium_repair.outputs.status))
             )
           )
         run: |
@@ -568,7 +568,7 @@ jobs:
               }
               body += '\n';
             }
-            if (deterministicStatus === 'blocked' && !(repairMode === 'premium_ai' && ['applied', 'content_replacement_applied'].includes(premiumStatus))) {
+            if (deterministicStatus === 'blocked' && !(repairMode === 'premium_ai' && ['applied', 'content_replacement_applied', 'no_conflicts'].includes(premiumStatus))) {
               body += premiumCheckpointed
                 ? 'Premium AI checkpointed individually safe files, but unresolved files remain. Review the checkpoint and repair artifacts for exact remaining blockers.\n'
                 : 'Autopilot blocked this update to protect tenant data and Premium AI did not leave an applied repair. Review the repair artifacts for exact missing invariants.\n';
